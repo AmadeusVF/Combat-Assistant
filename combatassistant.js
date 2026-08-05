@@ -4,7 +4,7 @@
  * @Project     Combat Assistant
  * @Description Lightweight Roll20 combat assistance extracted from T&T ideas.
  * @Author      AmadeusVF
- * @Version     1.0.0
+ * @Version     1.1.0
  * =========================================================
  *
  * Design goals:
@@ -15,6 +15,7 @@
  *   vulnerability, and native Roll20 saving throw results.
  *
  * Main command:
+ *   !ca menu
  *   !combatAssistant menu
  *   !combatAssistant config
  *   !combatAssistant set hpbar 1
@@ -36,10 +37,10 @@ const CombatAssistant = (() => {
         SHORT_NAME: 'CA',
         LOG_NAME: 'Combat Assistant',
         CHAT_NAME: 'Combat Assistant',
-        VERSION: '1.0.0',
+        VERSION: '1.1.0',
+        SCHEMA_VERSION: 3,
         STATE_KEY: 'COMBAT_ASSISTANT',
         LEGACY_STATE_KEY: 'COMBAT_TRACKER',
-        SCHEMA_VERSION: 1
     });
 
     const COMMANDS = Object.freeze([
@@ -50,10 +51,32 @@ const CombatAssistant = (() => {
 
     const PLAYER_ALLOWED_ACTIONS = Object.freeze({
         use: true,
+        usearea: true,
+        conc: true,
+        conend: true,
+        cleanupbatch: true,
+        rollsave: true,
         rollinit: true
     });
 
-    const INITIATIVE_BATCH_TIMERS = {};
+    const INITIATIVE_BATCH_TIMERS = Object.create(null);
+    const INITIATIVE_AUTO_WATCHDOGS = Object.create(null);
+    const INITIATIVE_AUTO_COMPLETIONS = Object.create(null);
+    const TOKEN_MUTATION_QUEUES = Object.create(null);
+    const NATIVE_SAVE_CAPTURE_BUFFER = {
+        timer: null,
+        rolls: []
+    };
+    let STATE_INITIALIZED = false;
+    let AREA_MARKER_GROUP_SYNC_ACTIVE = false;
+    let AREA_MARKER_DESTROY_ACTIVE = false;
+    const RUNTIME_CLEANUP_INTERVAL_MS = 15 * 1000;
+    const PLAYER_ACTION_RESERVATION_MS = 30 * 1000;
+    const PLAYER_ACTION_TTL_MS = 10 * 60 * 1000;
+    const NATIVE_ROLL_TTL_MS = 2 * 60 * 1000;
+    const RECENT_ATTACK_TTL_MS = 60 * 1000;
+    const MAX_PAYLOAD_LENGTH = 25000;
+    let LAST_RUNTIME_CLEANUP_AT = 0;
     let SCRIPT_ACTIVE = false;
 
     /** -----------------------------------------------------------------------
@@ -80,10 +103,10 @@ const CombatAssistant = (() => {
 
     const DAMAGE_TYPE_COLORS = Object.freeze({
         normal: 'rgb(220, 45, 45)',
-        bludgeoning: 'rgb(135, 35, 35)',
-        slashing: 'rgb(135, 35, 35)',
-        piercing: 'rgb(135, 35, 35)',
-        fire: 'rgb(215, 55, 40)',
+        bludgeoning: 'rgb(200, 65, 65)',
+        slashing: 'rgb(200, 65, 65)',
+        piercing: 'rgb(200, 65, 65)',
+        fire: 'rgb(235, 20, 0)',
         acid: 'rgb(115, 230, 95)',
         poison: 'rgb(134, 38, 244)',
         cold: 'rgb(49, 87, 239)',
@@ -98,22 +121,22 @@ const CombatAssistant = (() => {
     });
 
     const DAMAGE_TYPE_ICONS = Object.freeze({
-        normal: '💫',
-        acid: '🧪',
-        bludgeoning: '💢',
-        cold: '❄️',
-        fire: '🔥',
-        force: '🌀',
-        lightning: '⚡',
-        necrotic: '💀',
-        piercing: '🗡️',
-        poison: '☠️',
-        psychic: '🪬',
-        radiant: '🌟',
-        slashing: 'ノ',
-        thunder: '🌩️',
-        healing: '💚',
-        'temp healing': '💗'
+        normal: '&#128171;',
+        acid: '&#129514;',
+        bludgeoning: '&#128162;',
+        cold: '&#10052;&#65039;',
+        fire: '&#128293;',
+        force: '&#127744;',
+        lightning: '&#9889;',
+        necrotic: '&#128128;',
+        piercing: '&#128481;&#65039;',
+        poison: '&#9760;&#65039;',
+        psychic: '&#129708;',
+        radiant: '&#127775;',
+        slashing: '&#9585;',
+        thunder: '&#127785;&#65039;',
+        healing: '&#128154;',
+        'temp healing': '&#128151;'
     });
 
     const ABILITIES = Object.freeze({
@@ -170,9 +193,21 @@ const CombatAssistant = (() => {
     const RUNTIME_CONFIG_DEFAULTS = Object.freeze({
         DEBUG: false,
         CHAT_TRACKING: true,
+        CONCENTRATION_TRACKING: true,
         CHAT_PROBE: false,
         PLAYER_ATTACK_BUTTON: false,
+        COMBAT_VISUAL_EFFECTS: false,
+        PROJECTILE_EFFECT_NAME: 'missile',
+        DIRECT_HIT_EFFECT_NAME: 'bomb',
+        AREA_HIT_EFFECT_NAME: 'burn',
         PLAYER_HEALING_BUTTON: false,
+        PLAYER_ACTION_RANGE_CHECK: false,
+        PLAYER_TOKEN_AREA_MARK: false,
+        PLAYER_AREA_MARKER_KEEP_UNTIL_ROLLED: false,
+        AREA_MARKER_FREE_MOVEMENT: true,
+        PLAYER_MARKER_SQUARE_URL: 'https://files.d20.io/images/495780883/qX3WMFpR8BUE_jjRkt9ahA/med.webm',
+        PLAYER_MARKER_RADIUS_URL: 'https://files.d20.io/images/495578323/tBnLEPGE1GdLdoyQt2FyrQ/med.webm',
+        PLAYER_MARKER_OPACITY: 60,
         PLAYER_MANUAL_ROLL: false,
         CA_ROLLS_INITIATIVE: false,
         SHEET_2014_CA_ROLLS: false,
@@ -180,30 +215,141 @@ const CombatAssistant = (() => {
         AC_BAR: 2,
         TEMP_HP_BAR: 3,
         DAMAGE_ROUND_UP: true,
+        REQUIRE_AC_FOR_ATTACK: true,
         USE_SHEET_DAMAGE_TRAITS: true,
         REVEAL_DAMAGE_SOURCE: true,
+        REVEAL_TOKEN_NAMES_IN_LOG: true,
         HIDE_TOKEN_NAMES_IN_LOG: false,
+        AREA_RADIUS_DEBUG_DRAW: false,
         CHAT_BACKGROUND_IMAGE_URL: DEFAULT_CARD_CONFIG.bodyImageUrl
     });
 
     const RUNTIME_CONFIG_FIELDS = Object.freeze([
+        { type: 'section', label: 'Main' },
         { key: 'CHAT_TRACKING', label: 'Chat Tracking', type: 'boolean', tip: 'Read Roll20 attack, damage, and healing rolls.' },
+        { key: 'CONCENTRATION_TRACKING', label: 'Concentration Tracking', type: 'boolean', tip: 'Track concentration spells, keep their area markers active, and request concentration saves when the caster takes damage.' },
         { key: 'CA_ROLLS_INITIATIVE', label: '2024 Combat Assistant Rolls Initiative', type: 'boolean', tip: 'Combat Assistant rolls initiative from sheet data and writes the turn order directly.' },
-        { key: 'SHEET_2014_CA_ROLLS', label: '2014 Combat Assistance Rolls', type: 'boolean', tip: 'OFF uses Roll20 buttons for 2014 NPC saving throws and initiative. ON rolls 2014 NPC saving throws and initiative with Combat Assistant after asking normal, advantage, or disadvantage.' },
-        { key: 'PLAYER_MANUAL_ROLL', label: 'Player Manual Roll', type: 'boolean', tip: 'Ask player-controlled tokens to roll their own saving throws.' },
-        { key: 'PLAYER_ATTACK_BUTTON', label: 'Player Attack Button', type: 'boolean', tip: 'When possible, captured attack buttons are whispered to the controlling player, allowing them to select a target, resolve the attack against its AC, and automatically apply damage.' },
-        { key: 'PLAYER_HEALING_BUTTON', label: 'Player Healing Button', type: 'boolean', tip: 'When possible, captured healing buttons are whispered to the controlling player, allowing them to select a target apply healing.' },
+        { key: 'SHEET_2014_CA_ROLLS', label: '2014 Combat Assistant Rolls', type: 'boolean', tip: 'OFF uses Roll20 buttons for 2014 NPC saving throws and initiative. ON rolls 2014 NPC saving throws and initiative with Combat Assistant after asking normal, advantage, or disadvantage.' },
         { key: 'HP_BAR', label: 'HP Bar', type: 'bar', tip: 'Token bar used for hit points.' },
         { key: 'AC_BAR', label: 'AC Bar', type: 'bar', tip: 'Token bar used for armor class.' },
         { key: 'TEMP_HP_BAR', label: 'Temp HP Bar', type: 'bar0', tip: 'Token bar used for temporary HP. Use 0 to disable.' },
         { key: 'DAMAGE_ROUND_UP', label: 'Damage Round Up', type: 'boolean', tip: 'Round halved damage up instead of down.' },
+        //{ key: 'REQUIRE_AC_FOR_ATTACK', label: 'Require AC for Attack', type: 'boolean', tip: 'Block automatic attack resolution when the configured AC bar is empty or zero.' },
         { key: 'USE_SHEET_DAMAGE_TRAITS', label: 'Read Sheet Resistances', type: 'boolean', tip: 'Read Roll20 sheet damage resistances, immunities, and vulnerabilities.' },
-        { key: 'REVEAL_DAMAGE_SOURCE', label: 'Reveal Damage Source', type: 'boolean', tip: 'Show who caused damage and which attack or spell caused it.' },
-        { key: 'HIDE_TOKEN_NAMES_IN_LOG', label: "Hide Token's Names in Log", type: 'boolean', tip: 'Use generic Target and Attacker labels in public combat logs while keeping token icons in the title.' },
+        { key: 'REVEAL_DAMAGE_SOURCE', label: 'Reveal Damage Source in Log', type: 'boolean', tip: 'Show who caused damage and which attack or spell caused it.' },
+        { key: 'REVEAL_TOKEN_NAMES_IN_LOG', label: 'Reveal Token Names in Log', type: 'boolean', tip: 'Show token names in public combat logs. OFF uses generic Target and Attacker labels.' },
+        { type: 'section', label: 'Players' },
+        { key: 'PLAYER_MANUAL_ROLL', label: 'Player Manual Roll', type: 'boolean', tip: 'Ask player-controlled tokens to make their own saving throws and initiative rolls when Roll20 can expose a usable sheet button.' },
+        { key: 'PLAYER_HEALING_BUTTON', label: 'Player Healing Button', type: 'boolean', tip: 'When possible, captured healing buttons are whispered to the controlling player, allowing them to select a target and apply healing.' },
+        { key: 'PLAYER_ATTACK_BUTTON', label: 'Player Attack Button', type: 'boolean', tip: 'When possible, captured attack buttons are whispered to the controlling player, allowing them to select a target, resolve the attack against its AC, and automatically apply damage.' },
+        { key: 'PLAYER_ACTION_RANGE_CHECK', label: 'Player Target Range Check', type: 'boolean', tip: 'For generated player spell buttons, measure the spell range from the caster token to the chosen target before applying healing or damage.' },
+        { key: 'PLAYER_TOKEN_AREA_MARK', label: 'Player Token Area Mark', type: 'boolean', tip: 'For generated player area spell buttons, spawn a movable area marker token and resolve all tokens inside it when the player presses Roll.' },
+        { type: 'section', label: 'Effects' },
+        { key: 'PLAYER_AREA_MARKER_KEEP_UNTIL_ROLLED', label: 'Keep Marker Until Rolls Finish', type: 'boolean', tip: 'When an area marker triggers saving throws, keep the marker visible until every affected token has resolved its roll and damage.' },
+        { key: 'AREA_MARKER_FREE_MOVEMENT', label: 'Marker Free Movement', type: 'boolean', tip: 'ON lets area markers move freely. OFF snaps area markers to the Roll20 grid when they are moved.' },
+        { key: 'PLAYER_MARKER_SQUARE_URL', label: 'Square Marker Roll20 URL', type: 'roll20image', tip: 'Roll20 uploaded image URL used for square, cube, cone, or line player area markers.' },
+        { key: 'PLAYER_MARKER_RADIUS_URL', label: 'Radius Marker Roll20 URL', type: 'roll20image', tip: 'Roll20 uploaded image URL used for radius, sphere, cylinder, or emanation player area markers.' },
+        { key: 'PLAYER_MARKER_OPACITY', label: 'Marker Opacity', type: 'percent', tip: 'Opacity percentage for player area marker tokens.' },
+        { key: 'COMBAT_VISUAL_EFFECTS', label: 'Combat Visual Effects', type: 'boolean', tip: 'Show automatic Roll20 FX when Combat Assistant applies damage, healing, temporary HP, projectile attacks, or area spells.' },
+        { key: 'PROJECTILE_EFFECT_NAME', label: 'Projectile Effect Name', type: 'text', tip: 'Optional built-in or Custom FX name used from the attacker to the selected target for ranged projectile attacks. Leave empty to disable projectile FX.' },
+        { key: 'DIRECT_HIT_EFFECT_NAME', label: 'Direct Hit Effect Name', type: 'text', tip: 'Built-in base effect or exact Custom FX name used when damage is applied without a saving throw. Built-in effects use the blood color. Leave empty to disable.' },
+        { key: 'AREA_HIT_EFFECT_NAME', label: 'Area Hit Effect Name', type: 'text', tip: 'Built-in base effect or exact Custom FX name used when damage is applied through a saving throw. Built-in effects use the damage type color. Leave empty to disable.' },
+        { type: 'section', label: 'Extra' },
         { key: 'DEBUG', label: 'Debug', type: 'boolean', tip: 'Log debug information in the Roll20 API console.' },
-        { key: 'CHAT_BACKGROUND_IMAGE_URL', label: 'Chat Background Image URL', type: 'text', tip: 'Background image used by Combat Assistant cards.' },
+        //{ key: 'AREA_RADIUS_DEBUG_DRAW', label: 'Area Radius Debug Draw', type: 'boolean', tip: 'Draw temporary GM-only reference circles when resolving radius, sphere, cylinder, or emanation area markers.' },
+        { key: 'CHAT_BACKGROUND_IMAGE_URL', label: 'Change Background URL', type: 'text', tip: 'Background image used by Combat Assistant cards.' },
         //{ key: 'CHAT_PROBE', label: 'Chat Probe', type: 'boolean', tip: 'Whisper raw Roll20 chat message dumps to the GM for parser testing.' },
     ]);
+
+
+    const RUNTIME_CONFIG_ALIASES = Object.freeze({
+                HPBAR: 'HP_BAR',
+                HP_BAR: 'HP_BAR',
+                ACBAR: 'AC_BAR',
+                AC_BAR: 'AC_BAR',
+                TEMPBAR: 'TEMP_HP_BAR',
+                TEMP_BAR: 'TEMP_HP_BAR',
+                TEMP_HP: 'TEMP_HP_BAR',
+                TEMP_HP_BAR: 'TEMP_HP_BAR',
+                CHAT: 'CHAT_TRACKING',
+                CHATTRACKING: 'CHAT_TRACKING',
+                CHAT_TRACKING: 'CHAT_TRACKING',
+                CONC: 'CONCENTRATION_TRACKING',
+                CONCENTRATION: 'CONCENTRATION_TRACKING',
+                CONCENTRATION_TRACKING: 'CONCENTRATION_TRACKING',
+                PROBE: 'CHAT_PROBE',
+                CHAT_PROBE: 'CHAT_PROBE',
+                ROUNDUP: 'DAMAGE_ROUND_UP',
+                DAMAGE_ROUND_UP: 'DAMAGE_ROUND_UP',
+                REQUIRE_AC: 'REQUIRE_AC_FOR_ATTACK',
+                REQUIRE_AC_FOR_ATTACK: 'REQUIRE_AC_FOR_ATTACK',
+                SHEET_TRAITS: 'USE_SHEET_DAMAGE_TRAITS',
+                USE_SHEET_DAMAGE_TRAITS: 'USE_SHEET_DAMAGE_TRAITS',
+                PLAYER_COMBAT: 'PLAYER_ATTACK_BUTTON',
+                PLAYER_ATTACK_BUTTON: 'PLAYER_ATTACK_BUTTON',
+                FX: 'COMBAT_VISUAL_EFFECTS',
+                EFFECTS: 'COMBAT_VISUAL_EFFECTS',
+                COMBAT_FX: 'COMBAT_VISUAL_EFFECTS',
+                VISUAL_EFFECTS: 'COMBAT_VISUAL_EFFECTS',
+                COMBAT_VISUAL_EFFECTS: 'COMBAT_VISUAL_EFFECTS',
+                PROJECTILE: 'PROJECTILE_EFFECT_NAME',
+                PROJECTILE_FX: 'PROJECTILE_EFFECT_NAME',
+                PROJECTILE_EFFECT: 'PROJECTILE_EFFECT_NAME',
+                PROJECTILE_EFFECT_NAME: 'PROJECTILE_EFFECT_NAME',
+                DIRECT_HIT: 'DIRECT_HIT_EFFECT_NAME',
+                DIRECT_HIT_FX: 'DIRECT_HIT_EFFECT_NAME',
+                DIRECT_HIT_EFFECT: 'DIRECT_HIT_EFFECT_NAME',
+                DIRECT_HIT_EFFECT_NAME: 'DIRECT_HIT_EFFECT_NAME',
+                AREA_HIT: 'AREA_HIT_EFFECT_NAME',
+                AREA_HIT_FX: 'AREA_HIT_EFFECT_NAME',
+                AREA_HIT_EFFECT: 'AREA_HIT_EFFECT_NAME',
+                AREA_HIT_EFFECT_NAME: 'AREA_HIT_EFFECT_NAME',
+                PLAYER_HEALTH: 'PLAYER_HEALING_BUTTON',
+                PLAYER_HEALING_BUTTON: 'PLAYER_HEALING_BUTTON',
+                PLAYER_RANGE: 'PLAYER_ACTION_RANGE_CHECK',
+                PLAYER_TARGET_RANGE: 'PLAYER_ACTION_RANGE_CHECK',
+                PLAYER_TARGET_RANGE_CHECK: 'PLAYER_ACTION_RANGE_CHECK',
+                PLAYER_ACTION_RANGE_CHECK: 'PLAYER_ACTION_RANGE_CHECK',
+                PLAYER_AREA_MARK: 'PLAYER_TOKEN_AREA_MARK',
+                PLAYER_TOKEN_AREA_MARK: 'PLAYER_TOKEN_AREA_MARK',
+                PLAYER_AREA_MARKER_KEEP: 'PLAYER_AREA_MARKER_KEEP_UNTIL_ROLLED',
+                PLAYER_AREA_MARKER_KEEP_UNTIL_ROLLED: 'PLAYER_AREA_MARKER_KEEP_UNTIL_ROLLED',
+                PLAYER_AREA_MARKER_UNTIL_ROLLS: 'PLAYER_AREA_MARKER_KEEP_UNTIL_ROLLED',
+                KEEP_AREA_MARKER_UNTIL_ROLLS: 'PLAYER_AREA_MARKER_KEEP_UNTIL_ROLLED',
+                MARKER_FREE: 'AREA_MARKER_FREE_MOVEMENT',
+                MARKER_FREE_MOVEMENT: 'AREA_MARKER_FREE_MOVEMENT',
+                AREA_MARKER_FREE: 'AREA_MARKER_FREE_MOVEMENT',
+                AREA_MARKER_FREE_MOVEMENT: 'AREA_MARKER_FREE_MOVEMENT',
+                PLAYER_MARKER_SQUARE: 'PLAYER_MARKER_SQUARE_URL',
+                PLAYER_MARKER_SQUARE_URL: 'PLAYER_MARKER_SQUARE_URL',
+                PLAYER_MARKER_RADIUS: 'PLAYER_MARKER_RADIUS_URL',
+                PLAYER_MARKER_RADIUS_URL: 'PLAYER_MARKER_RADIUS_URL',
+                PLAYER_MARKER_OPACITY: 'PLAYER_MARKER_OPACITY',
+                PLAYER_TOKEN_MARK_OPACITY: 'PLAYER_MARKER_OPACITY',
+                PLAYER_TOKEN_MARKER_OPACITY: 'PLAYER_MARKER_OPACITY',
+                PLAYER_MANUAL: 'PLAYER_MANUAL_ROLL',
+                PLAYER_MANUAL_ROLL: 'PLAYER_MANUAL_ROLL',
+                MANUAL_ROLL: 'PLAYER_MANUAL_ROLL',
+                AREA_RADIUS_DEBUG: 'AREA_RADIUS_DEBUG_DRAW',
+                AREA_RADIUS_DEBUG_DRAW: 'AREA_RADIUS_DEBUG_DRAW',
+                AREA_DEBUG_DRAW: 'AREA_RADIUS_DEBUG_DRAW',
+                RADIUS_DEBUG_DRAW: 'AREA_RADIUS_DEBUG_DRAW',
+                CA2014: 'SHEET_2014_CA_ROLLS',
+                '2014': 'SHEET_2014_CA_ROLLS',
+                '2014_CA': 'SHEET_2014_CA_ROLLS',
+                '2014_CA_ROLLS': 'SHEET_2014_CA_ROLLS',
+                SHEET_2014_CA_ROLLS: 'SHEET_2014_CA_ROLLS',
+                REVEAL_NAMES: 'REVEAL_TOKEN_NAMES_IN_LOG',
+                REVEAL_TOKEN_NAMES: 'REVEAL_TOKEN_NAMES_IN_LOG',
+                REVEAL_TOKEN_NAMES_IN_LOG: 'REVEAL_TOKEN_NAMES_IN_LOG',
+                HIDE_NAMES: 'HIDE_TOKEN_NAMES_IN_LOG',
+                HIDE_TOKEN_NAMES: 'HIDE_TOKEN_NAMES_IN_LOG',
+                HIDE_TOKEN_NAMES_IN_LOG: 'HIDE_TOKEN_NAMES_IN_LOG',
+                BG: 'CHAT_BACKGROUND_IMAGE_URL',
+                BACKGROUND: 'CHAT_BACKGROUND_IMAGE_URL',
+                CHAT_BACKGROUND_IMAGE_URL: 'CHAT_BACKGROUND_IMAGE_URL',
+                DEBUG: 'DEBUG'
+    });
 
     /** -----------------------------------------------------------------------
      * State
@@ -219,35 +365,50 @@ const CombatAssistant = (() => {
                 pendingNativeInitiatives: {},
                 pendingNativeInitiativeBatches: {},
                 pendingNativeInitiativeSeq: 0,
-                playerActionRequests: {}
+                playerActionRequests: {},
+                concentration: {},
+                helperCharacterId: ''
             };
         },
 
+        isRecord(value) {
+            return !!value && typeof value === 'object' && !Array.isArray(value);
+        },
+
         ensure() {
-            if (!state[META.STATE_KEY] && META.LEGACY_STATE_KEY && state[META.LEGACY_STATE_KEY]) {
+            if (!this.isRecord(state[META.STATE_KEY]) && META.LEGACY_STATE_KEY && this.isRecord(state[META.LEGACY_STATE_KEY])) {
                 state[META.STATE_KEY] = state[META.LEGACY_STATE_KEY];
             }
-            state[META.STATE_KEY] = state[META.STATE_KEY] || this.defaults();
-            this.migrate();
+            if (!this.isRecord(state[META.STATE_KEY])) {
+                state[META.STATE_KEY] = this.defaults();
+                STATE_INITIALIZED = false;
+            }
+            if (!STATE_INITIALIZED || state[META.STATE_KEY].schemaVersion !== META.SCHEMA_VERSION) {
+                this.migrate();
+                STATE_INITIALIZED = true;
+            }
             return state[META.STATE_KEY];
         },
 
         migrate() {
-            const root = state[META.STATE_KEY];
-            root.schemaVersion = root.schemaVersion || 1;
-            root.settings = root.settings || {};
+            const root = this.isRecord(state[META.STATE_KEY]) ? state[META.STATE_KEY] : this.defaults();
+            state[META.STATE_KEY] = root;
+            root.schemaVersion = Math.max(1, Utils.toInt(root.schemaVersion, 1));
+            root.settings = this.isRecord(root.settings) ? root.settings : {};
             Object.keys(RUNTIME_CONFIG_DEFAULTS).forEach((key) => {
                 if (!Object.prototype.hasOwnProperty.call(root.settings, key)) {
                     root.settings[key] = RUNTIME_CONFIG_DEFAULTS[key];
                 }
             });
-            root.recentAttacks = root.recentAttacks || {};
+            root.recentAttacks = this.isRecord(root.recentAttacks) ? root.recentAttacks : {};
             root.recentAttackQueue = Array.isArray(root.recentAttackQueue) ? root.recentAttackQueue : [];
-            root.pendingNativeSaves = root.pendingNativeSaves || {};
-            root.pendingNativeInitiatives = root.pendingNativeInitiatives || {};
-            root.pendingNativeInitiativeBatches = root.pendingNativeInitiativeBatches || {};
+            root.pendingNativeSaves = this.isRecord(root.pendingNativeSaves) ? root.pendingNativeSaves : {};
+            root.pendingNativeInitiatives = this.isRecord(root.pendingNativeInitiatives) ? root.pendingNativeInitiatives : {};
+            root.pendingNativeInitiativeBatches = this.isRecord(root.pendingNativeInitiativeBatches) ? root.pendingNativeInitiativeBatches : {};
             root.pendingNativeInitiativeSeq = Math.max(0, Utils.toInt(root.pendingNativeInitiativeSeq, 0));
-            root.playerActionRequests = root.playerActionRequests || {};
+            root.playerActionRequests = this.isRecord(root.playerActionRequests) ? root.playerActionRequests : {};
+            root.concentration = this.isRecord(root.concentration) ? root.concentration : {};
+            root.helperCharacterId = String(root.helperCharacterId || '').trim();
             root.schemaVersion = META.SCHEMA_VERSION;
         },
 
@@ -260,9 +421,14 @@ const CombatAssistant = (() => {
             root.playerActionRequests = root.playerActionRequests || {};
             this.cleanupPlayerActionRequests();
             const id = 'pa_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
+            const requestedUses = Math.max(1, Utils.toInt(data && data.uses, 1));
             root.playerActionRequests[id] = Object.assign({}, data || {}, {
                 id,
                 createdAt: Date.now(),
+                uses: requestedUses,
+                remainingUses: requestedUses,
+                usedTargetIds: [],
+                reservations: {},
                 used: false
             });
             return id;
@@ -275,68 +441,327 @@ const CombatAssistant = (() => {
             return safeId ? (root.playerActionRequests[safeId] || null) : null;
         },
 
-        markPlayerActionUsed(id) {
+        cleanupPlayerActionReservations(request) {
+            if (!request) return;
+            const now = Date.now();
+            request.reservations = request.reservations && typeof request.reservations === 'object' ? request.reservations : {};
+            Object.keys(request.reservations).forEach((key) => {
+                const createdAt = Number(request.reservations[key] || 0);
+                if (!createdAt || now - createdAt > PLAYER_ACTION_RESERVATION_MS) delete request.reservations[key];
+            });
+        },
+
+        reservePlayerAction(id, targetId) {
             const request = this.getPlayerActionRequest(id);
             if (!request || request.used) return false;
-            request.used = true;
+            this.cleanupPlayerActionReservations(request);
+            const safeTargetId = String(targetId || '__action__').trim() || '__action__';
+            request.usedTargetIds = Array.isArray(request.usedTargetIds) ? request.usedTargetIds : [];
+            if (request.usedTargetIds.indexOf(safeTargetId) >= 0 || request.reservations[safeTargetId]) return false;
+            const remaining = Math.max(0, Utils.toInt(request.remainingUses, Utils.toInt(request.uses, 1)));
+            if (remaining <= Object.keys(request.reservations).length) return false;
+            request.reservations[safeTargetId] = Date.now();
+            return true;
+        },
+
+        commitPlayerAction(id, targetId) {
+            const request = this.getPlayerActionRequest(id);
+            if (!request || request.used) return false;
+            this.cleanupPlayerActionReservations(request);
+            const safeTargetId = String(targetId || '__action__').trim() || '__action__';
+            if (!request.reservations[safeTargetId]) return false;
+            delete request.reservations[safeTargetId];
+            request.usedTargetIds = Array.isArray(request.usedTargetIds) ? request.usedTargetIds : [];
+            if (request.usedTargetIds.indexOf(safeTargetId) < 0) request.usedTargetIds.push(safeTargetId);
+            const remaining = Math.max(1, Utils.toInt(request.remainingUses, Utils.toInt(request.uses, 1)));
+            request.remainingUses = Math.max(0, remaining - 1);
+            if (request.remainingUses <= 0) request.used = true;
             request.usedAt = Date.now();
             return true;
         },
 
-        cleanupPlayerActionRequests() {
+        releasePlayerAction(id, targetId) {
+            const request = this.getPlayerActionRequest(id);
+            if (!request) return false;
+            const safeTargetId = String(targetId || '__action__').trim() || '__action__';
+            request.reservations = request.reservations && typeof request.reservations === 'object' ? request.reservations : {};
+            if (!request.reservations[safeTargetId]) return false;
+            delete request.reservations[safeTargetId];
+            return true;
+        },
+
+        markPlayerActionUsed(id) {
+            const key = '__legacy__';
+            return this.reservePlayerAction(id, key) && this.commitPlayerAction(id, key);
+        },
+
+        markPlayerActionTargetUsed(id, targetId) {
+            const request = this.getPlayerActionRequest(id);
+            if (!request || request.used) return false;
+            const safeTargetId = String(targetId || '').trim();
+            request.usedTargetIds = Array.isArray(request.usedTargetIds) ? request.usedTargetIds : [];
+            if (safeTargetId && request.usedTargetIds.indexOf(safeTargetId) < 0) request.usedTargetIds.push(safeTargetId);
+            return true;
+        },
+
+        setConcentration(entry) {
+            const root = this.get();
+            root.concentration = root.concentration || {};
+            const safeTokenId = String(entry && entry.casterTokenId || '').trim();
+            if (!safeTokenId) return false;
+            root.concentration[safeTokenId] = Object.assign({}, entry || {}, {
+                casterTokenId: safeTokenId,
+                startedAt: Date.now()
+            });
+            return true;
+        },
+
+        getConcentrationByTokenId(tokenId) {
+            const root = this.get();
+            root.concentration = root.concentration || {};
+            return root.concentration[String(tokenId || '').trim()] || null;
+        },
+
+        getConcentrationByActionId(actionId) {
+            const root = this.get();
+            root.concentration = root.concentration || {};
+            const safeActionId = String(actionId || '').trim();
+            if (!safeActionId) return null;
+            const tokenIds = Object.keys(root.concentration);
+            for (let i = 0; i < tokenIds.length; i += 1) {
+                const entry = root.concentration[tokenIds[i]] || {};
+                if (String(entry.actionId || '').trim() === safeActionId) return entry;
+            }
+            return null;
+        },
+
+        removeConcentrationByTokenId(tokenId) {
+            const root = this.get();
+            root.concentration = root.concentration || {};
+            const safeTokenId = String(tokenId || '').trim();
+            if (!safeTokenId || !root.concentration[safeTokenId]) return null;
+            const entry = root.concentration[safeTokenId];
+            delete root.concentration[safeTokenId];
+            return entry;
+        },
+
+        reconcilePersistentState() {
+            const root = this.get();
+            root.concentration = this.isRecord(root.concentration) ? root.concentration : {};
+            root.playerActionRequests = this.isRecord(root.playerActionRequests) ? root.playerActionRequests : {};
+            const activeActionIds = Object.create(null);
+
+            Object.keys(root.concentration).forEach((tokenId) => {
+                const entry = root.concentration[tokenId] || {};
+                const casterTokenId = String(entry.casterTokenId || tokenId || '').trim();
+                const actionId = String(entry.actionId || '').trim();
+                const tokenExists = casterTokenId && typeof R20 !== 'undefined' && !!R20.getTokenById(casterTokenId);
+                const request = actionId ? root.playerActionRequests[actionId] : null;
+                if (tokenExists && request) {
+                    activeActionIds[actionId] = true;
+                    return;
+                }
+                if (request) {
+                    this.removePlayerActionMarkers(request);
+                    delete root.playerActionRequests[actionId];
+                }
+                delete root.concentration[tokenId];
+            });
+
+            Object.keys(root.playerActionRequests).forEach((actionId) => {
+                const request = root.playerActionRequests[actionId] || {};
+                if (!request.concentrationAreaActive || activeActionIds[actionId]) return;
+                this.removePlayerActionMarkers(request);
+                delete root.playerActionRequests[actionId];
+            });
+            return true;
+        },
+
+        beginPersistentAreaMarkerResolution(id, targetIds) {
+            const request = this.getPlayerActionRequest(id);
+            if (!request) return false;
+            const ids = Utils.uniqueNames((Array.isArray(targetIds) ? targetIds : [])
+                .map((targetId) => String(targetId || '').trim())
+                .filter(Boolean));
+            request.areaMarkerKeepUntilRolled = true;
+            request.areaResolutionActive = true;
+            request.areaTargetIds = ids;
+            request.areaPendingTargetIds = ids.slice();
+            request.areaCompletedTargetIds = [];
+            request.used = true;
+            request.usedAt = Date.now();
+            request.reservations = {};
+            return ids.length > 0;
+        },
+
+        completePersistentAreaMarkerTarget(id, targetId) {
+            const request = this.getPlayerActionRequest(id);
+            const safeTargetId = String(targetId || '').trim();
+            if (!request || !request.areaMarkerKeepUntilRolled || !safeTargetId) return false;
+            request.areaCompletedTargetIds = Array.isArray(request.areaCompletedTargetIds) ? request.areaCompletedTargetIds : [];
+            request.areaPendingTargetIds = Array.isArray(request.areaPendingTargetIds) ? request.areaPendingTargetIds : [];
+            if (request.areaCompletedTargetIds.indexOf(safeTargetId) < 0) request.areaCompletedTargetIds.push(safeTargetId);
+            request.areaPendingTargetIds = request.areaPendingTargetIds.filter((idValue) => String(idValue || '').trim() !== safeTargetId);
+            if (request.areaPendingTargetIds.length > 0) return false;
+            this.removePersistentAreaMarkerRequest(id);
+            return true;
+        },
+
+        removePersistentAreaMarkerRequest(id) {
             const root = this.get();
             root.playerActionRequests = root.playerActionRequests || {};
-            const now = Date.now();
+            const request = root.playerActionRequests[String(id || '').trim()];
+            if (!request) return false;
+            this.removePlayerActionMarkers(request);
+            delete root.playerActionRequests[String(id || '').trim()];
+            return true;
+        },
+
+        getPlayerActionMarkerIds(entry) {
+            const ids = [];
+            const addId = (markerId) => {
+                const safeId = String(markerId || '').trim();
+                if (safeId && ids.indexOf(safeId) < 0) ids.push(safeId);
+            };
+            if (entry && Array.isArray(entry.markerTokenIds)) entry.markerTokenIds.forEach(addId);
+            addId(entry && entry.markerTokenId);
+            const alternatives = entry && Array.isArray(entry.areaMarkerAlternatives) ? entry.areaMarkerAlternatives : [];
+            alternatives.forEach((alternative) => {
+                if (!alternative || alternative.dismissed) return;
+                if (Array.isArray(alternative.markerTokenIds)) alternative.markerTokenIds.forEach(addId);
+                addId(alternative.markerTokenId);
+            });
+            return ids;
+        },
+
+        removePlayerActionMarkers(entry) {
+            if (typeof R20 === 'undefined') return false;
+            let removed = false;
+            AREA_MARKER_DESTROY_ACTIVE = true;
+            try {
+                this.getPlayerActionMarkerIds(entry).forEach((markerId) => {
+                    const marker = R20.getTokenById(markerId);
+                    if (marker && R20.removeGraphic(marker)) removed = true;
+                });
+            } finally {
+                AREA_MARKER_DESTROY_ACTIVE = false;
+            }
+            return removed;
+        },
+
+        findAreaMarkerGroupByTokenId(tokenId) {
+            const found = this.findAreaMarkerRequestByTokenId(tokenId);
+            return found && found.group ? found : null;
+        },
+
+        findAreaMarkerRequestByTokenId(tokenId) {
+            const safeTokenId = String(tokenId || '').trim();
+            if (!safeTokenId) return null;
+            const root = this.get();
+            root.playerActionRequests = root.playerActionRequests || {};
+            const requestIds = Object.keys(root.playerActionRequests);
+            for (let i = 0; i < requestIds.length; i += 1) {
+                const request = root.playerActionRequests[requestIds[i]] || {};
+                const alternatives = Array.isArray(request.areaMarkerAlternatives) ? request.areaMarkerAlternatives : [];
+                for (let a = 0; a < alternatives.length; a += 1) {
+                    const alternative = alternatives[a] || {};
+                    const ids = [];
+                    if (Array.isArray(alternative.markerTokenIds)) ids.push.apply(ids, alternative.markerTokenIds);
+                    if (alternative.markerTokenId) ids.push(alternative.markerTokenId);
+                    if (ids.map((id) => String(id || '').trim()).indexOf(safeTokenId) >= 0) {
+                        return {
+                            requestId: requestIds[i],
+                            request,
+                            alternative,
+                            group: alternative.markerGroup || null
+                        };
+                    }
+                }
+                const markerIds = [];
+                if (Array.isArray(request.markerTokenIds)) markerIds.push.apply(markerIds, request.markerTokenIds);
+                if (request.markerTokenId) markerIds.push(request.markerTokenId);
+                if (markerIds.map((id) => String(id || '').trim()).indexOf(safeTokenId) >= 0) {
+                    return { requestId: requestIds[i], request, alternative: null, group: request.areaMarkerGroup || null };
+                }
+            }
+            return null;
+        },
+
+        shouldKeepPersistentAreaMarker(entry) {
+            return !!(entry && (entry.concentrationAreaActive || (entry.areaMarkerKeepUntilRolled && Array.isArray(entry.areaPendingTargetIds) && entry.areaPendingTargetIds.length > 0)));
+        },
+
+        isConcentrationAction(entry) {
+            return !!(entry && entry.concentrationAreaActive);
+        },
+
+        prunePlayerActionRequests(root, now) {
+            root.playerActionRequests = this.isRecord(root.playerActionRequests) ? root.playerActionRequests : {};
             Object.keys(root.playerActionRequests).forEach((id) => {
                 const entry = root.playerActionRequests[id] || {};
-                const age = now - Number(entry.createdAt || 0);
-                if (entry.used || age > 10 * 60 * 1000) delete root.playerActionRequests[id];
+                this.cleanupPlayerActionReservations(entry);
+                const createdAt = Number(entry.createdAt || 0);
+                const age = createdAt ? now - createdAt : Number.POSITIVE_INFINITY;
+                const expired = !createdAt || age > PLAYER_ACTION_TTL_MS;
+                if (!entry.used && !expired) return;
+                if (this.isConcentrationAction(entry)) return;
+                if (this.shouldKeepPersistentAreaMarker(entry) && !expired) return;
+                this.removePlayerActionMarkers(entry);
+                delete root.playerActionRequests[id];
             });
         },
 
-        cleanupRuntimeQueues() {
-            const root = this.get();
+        pruneTimedMap(root, key, now, maxAgeMs, onExpire, timestampField) {
+            root[key] = this.isRecord(root[key]) ? root[key] : {};
+            const field = String(timestampField || 'createdAt');
+            Object.keys(root[key]).forEach((id) => {
+                const entry = root[key][id] || {};
+                const timestamp = Number(entry[field] || 0);
+                if (timestamp && now - timestamp <= maxAgeMs) return;
+                if (Utils.isFunction(onExpire)) onExpire(id, entry);
+                delete root[key][id];
+            });
+        },
+
+        clearInitiativeBatchRuntime(batchId) {
+            const safeBatchId = String(batchId || '').trim();
+            if (!safeBatchId) return;
+            if (INITIATIVE_BATCH_TIMERS[safeBatchId]) {
+                clearTimeout(INITIATIVE_BATCH_TIMERS[safeBatchId]);
+                delete INITIATIVE_BATCH_TIMERS[safeBatchId];
+            }
+            Object.keys(INITIATIVE_AUTO_WATCHDOGS).forEach((key) => {
+                if (key.indexOf(safeBatchId + ':') !== 0) return;
+                clearTimeout(INITIATIVE_AUTO_WATCHDOGS[key]);
+                delete INITIATIVE_AUTO_WATCHDOGS[key];
+            });
+            delete INITIATIVE_AUTO_COMPLETIONS[safeBatchId];
+        },
+
+        cleanupPlayerActionRequests() {
+            this.prunePlayerActionRequests(this.get(), Date.now());
+        },
+
+        cleanupRuntimeQueues(force) {
             const now = Date.now();
+            if (!force && now - LAST_RUNTIME_CLEANUP_AT < RUNTIME_CLEANUP_INTERVAL_MS) return false;
+            LAST_RUNTIME_CLEANUP_AT = now;
+            const root = this.get();
 
-            root.playerActionRequests = root.playerActionRequests || {};
-            Object.keys(root.playerActionRequests).forEach((id) => {
-                const entry = root.playerActionRequests[id] || {};
-                const createdAt = Number(entry.createdAt || 0);
-                if (entry.used || !createdAt || now - createdAt > 10 * 60 * 1000) delete root.playerActionRequests[id];
+            this.prunePlayerActionRequests(root, now);
+            this.pruneTimedMap(root, 'pendingNativeSaves', now, NATIVE_ROLL_TTL_MS);
+            this.pruneTimedMap(root, 'pendingNativeInitiatives', now, NATIVE_ROLL_TTL_MS);
+            this.pruneTimedMap(root, 'pendingNativeInitiativeBatches', now, NATIVE_ROLL_TTL_MS, (id) => {
+                this.clearInitiativeBatchRuntime(id);
             });
-
-            root.pendingNativeSaves = root.pendingNativeSaves || {};
-            Object.keys(root.pendingNativeSaves).forEach((id) => {
-                const entry = root.pendingNativeSaves[id] || {};
-                const createdAt = Number(entry.createdAt || 0);
-                if (!createdAt || now - createdAt > 2 * 60 * 1000) delete root.pendingNativeSaves[id];
-            });
-
-            root.pendingNativeInitiatives = root.pendingNativeInitiatives || {};
-            Object.keys(root.pendingNativeInitiatives).forEach((id) => {
-                const entry = root.pendingNativeInitiatives[id] || {};
-                const createdAt = Number(entry.createdAt || 0);
-                if (!createdAt || now - createdAt > 2 * 60 * 1000) delete root.pendingNativeInitiatives[id];
-            });
-
-            root.pendingNativeInitiativeBatches = root.pendingNativeInitiativeBatches || {};
-            Object.keys(root.pendingNativeInitiativeBatches).forEach((id) => {
-                const entry = root.pendingNativeInitiativeBatches[id] || {};
-                const createdAt = Number(entry.createdAt || 0);
-                if (!createdAt || now - createdAt > 2 * 60 * 1000) delete root.pendingNativeInitiativeBatches[id];
-            });
-
-            root.recentAttacks = root.recentAttacks || {};
-            Object.keys(root.recentAttacks).forEach((key) => {
-                const entry = root.recentAttacks[key] || {};
-                const timestamp = Number(entry.timestamp || 0);
-                if (!timestamp || now - timestamp > 60 * 1000) delete root.recentAttacks[key];
-            });
+            this.pruneTimedMap(root, 'recentAttacks', now, RECENT_ATTACK_TTL_MS, null, 'timestamp');
 
             root.recentAttackQueue = (Array.isArray(root.recentAttackQueue) ? root.recentAttackQueue : [])
-                .filter((entry) => entry && now - Number(entry.timestamp || 0) <= 60 * 1000)
+                .filter((entry) => entry && now - Number(entry.timestamp || 0) <= RECENT_ATTACK_TTL_MS)
                 .slice(-20);
+            return true;
         }
+
     };
 
     /** -----------------------------------------------------------------------
@@ -347,20 +772,38 @@ const CombatAssistant = (() => {
             return !!RuntimeConfig.get('DEBUG');
         },
 
+        format(value) {
+            if (value instanceof Error) return value.stack || value.message || String(value);
+            if (typeof value === 'string') return value;
+            if (value === undefined) return 'undefined';
+            if (value === null) return 'null';
+            if (typeof value === 'object') {
+                try {
+                    return JSON.stringify(value);
+                } catch (ignored) {
+                    return String(value);
+                }
+            }
+            return String(value);
+        },
+
+        write(level, argsLike) {
+            const suffix = level ? (':' + level) : '';
+            const args = Array.prototype.slice.call(argsLike || []).map((value) => this.format(value));
+            log('[' + META.LOG_NAME + suffix + '] ' + args.join(' '));
+        },
+
         info() {
-            const args = Array.prototype.slice.call(arguments);
-            log('[' + META.LOG_NAME + '] ' + args.join(' '));
+            this.write('', arguments);
         },
 
         debug() {
             if (!this.isDebugEnabled()) return;
-            const args = Array.prototype.slice.call(arguments);
-            log('[' + META.LOG_NAME + ':DEBUG] ' + args.join(' '));
+            this.write('DEBUG', arguments);
         },
 
         error() {
-            const args = Array.prototype.slice.call(arguments);
-            log('[' + META.LOG_NAME + ':ERROR] ' + args.join(' '));
+            this.write('ERROR', arguments);
         }
     };
 
@@ -449,9 +892,28 @@ const CombatAssistant = (() => {
             return text.length > max ? text.slice(0, max) + '...' : text;
         },
 
+        sanitizeJsonValue(value, depth) {
+            const level = Math.max(0, Utils.toInt(depth, 0));
+            if (level > 8) return null;
+            if (value === null || value === undefined) return value;
+            if (typeof value === 'string') return value.slice(0, 5000);
+            if (typeof value === 'number') return Number.isFinite(value) ? value : 0;
+            if (typeof value === 'boolean') return value;
+            if (Array.isArray(value)) return value.slice(0, 200).map((entry) => this.sanitizeJsonValue(entry, level + 1));
+            if (typeof value !== 'object') return null;
+            const safe = {};
+            Object.keys(value).slice(0, 200).forEach((key) => {
+                if (key === '__proto__' || key === 'prototype' || key === 'constructor') return;
+                safe[key] = this.sanitizeJsonValue(value[key], level + 1);
+            });
+            return safe;
+        },
+
         encodeJsonPayload(value) {
             try {
-                return encodeURIComponent(JSON.stringify(value || {}));
+                const json = JSON.stringify(this.sanitizeJsonValue(value || {}, 0));
+                if (json.length > MAX_PAYLOAD_LENGTH) throw new Error('Payload exceeds maximum length.');
+                return encodeURIComponent(json);
             } catch (error) {
                 Logger.debug('[Payload:encode]', error && error.message ? error.message : String(error));
                 return '%7B%7D';
@@ -461,9 +923,14 @@ const CombatAssistant = (() => {
         decodeJsonPayload(value, fallback) {
             if (fallback === undefined) fallback = {};
             try {
-                const decoded = decodeURIComponent(String(value || '').trim());
+                const raw = String(value || '').trim();
+                if (!raw || raw.length > MAX_PAYLOAD_LENGTH * 12) return fallback;
+                const decoded = decodeURIComponent(raw);
+                if (decoded.length > MAX_PAYLOAD_LENGTH) return fallback;
                 const parsed = JSON.parse(decoded);
-                return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : fallback;
+                return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+                    ? this.sanitizeJsonValue(parsed, 0)
+                    : fallback;
             } catch (error) {
                 Logger.debug('[Payload:decode]', error && error.message ? error.message : String(error));
                 return fallback;
@@ -477,19 +944,25 @@ const CombatAssistant = (() => {
         },
 
         normalizeName(value) {
-            return String(value || '')
+            let text = String(value || '')
                 .trim()
                 .toLowerCase()
                 .replace(/<[^>]*>/g, '')
                 .replace(/&nbsp;/g, ' ')
-                .replace(/&amp;/g, '&')
-                .replace(/[^a-z0-9]+/g, ' ')
-                .replace(/\s+/g, ' ')
-                .trim();
+                .replace(/&amp;/g, '&');
+            try {
+                text = text.normalize('NFKD').replace(/[\u0300-\u036f]/g, '');
+            } catch (ignored) {}
+            try {
+                text = text.replace(new RegExp('[^\\p{L}\\p{N}]+', 'gu'), ' ');
+            } catch (ignored) {
+                text = text.replace(/[^a-z0-9]+/g, ' ');
+            }
+            return text.replace(/\s+/g, ' ').trim();
         },
 
         uniqueNames(list) {
-            const seen = {};
+            const seen = Object.create(null);
             const out = [];
             (Array.isArray(list) ? list : []).forEach((entry) => {
                 const name = String(entry || '').trim();
@@ -508,7 +981,20 @@ const CombatAssistant = (() => {
 
         isSafeImageUrl(value) {
             const url = String(value || '').trim();
-            return /^https?:\/\//i.test(url) || url === '';
+            return url === '' || /^https?:\/\/[^\s"'()<>]+$/i.test(url);
+        },
+
+        extractUrl(value) {
+            const text = String(value || '').trim();
+            const markdown = text.match(/\((https?:\/\/[^)\s]+)\)/i);
+            if (markdown) return markdown[1];
+            const raw = text.match(/https?:\/\/[^\s<>)]+/i);
+            return raw ? raw[0] : text;
+        },
+
+        isRoll20FileUrl(value) {
+            const url = Utils.extractUrl(value);
+            return !url || (Utils.isSafeImageUrl(url) && /^https:\/\/files\.d20\.io\/images\//i.test(url));
         }
     };
 
@@ -519,9 +1005,14 @@ const CombatAssistant = (() => {
         getAll() {
             const root = State.get();
             root.settings = root.settings || {};
+            const hadRevealTokenNames = Object.prototype.hasOwnProperty.call(root.settings, 'REVEAL_TOKEN_NAMES_IN_LOG');
             Object.keys(RUNTIME_CONFIG_DEFAULTS).forEach((key) => {
                 if (!Object.prototype.hasOwnProperty.call(root.settings, key)) root.settings[key] = RUNTIME_CONFIG_DEFAULTS[key];
             });
+            if (!hadRevealTokenNames) {
+                root.settings.REVEAL_TOKEN_NAMES_IN_LOG = !Utils.toBoolean(root.settings.HIDE_TOKEN_NAMES_IN_LOG, false);
+            }
+            root.settings.HIDE_TOKEN_NAMES_IN_LOG = !Utils.toBoolean(root.settings.REVEAL_TOKEN_NAMES_IN_LOG, true);
             return root.settings;
         },
 
@@ -533,45 +1024,7 @@ const CombatAssistant = (() => {
 
         normalizeKey(key) {
             const normalized = String(key || '').trim().toUpperCase().replace(/[-\s]+/g, '_');
-            const aliases = {
-                HPBAR: 'HP_BAR',
-                HP_BAR: 'HP_BAR',
-                ACBAR: 'AC_BAR',
-                AC_BAR: 'AC_BAR',
-                TEMPBAR: 'TEMP_HP_BAR',
-                TEMP_BAR: 'TEMP_HP_BAR',
-                TEMP_HP: 'TEMP_HP_BAR',
-                TEMP_HP_BAR: 'TEMP_HP_BAR',
-                CHAT: 'CHAT_TRACKING',
-                CHATTRACKING: 'CHAT_TRACKING',
-                CHAT_TRACKING: 'CHAT_TRACKING',
-                PROBE: 'CHAT_PROBE',
-                CHAT_PROBE: 'CHAT_PROBE',
-                ROUNDUP: 'DAMAGE_ROUND_UP',
-                DAMAGE_ROUND_UP: 'DAMAGE_ROUND_UP',
-                SHEET_TRAITS: 'USE_SHEET_DAMAGE_TRAITS',
-                USE_SHEET_DAMAGE_TRAITS: 'USE_SHEET_DAMAGE_TRAITS',
-                PLAYER_COMBAT: 'PLAYER_ATTACK_BUTTON',
-                PLAYER_ATTACK_BUTTON: 'PLAYER_ATTACK_BUTTON',
-                PLAYER_HEALTH: 'PLAYER_HEALING_BUTTON',
-                PLAYER_HEALING_BUTTON: 'PLAYER_HEALING_BUTTON',
-                PLAYER_MANUAL: 'PLAYER_MANUAL_ROLL',
-                PLAYER_MANUAL_ROLL: 'PLAYER_MANUAL_ROLL',
-                MANUAL_ROLL: 'PLAYER_MANUAL_ROLL',
-                CA2014: 'SHEET_2014_CA_ROLLS',
-                '2014': 'SHEET_2014_CA_ROLLS',
-                '2014_CA': 'SHEET_2014_CA_ROLLS',
-                '2014_CA_ROLLS': 'SHEET_2014_CA_ROLLS',
-                SHEET_2014_CA_ROLLS: 'SHEET_2014_CA_ROLLS',
-                HIDE_NAMES: 'HIDE_TOKEN_NAMES_IN_LOG',
-                HIDE_TOKEN_NAMES: 'HIDE_TOKEN_NAMES_IN_LOG',
-                HIDE_TOKEN_NAMES_IN_LOG: 'HIDE_TOKEN_NAMES_IN_LOG',
-                BG: 'CHAT_BACKGROUND_IMAGE_URL',
-                BACKGROUND: 'CHAT_BACKGROUND_IMAGE_URL',
-                CHAT_BACKGROUND_IMAGE_URL: 'CHAT_BACKGROUND_IMAGE_URL',
-                DEBUG: 'DEBUG'
-            };
-            return aliases[normalized] || normalized;
+            return RUNTIME_CONFIG_ALIASES[normalized] || normalized;
         },
 
         getField(key) {
@@ -585,11 +1038,13 @@ const CombatAssistant = (() => {
         normalizeValue(field, value) {
             if (!field) return value;
             if (field.type === 'boolean') return Utils.toBoolean(value, !!RUNTIME_CONFIG_DEFAULTS[field.key]);
-            if (field.type === 'bar') return Utils.clamp(Utils.toInt(value, RUNTIME_CONFIG_DEFAULTS[field.key]), 1, 3);
-            if (field.type === 'bar0') return Utils.clamp(Utils.toInt(value, RUNTIME_CONFIG_DEFAULTS[field.key]), 0, 3);
-            if (field.key === 'CHAT_BACKGROUND_IMAGE_URL') {
+            if (field.type === 'bar') return Utils.clamp(Utils.toInt(value, RUNTIME_CONFIG_DEFAULTS[field.key]), 1, 4);
+            if (field.type === 'bar0') return Utils.clamp(Utils.toInt(value, RUNTIME_CONFIG_DEFAULTS[field.key]), 0, 4);
+            if (field.type === 'percent') return Utils.clamp(Utils.toInt(value, RUNTIME_CONFIG_DEFAULTS[field.key]), 0, 100);
+            if (field.type === 'roll20image') return Utils.extractUrl(value);
+            if (field.type === 'image' || field.key === 'CHAT_BACKGROUND_IMAGE_URL') {
                 const url = String(value === undefined || value === null ? '' : value).trim();
-                return Utils.isSafeImageUrl(url) ? url : RUNTIME_CONFIG_DEFAULTS.CHAT_BACKGROUND_IMAGE_URL;
+                return Utils.isSafeImageUrl(url) ? url : (RUNTIME_CONFIG_DEFAULTS[field.key] || '');
             }
             return String(value === undefined || value === null ? '' : value).trim();
         },
@@ -598,8 +1053,36 @@ const CombatAssistant = (() => {
             const safeKey = this.normalizeKey(key);
             const field = this.getField(safeKey);
             if (!field) return { ok: false, message: 'Unknown setting: ' + key + '.' };
+            if (field.type === 'section') return { ok: false, message: 'Setting is not editable: ' + key + '.' };
+            if (field.type === 'bar' || field.type === 'bar0') {
+                const raw = String(value === undefined || value === null ? '' : value).trim();
+                const bar = Utils.toInt(raw, null);
+                const min = field.type === 'bar0' ? 0 : 1;
+                if (bar === null || String(bar) !== raw || bar < min || bar > 4) {
+                    return {
+                        ok: false,
+                        message: field.label + ' must be a whole number from ' + min + ' to 4.'
+                    };
+                }
+            }
+            if (field.type === 'percent') {
+                const raw = String(value === undefined || value === null ? '' : value).trim();
+                const pct = Utils.toInt(raw, null);
+                if (pct === null || String(pct) !== raw || pct < 0 || pct > 100) {
+                    return { ok: false, message: field.label + ' must be a whole number from 0 to 100.' };
+                }
+            }
+            if (field.type === 'roll20image' && !Utils.isRoll20FileUrl(value)) {
+                return {
+                    ok: false,
+                    title: 'Invalid URL',
+                    message: 'Only images uploaded to Roll20 are supported here. Use a URL that starts with https://files.d20.io/images/.'
+                };
+            }
             const config = this.getAll();
             config[safeKey] = this.normalizeValue(field, value);
+            if (safeKey === 'REVEAL_TOKEN_NAMES_IN_LOG') config.HIDE_TOKEN_NAMES_IN_LOG = !Utils.toBoolean(config[safeKey], true);
+            if (safeKey === 'HIDE_TOKEN_NAMES_IN_LOG') config.REVEAL_TOKEN_NAMES_IN_LOG = !Utils.toBoolean(config[safeKey], false);
             return { ok: true, key: safeKey, value: config[safeKey], field };
         },
 
@@ -713,12 +1196,31 @@ const CombatAssistant = (() => {
         },
 
         whisper(target, html) {
-            const safeTarget = String(target || 'GM').trim() || 'GM';
+            const safeTarget = String(target || 'GM').replace(/["\\\r\n]/g, '').trim() || 'GM';
             this.send('/w "' + safeTarget + '" ' + html);
         },
 
+        hasSheetReader() {
+            return typeof getSheetItem === 'function';
+        },
+
+        hasSheetWriter() {
+            return typeof setSheetItem === 'function';
+        },
+
         hasSheetApi() {
-            return typeof getSheetItem === 'function' && typeof setSheetItem === 'function';
+            return this.hasSheetWriter();
+        },
+
+        getRuntimeCapabilities() {
+            const campaign = typeof Campaign === 'function' ? Campaign() : null;
+            const sandboxVersion = String((campaign && campaign.sandboxVersion) || '').trim().toLowerCase();
+            return {
+                sandboxVersion: sandboxVersion || 'unknown',
+                experimentalSandbox: sandboxVersion === 'experimental',
+                sheetReader: this.hasSheetReader(),
+                sheetWriter: this.hasSheetWriter()
+            };
         },
 
         buttonAbilityCommand(characterId, abilityName) {
@@ -742,7 +1244,7 @@ const CombatAssistant = (() => {
 
         getSelectedTokens(msg) {
             const selected = Array.isArray(msg && msg.selected) ? msg.selected : [];
-            const seen = {};
+            const seen = Object.create(null);
             const tokens = [];
             for (let i = 0; i < selected.length; i += 1) {
                 const id = String(selected[i] && selected[i]._id || '').trim();
@@ -776,8 +1278,9 @@ const CombatAssistant = (() => {
             return null;
         },
 
-        cleanupBatchAbilities(maxKeep, maxAgeMs) {
-            const helper = this.getCharacterByName('Combat Assistant Helper');
+        cleanupBatchAbilities(maxKeep, maxAgeMs, options) {
+            const opts = options || {};
+            const helper = opts.noCreate ? this.getExistingBatchHelper() : this.getOrCreateBatchHelper();
             if (!helper) return;
             const helperId = String(helper.id || '').trim();
             if (!helperId) return;
@@ -794,7 +1297,7 @@ const CombatAssistant = (() => {
                 })
                 .sort((a, b) => b.createdAt - a.createdAt);
             abilities.forEach((entry, index) => {
-                if (index >= keep || !entry.createdAt || now - entry.createdAt > ageLimit) {
+                if (opts.removeAll || index >= keep || !entry.createdAt || now - entry.createdAt > ageLimit) {
                     try {
                         entry.ability.remove();
                     } catch (error) {
@@ -802,36 +1305,79 @@ const CombatAssistant = (() => {
                     }
                 }
             });
+            if (opts.removeWhenEmpty) {
+                const remainingAbilities = findObjs({ _type: 'ability', _characterid: helperId }) || [];
+                if (!remainingAbilities.length && Utils.isFunction(helper.remove)) {
+                    try {
+                        helper.remove();
+                        State.get().helperCharacterId = '';
+                    } catch (error) {
+                        Logger.debug('[batch-cleanup:helper]', error && error.message ? error.message : String(error));
+                    }
+                }
+            }
+        },
+
+        getExistingBatchHelper() {
+            const root = State.get();
+            const storedId = String(root.helperCharacterId || '').trim();
+            let existing = storedId ? getObj('character', storedId) : null;
+            if (!existing) {
+                const named = this.getCharacterByName('Combat Assistant Helper');
+                if (named) {
+                    const namedId = String(named.id || '').trim();
+                    const hasOwnedAbilities = namedId && (findObjs({ _type: 'ability', _characterid: namedId }) || [])
+                        .some((ability) => ability && Utils.isFunction(ability.get) && /^CT_Batch_/i.test(String(ability.get('name') || '')));
+                    const namedNotes = Utils.isFunction(named.get) ? String(named.get('gmnotes') || '') : '';
+                    if (hasOwnedAbilities || namedNotes.indexOf('Managed by Combat Assistant') >= 0) existing = named;
+                }
+            }
+            return existing || null;
         },
 
         getOrCreateBatchHelper() {
-            const existing = this.getCharacterByName('Combat Assistant Helper');
-            if (existing) {
-                try {
-                    if (Utils.isFunction(existing.set)) {
-                        existing.set({
-                            archived: false,
-                            inplayerjournals: 'all',
-                            controlledby: 'all'
-                        });
-                    }
-                } catch (error) {
-                    Logger.debug('[batch-helper-access]', error && error.message ? error.message : String(error));
+            const root = State.get();
+            const storedId = String(root.helperCharacterId || '').trim();
+            let existing = storedId ? getObj('character', storedId) : null;
+            if (!existing) {
+                const named = this.getCharacterByName('Combat Assistant Helper');
+                if (named) {
+                    const namedId = String(named.id || '').trim();
+                    const hasOwnedAbilities = namedId && (findObjs({ _type: 'ability', _characterid: namedId }) || [])
+                        .some((ability) => ability && Utils.isFunction(ability.get) && /^CT_Batch_/i.test(String(ability.get('name') || '')));
+                    const namedNotes = Utils.isFunction(named.get) ? String(named.get('gmnotes') || '') : '';
+                    if (hasOwnedAbilities || namedNotes.indexOf('Managed by Combat Assistant') >= 0) existing = named;
                 }
-                return existing;
             }
-            if (typeof createObj !== 'function') return null;
+            if (!existing && typeof createObj === 'function') {
+                try {
+                    existing = createObj('character', {
+                        name: 'Combat Assistant Helper',
+                        archived: false,
+                        inplayerjournals: '',
+                        controlledby: 'all',
+                        gmnotes: 'Managed by Combat Assistant. Do not rename or delete while the script is active.'
+                    });
+                } catch (error) {
+                    Logger.error('[batch-helper]', error && error.message ? error.message : String(error));
+                    return null;
+                }
+            }
+            if (!existing) return null;
+            root.helperCharacterId = String(existing.id || '').trim();
             try {
-                return createObj('character', {
-                    name: 'Combat Assistant Helper',
-                    archived: false,
-                    inplayerjournals: 'all',
-                    controlledby: 'all'
-                });
+                if (Utils.isFunction(existing.set)) {
+                    existing.set({
+                        archived: false,
+                        inplayerjournals: '',
+                        controlledby: 'all',
+                        gmnotes: 'Managed by Combat Assistant. Temporary Roll All helper; safe to ignore.'
+                    });
+                }
             } catch (error) {
-                Logger.error('[batch-helper]', error && error.message ? error.message : String(error));
-                return null;
+                Logger.debug('[batch-helper-access]', error && error.message ? error.message : String(error));
             }
+            return existing;
         },
 
         createNativeRollBatchAbility(commands) {
@@ -843,13 +1389,14 @@ const CombatAssistant = (() => {
             if (!helper) return { ok: false, message: 'Combat Assistant Helper character could not be created.' };
             const helperId = String(helper.id || '').trim();
             if (!helperId || typeof createObj !== 'function') return { ok: false, message: 'Combat Assistant Helper is not usable.' };
-            this.cleanupBatchAbilities(20, 10 * 60 * 1000);
-            const abilityName = 'CT_Batch_' + Date.now().toString(36);
+            this.cleanupBatchAbilities(250, 10 * 60 * 1000);
+            const abilityName = 'CT_Batch_' + Math.random().toString(36).slice(2, 10) + '_' + Date.now().toString(36);
+            const cleanupCommand = '!combatAssistant cleanupbatch ' + helperId + ' ' + abilityName;
             try {
                 createObj('ability', {
                     _characterid: helperId,
                     name: abilityName,
-                    action: safeCommands.join('\n'),
+                    action: safeCommands.concat([cleanupCommand]).join('\n'),
                     istokenaction: false
                 });
                 return {
@@ -864,9 +1411,54 @@ const CombatAssistant = (() => {
             }
         },
 
+        cleanupBatchHelperAfterUse(helperId, abilityName) {
+            const safeHelperId = String(helperId || '').trim();
+            const safeAbilityName = String(abilityName || '').trim();
+            if (!safeHelperId || !/^CT_Batch_/i.test(safeAbilityName)) return false;
+            const root = State.get();
+            if (String(root.helperCharacterId || '').trim() !== safeHelperId) return false;
+            const helper = getObj('character', safeHelperId);
+            if (!helper || !Utils.isFunction(helper.get)) return false;
+            const helperName = String(helper.get('name') || '').trim();
+            const helperNotes = String(helper.get('gmnotes') || '').trim();
+            if (helperName !== 'Combat Assistant Helper' && helperNotes.indexOf('Managed by Combat Assistant') < 0) return false;
+            const abilities = findObjs({ _type: 'ability', _characterid: safeHelperId }) || [];
+            abilities.forEach((ability) => {
+                if (!ability || !Utils.isFunction(ability.get) || !Utils.isFunction(ability.remove)) return;
+                if (String(ability.get('name') || '').trim() !== safeAbilityName) return;
+                try {
+                    ability.remove();
+                } catch (error) {
+                    Logger.debug('[batch-helper-cleanup:ability]', error && error.message ? error.message : String(error));
+                }
+            });
+            const remainingAbilities = findObjs({ _type: 'ability', _characterid: safeHelperId }) || [];
+            const remaining = remainingAbilities
+                .some((ability) => ability && Utils.isFunction(ability.get) && /^CT_Batch_/i.test(String(ability.get('name') || '')));
+            if (!remaining && !remainingAbilities.length && Utils.isFunction(helper.remove)) {
+                try {
+                    helper.remove();
+                    root.helperCharacterId = '';
+                } catch (error) {
+                    Logger.debug('[batch-helper-cleanup:character]', error && error.message ? error.message : String(error));
+                }
+            }
+            return true;
+        },
+
         createNativeRollButtonCommand(command) {
             const batch = this.createNativeRollBatchAbility([command]);
             return batch && batch.ok ? batch.command : '';
+        },
+
+        nativeBatchExecutionCommand(roll) {
+            const directCommand = String(roll && roll.directCommand || '').trim();
+            if (directCommand) return directCommand;
+            const nativeCommand = String(roll && roll.nativeCommand || '').trim();
+            if (nativeCommand) return nativeCommand;
+            const batchCommand = String(roll && roll.batchCommand || '').trim();
+            if (batchCommand) return batchCommand;
+            return String(roll && roll.command || '').trim();
         },
 
         sendNativeCommandsSequentially(commands, delayMs) {
@@ -896,14 +1488,1129 @@ const CombatAssistant = (() => {
         getTokensByCharacterId(characterId) {
             const safeCharacterId = String(characterId || '').trim();
             if (!safeCharacterId) return [];
-            return (findObjs({ _type: 'graphic' }) || []).filter((token) => {
-                return token && Utils.isFunction(token.get) && String(token.get('represents') || '').trim() === safeCharacterId;
-            });
+            return (findObjs({ _type: 'graphic', represents: safeCharacterId }) || []).filter((token) => token && Utils.isFunction(token.get));
+        },
+
+        getTokenLayer(token) {
+            return token && Utils.isFunction(token.get) ? String(token.get('layer') || '').trim().toLowerCase() : '';
         },
 
         getTokenPageId(tokenOrId) {
             const token = typeof tokenOrId === 'string' ? this.getTokenById(tokenOrId) : tokenOrId;
             return token && Utils.isFunction(token.get) ? String(token.get('_pageid') || token.get('pageid') || '').trim() : '';
+        },
+
+        getTokensOnPage(pageId) {
+            const safePageId = String(pageId || '').trim();
+            if (!safePageId) return [];
+            return (findObjs({ _type: 'graphic', _pageid: safePageId }) || []).filter((token) => {
+                if (!token || !Utils.isFunction(token.get)) return false;
+                const layer = this.getTokenLayer(token);
+                if (layer && layer !== 'objects') return false;
+                const gmnotes = String(token.get('gmnotes') || '');
+                const name = String(token.get('name') || '').trim();
+                if (/^Combat Assistant area marker\b/i.test(gmnotes) || /^CA Area\b/i.test(name)) return false;
+                return !!String(token.get('represents') || name).trim();
+            });
+        },
+
+        getPageGeometry(pageId) {
+            const page = pageId ? getObj('page', pageId) : null;
+            const scaleFeet = page && Utils.isFunction(page.get) ? Utils.toNumber(page.get('scale_number'), 5) : 5;
+            const snappingIncrement = page && Utils.isFunction(page.get) ? Utils.toNumber(page.get('snapping_increment'), 1) : 1;
+            return {
+                scaleFeet: scaleFeet > 0 ? scaleFeet : 5,
+                snappingIncrement: snappingIncrement > 0 ? snappingIncrement : 1,
+                pixelsPerUnit: 70 * (snappingIncrement > 0 ? snappingIncrement : 1)
+            };
+        },
+
+        getPageScaleFeet(pageId) {
+            return this.getPageGeometry(pageId).scaleFeet;
+        },
+
+        pixelsToPageFeet(pageId, pixels) {
+            const geometry = this.getPageGeometry(pageId);
+            return (Math.max(0, Utils.toNumber(pixels, 0)) / geometry.pixelsPerUnit) * geometry.scaleFeet;
+        },
+
+        pageFeetToPixels(pageId, feet) {
+            const geometry = this.getPageGeometry(pageId);
+            return (Math.max(0, Utils.toNumber(feet, 0)) / geometry.scaleFeet) * geometry.pixelsPerUnit;
+        },
+
+        getTokenRect(token) {
+            if (!token || !Utils.isFunction(token.get)) return null;
+            const width = Math.max(1, Utils.toNumber(token.get('width'), 70));
+            const height = Math.max(1, Utils.toNumber(token.get('height'), 70));
+            const left = Utils.toNumber(token.get('left'), 0);
+            const top = Utils.toNumber(token.get('top'), 0);
+            return {
+                left,
+                top,
+                width,
+                height,
+                minX: left - (width / 2),
+                maxX: left + (width / 2),
+                minY: top - (height / 2),
+                maxY: top + (height / 2)
+            };
+        },
+
+        getTokenRotationDegrees(token) {
+            if (!token || !Utils.isFunction(token.get)) return 0;
+            const rotation = Utils.toNumber(token.get('rotation'), 0);
+            const normalized = rotation % 360;
+            return normalized < 0 ? normalized + 360 : normalized;
+        },
+
+        rotatePoint(point, origin, degrees) {
+            const radians = (Utils.toNumber(degrees, 0) * Math.PI) / 180;
+            const cos = Math.cos(radians);
+            const sin = Math.sin(radians);
+            const dx = Utils.toNumber(point && point.x, 0) - Utils.toNumber(origin && origin.x, 0);
+            const dy = Utils.toNumber(point && point.y, 0) - Utils.toNumber(origin && origin.y, 0);
+            return {
+                x: Utils.toNumber(origin && origin.x, 0) + ((dx * cos) - (dy * sin)),
+                y: Utils.toNumber(origin && origin.y, 0) + ((dx * sin) + (dy * cos))
+            };
+        },
+
+        getRotatedRectPolygon(rect, rotationDegrees) {
+            if (!rect) return [];
+            const center = { x: rect.left, y: rect.top };
+            const halfWidth = Math.max(0.5, Utils.toNumber(rect.width, 1) / 2);
+            const halfHeight = Math.max(0.5, Utils.toNumber(rect.height, 1) / 2);
+            return [
+                { x: center.x - halfWidth, y: center.y - halfHeight },
+                { x: center.x + halfWidth, y: center.y - halfHeight },
+                { x: center.x + halfWidth, y: center.y + halfHeight },
+                { x: center.x - halfWidth, y: center.y + halfHeight }
+            ].map((point) => this.rotatePoint(point, center, rotationDegrees));
+        },
+
+        getInsetRect(rect, insetPx) {
+            if (!rect) return null;
+            const inset = Math.max(0, Utils.toNumber(insetPx, 0));
+            const width = Math.max(1, Utils.toNumber(rect.width, 1) - (inset * 2));
+            const height = Math.max(1, Utils.toNumber(rect.height, 1) - (inset * 2));
+            return {
+                left: rect.left,
+                top: rect.top,
+                width,
+                height,
+                minX: rect.left - (width / 2),
+                maxX: rect.left + (width / 2),
+                minY: rect.top - (height / 2),
+                maxY: rect.top + (height / 2)
+            };
+        },
+
+        projectPolygon(points, axis) {
+            let min = Infinity;
+            let max = -Infinity;
+            points.forEach((point) => {
+                const projection = (point.x * axis.x) + (point.y * axis.y);
+                if (projection < min) min = projection;
+                if (projection > max) max = projection;
+            });
+            return { min, max };
+        },
+
+        polygonsOverlap(polyA, polyB, minimumOverlapPx) {
+            if (!Array.isArray(polyA) || !Array.isArray(polyB) || polyA.length < 3 || polyB.length < 3) return false;
+            const requiredOverlap = Math.max(0, Utils.toNumber(minimumOverlapPx, 0));
+            const axes = [];
+            const addAxes = (poly) => {
+                for (let i = 0; i < poly.length; i += 1) {
+                    const current = poly[i];
+                    const next = poly[(i + 1) % poly.length];
+                    const edgeX = next.x - current.x;
+                    const edgeY = next.y - current.y;
+                    const length = Math.sqrt((edgeX * edgeX) + (edgeY * edgeY));
+                    if (length > 0) axes.push({ x: -edgeY / length, y: edgeX / length });
+                }
+            };
+            addAxes(polyA);
+            addAxes(polyB);
+            for (let i = 0; i < axes.length; i += 1) {
+                const a = this.projectPolygon(polyA, axes[i]);
+                const b = this.projectPolygon(polyB, axes[i]);
+                const overlap = Math.min(a.max, b.max) - Math.max(a.min, b.min);
+                if (overlap <= requiredOverlap) return false;
+            }
+            return true;
+        },
+
+        tokenIntersectsRotatedMarker(token, marker, boundaryInsetPx) {
+            const tokenRect = this.getTokenRect(token);
+            const markerRect = this.getInsetRect(this.getTokenRect(marker), boundaryInsetPx);
+            if (!tokenRect || !markerRect) return false;
+            const tokenPoly = this.getRotatedRectPolygon(tokenRect, this.getTokenRotationDegrees(token));
+            const markerPoly = this.getRotatedRectPolygon(markerRect, this.getTokenRotationDegrees(marker));
+            return this.polygonsOverlap(tokenPoly, markerPoly, boundaryInsetPx);
+        },
+
+        clampPointToDistance(point, origin, maxDistancePx) {
+            const safePoint = { x: Utils.toNumber(point && point.x, 0), y: Utils.toNumber(point && point.y, 0) };
+            const safeOrigin = { x: Utils.toNumber(origin && origin.x, 0), y: Utils.toNumber(origin && origin.y, 0) };
+            const maxDistance = Math.max(0, Utils.toNumber(maxDistancePx, 0));
+            const dx = safePoint.x - safeOrigin.x;
+            const dy = safePoint.y - safeOrigin.y;
+            const distance = Math.sqrt((dx * dx) + (dy * dy));
+            if (distance <= maxDistance || distance <= 0) return safePoint;
+            const scale = maxDistance / distance;
+            return {
+                x: safeOrigin.x + (dx * scale),
+                y: safeOrigin.y + (dy * scale)
+            };
+        },
+
+        measureTokenDistanceFeet(sourceToken, targetToken) {
+            if (!sourceToken || !targetToken) return { ok: false, message: 'Source or target token was not found.' };
+            const sourcePageId = this.getTokenPageId(sourceToken);
+            const targetPageId = this.getTokenPageId(targetToken);
+            if (!sourcePageId || !targetPageId || sourcePageId !== targetPageId) {
+                return { ok: false, message: 'Source and target tokens must be on the same page.' };
+            }
+            const geometry = this.getPageGeometry(sourcePageId);
+            const feetPerCell = geometry.scaleFeet;
+            const pxPerCell = geometry.pixelsPerUnit;
+            const sx = Utils.toNumber(sourceToken.get('left'), 0);
+            const sy = Utils.toNumber(sourceToken.get('top'), 0);
+            const tx = Utils.toNumber(targetToken.get('left'), 0);
+            const ty = Utils.toNumber(targetToken.get('top'), 0);
+            const sourceWidthCells = Math.max(1, Math.round(Math.max(1, Utils.toNumber(sourceToken.get('width'), 70)) / pxPerCell));
+            const sourceHeightCells = Math.max(1, Math.round(Math.max(1, Utils.toNumber(sourceToken.get('height'), 70)) / pxPerCell));
+            const targetWidthCells = Math.max(1, Math.round(Math.max(1, Utils.toNumber(targetToken.get('width'), 70)) / pxPerCell));
+            const targetHeightCells = Math.max(1, Math.round(Math.max(1, Utils.toNumber(targetToken.get('height'), 70)) / pxPerCell));
+            const centerDxCells = Math.abs(sx - tx) / pxPerCell;
+            const centerDyCells = Math.abs(sy - ty) / pxPerCell;
+            const occupiedDxCells = Math.max(0, centerDxCells - ((sourceWidthCells - 1) / 2) - ((targetWidthCells - 1) / 2));
+            const occupiedDyCells = Math.max(0, centerDyCells - ((sourceHeightCells - 1) / 2) - ((targetHeightCells - 1) / 2));
+            const distanceCells = Math.ceil(Math.max(occupiedDxCells, occupiedDyCells));
+            const feet = distanceCells * feetPerCell;
+            return { ok: true, feet, pixels: distanceCells * pxPerCell, sourcePageId };
+        },
+
+        measureTokenCenterDistanceFeet(sourceToken, targetToken) {
+            if (!sourceToken || !targetToken) return { ok: false, message: 'Source or target token was not found.' };
+            const sourcePageId = this.getTokenPageId(sourceToken);
+            const targetPageId = this.getTokenPageId(targetToken);
+            if (!sourcePageId || !targetPageId || sourcePageId !== targetPageId) {
+                return { ok: false, message: 'Source and target tokens must be on the same page.' };
+            }
+            const source = this.getTokenRect(sourceToken);
+            const target = this.getTokenRect(targetToken);
+            if (!source || !target) return { ok: false, message: 'Token geometry could not be read.' };
+            const dx = target.left - source.left;
+            const dy = target.top - source.top;
+            const pixels = Math.sqrt((dx * dx) + (dy * dy));
+            const feet = this.pixelsToPageFeet(sourcePageId, pixels);
+            return { ok: true, feet, pixels, sourcePageId };
+        },
+
+        measureTokenCenterToTargetEdgeFeet(sourceToken, targetToken) {
+            if (!sourceToken || !targetToken) return { ok: false, message: 'Source or target token was not found.' };
+            const sourcePageId = this.getTokenPageId(sourceToken);
+            const targetPageId = this.getTokenPageId(targetToken);
+            if (!sourcePageId || !targetPageId || sourcePageId !== targetPageId) {
+                return { ok: false, message: 'Source and target tokens must be on the same page.' };
+            }
+            const source = this.getTokenRect(sourceToken);
+            const target = this.getTokenRect(targetToken);
+            if (!source || !target) return { ok: false, message: 'Token geometry could not be read.' };
+            const dx = Math.max(0, Math.max(target.minX - source.left, source.left - target.maxX));
+            const dy = Math.max(0, Math.max(target.minY - source.top, source.top - target.maxY));
+            const pixels = Math.sqrt((dx * dx) + (dy * dy));
+            const feet = this.pixelsToPageFeet(sourcePageId, pixels);
+            return { ok: true, feet, pixels, sourcePageId };
+        },
+
+        getTokensWithinFeet(sourceToken, rangeFeet) {
+            const sourceId = this.getTokenId(sourceToken);
+            const pageId = this.getTokenPageId(sourceToken);
+            const maxFeet = Math.max(0, Utils.toNumber(rangeFeet, 0));
+            if (!sourceId || !pageId || maxFeet <= 0) return [];
+            return this.getTokensOnPage(pageId).filter((token) => {
+                if (!token || this.getTokenId(token) === sourceId) return false;
+                const measured = this.measureTokenCenterToTargetEdgeFeet(sourceToken, token);
+                return measured.ok && measured.feet <= Math.max(0, maxFeet - 0.1);
+            });
+        },
+
+        isSquareAreaShape(shape) {
+            const normalized = String(shape || '').trim().toLowerCase();
+            return normalized === 'cube' || normalized === 'square';
+        },
+
+        isConeAreaShape(shape) {
+            return String(shape || '').trim().toLowerCase() === 'cone';
+        },
+
+        isLineAreaShape(shape) {
+            return String(shape || '').trim().toLowerCase() === 'line';
+        },
+
+        getAreaMarkerImageUrl(areaInfo) {
+            const shape = areaInfo && areaInfo.shape ? String(areaInfo.shape) : '';
+            const key = this.isSquareAreaShape(shape) || this.isConeAreaShape(shape) || this.isLineAreaShape(shape) ? 'PLAYER_MARKER_SQUARE_URL' : 'PLAYER_MARKER_RADIUS_URL';
+            const url = String(RuntimeConfig.get(key) || '').trim();
+            return Utils.isSafeImageUrl(url) && url ? url : '';
+        },
+
+        getAreaMarkerSizePixels(areaInfo, pageId) {
+            const sizeFeet = Math.max(0, Utils.toNumber(areaInfo && areaInfo.sizeFeet, 0));
+            if (sizeFeet <= 0) return 0;
+            const shape = String(areaInfo && areaInfo.shape || '').trim().toLowerCase();
+            const markerFeet = shape === 'cube'
+                ? (sizeFeet * 2)
+                : (this.isSquareAreaShape(shape) ? sizeFeet : (sizeFeet * 2));
+            return Math.max(1, Math.round(this.pageFeetToPixels(pageId, markerFeet)));
+        },
+
+        getConeRowWidths(sizeFeet) {
+            const normalizedSize = Math.max(5, Math.round(Math.max(0, Utils.toNumber(sizeFeet, 0)) / 5) * 5);
+            const exact = {
+                15: [1, 3, 3],
+                30: [1, 3, 3, 3, 5, 5],
+                45: [1, 3, 3, 3, 5, 5, 5, 7],
+                60: [1, 3, 3, 3, 5, 5, 5, 7, 7, 7, 9, 9]
+            };
+            if (exact[normalizedSize]) return exact[normalizedSize].slice();
+            const rows = Math.max(1, Math.ceil(normalizedSize / 5));
+            const widths = [];
+            for (let row = 0; row < rows; row += 1) {
+                widths.push(row === 0 ? 1 : (3 + (Math.floor((row - 1) / 3) * 2)));
+            }
+            return widths;
+        },
+
+        getConeMarkerPieces(areaInfo, pageId) {
+            const sizeFeet = Math.max(0, Utils.toNumber(areaInfo && areaInfo.sizeFeet, 0));
+            const rowPx = Math.max(1, this.pageFeetToPixels(pageId, 5));
+            return this.getConeRowWidths(sizeFeet).map((widthCells, row) => ({
+                index: row,
+                widthCells,
+                offsetX: 0,
+                offsetY: (row + 1) * rowPx,
+                width: widthCells * rowPx,
+                height: rowPx,
+                rotationOffset: 0
+            }));
+        },
+
+        applyAreaMarkerLighting(marker, lightInfo) {
+            if (!marker || !Utils.isFunction(marker.set)) return false;
+            const info = lightInfo && lightInfo.hasLight ? lightInfo : null;
+            if (!info) return false;
+            const bright = Math.max(0, Utils.toNumber(info.brightFeet, 0));
+            const dim = Math.max(0, Utils.toNumber(info.dimFeet, 0));
+            if (bright <= 0 && dim <= 0) return false;
+            const legacyRadius = bright + dim;
+            try {
+                marker.set({
+                    emits_bright_light: bright > 0,
+                    bright_light_distance: bright,
+                    emits_low_light: dim > 0,
+                    low_light_distance: legacyRadius > 0 ? legacyRadius : dim,
+                    light_radius: legacyRadius > 0 ? legacyRadius : '',
+                    light_dimradius: bright > 0 ? bright : '',
+                    light_otherplayers: true
+                });
+                return true;
+            } catch (ignored) {
+                return false;
+            }
+        },
+
+        applyAreaMarkerVisuals(marker, tooltip, opacity, lightInfo) {
+            if (!marker || !Utils.isFunction(marker.set)) return false;
+            try {
+                marker.set({
+                    show_tooltip: true,
+                    gm_only_tooltip: false,
+                    tooltip
+                });
+                marker.set({
+                    opacity,
+                    baseOpacity: opacity,
+                    fadeOpacity: opacity,
+                    alpha: opacity
+                });
+            } catch (ignored) {}
+            this.applyAreaMarkerLighting(marker, lightInfo);
+            setTimeout(() => {
+                try {
+                    marker.set({
+                        opacity,
+                        baseOpacity: opacity,
+                        fadeOpacity: opacity,
+                        alpha: opacity
+                    });
+                } catch (ignored) {}
+                this.applyAreaMarkerLighting(marker, lightInfo);
+            }, 250);
+            return true;
+        },
+
+        sendAreaMarkerToBack(marker) {
+            if (!marker) return false;
+            const moveToBack = () => {
+                try {
+                    if (typeof toBack === 'function') {
+                        toBack(marker);
+                        return true;
+                    }
+                } catch (ignored) {}
+                return false;
+            };
+            moveToBack();
+            setTimeout(moveToBack, 100);
+            return true;
+        },
+
+        createAreaMarkerGraphic(options) {
+            const data = options || {};
+            const marker = createObj('graphic', {
+                _pageid: data.pageId,
+                layer: 'objects',
+                imgsrc: data.imgsrc,
+                name: data.name,
+                left: Utils.toNumber(data.left, 0),
+                top: Utils.toNumber(data.top, 0),
+                width: Math.max(1, Utils.toNumber(data.width, 1)),
+                height: Math.max(1, Utils.toNumber(data.height, 1)),
+                rotation: Utils.toNumber(data.rotation, 0),
+                controlledby: data.controlledBy || '',
+                showname: false,
+                showplayers_name: false,
+                represents: '',
+                isdrawing: RuntimeConfig.get('AREA_MARKER_FREE_MOVEMENT'),
+                disableTokenMenu: true,
+                gmnotes: data.gmnotes || ''
+            });
+            this.sendAreaMarkerToBack(marker);
+            return marker;
+        },
+
+        createConePlayerAreaMarker(request, sourceToken, markerBase) {
+            const payload = request && request.payload ? request.payload : {};
+            const areaInfo = payload.areaInfo && payload.areaInfo.isArea ? payload.areaInfo : null;
+            const pieces = this.getConeMarkerPieces(areaInfo, markerBase.pageId);
+            if (!pieces.length) return { ok: false, message: 'Cone marker size could not be calculated.' };
+            const center = {
+                x: Utils.toNumber(sourceToken.get('left'), 0),
+                y: Utils.toNumber(sourceToken.get('top'), 0)
+            };
+            const created = [];
+            try {
+                pieces.forEach((piece) => {
+                    const name = markerBase.name + ' Cone ' + String(piece.index + 1);
+                    const marker = this.createAreaMarkerGraphic({
+                        pageId: markerBase.pageId,
+                        imgsrc: markerBase.imgsrc,
+                        name,
+                        left: center.x + piece.offsetX,
+                        top: center.y + piece.offsetY,
+                        width: piece.width,
+                        height: piece.height,
+                        rotation: 0,
+                        controlledBy: markerBase.controlledBy,
+                        gmnotes: 'Combat Assistant area marker for ' + String(request.id || '') + ' cone piece ' + String(piece.index + 1)
+                    });
+                    if (!marker) throw new Error('Cone marker piece could not be created.');
+                    this.applyAreaMarkerVisuals(marker, markerBase.tooltip, markerBase.opacity, markerBase.lightInfo);
+                    const id = this.getTokenId(marker);
+                    created.push(Object.assign({}, piece, {
+                        id,
+                        name,
+                        pageId: markerBase.pageId
+                    }));
+                });
+                return {
+                    ok: true,
+                    marker: this.getTokenById(created[0] && created[0].id),
+                    markerId: created[0] && created[0].id,
+                    markerIds: created.map((piece) => piece.id).filter(Boolean),
+                    markerName: markerBase.name,
+                    markerGroup: {
+                        type: 'cone',
+                        centerLeft: center.x,
+                        centerTop: center.y,
+                        rotation: 0,
+                        pieces: created
+                    }
+                };
+            } catch (error) {
+                created.forEach((piece) => this.removeGraphic(this.getTokenById(piece.id)));
+                return { ok: false, message: error && error.message ? error.message : String(error) };
+            }
+        },
+
+        createLinePlayerAreaMarker(request, sourceToken, markerBase) {
+            const payload = request && request.payload ? request.payload : {};
+            const areaInfo = payload.areaInfo && payload.areaInfo.isArea ? payload.areaInfo : null;
+            const lengthFeet = Math.max(0, Utils.toNumber(areaInfo && (areaInfo.lengthFeet || areaInfo.sizeFeet), 0));
+            const widthFeet = Math.max(1, Utils.toNumber(areaInfo && areaInfo.widthFeet, 5));
+            const lengthPx = Math.max(1, this.pageFeetToPixels(markerBase.pageId, lengthFeet));
+            const widthPx = Math.max(1, this.pageFeetToPixels(markerBase.pageId, widthFeet));
+            if (lengthFeet <= 0) return { ok: false, message: 'Line marker length could not be calculated.' };
+            const sourceRect = this.getTokenRect(sourceToken);
+            if (!sourceRect) return { ok: false, message: 'Caster token geometry could not be read.' };
+            const marker = this.createAreaMarkerGraphic({
+                pageId: markerBase.pageId,
+                imgsrc: markerBase.imgsrc,
+                name: markerBase.name + ' Line',
+                left: sourceRect.left,
+                top: sourceRect.top + (lengthPx / 2),
+                width: widthPx,
+                height: lengthPx,
+                rotation: 0,
+                controlledBy: markerBase.controlledBy,
+                gmnotes: 'Combat Assistant area marker for ' + String(request.id || '') + ' line'
+            });
+            if (!marker) return { ok: false, message: 'Line marker token could not be created.' };
+            this.applyAreaMarkerVisuals(marker, markerBase.tooltip, markerBase.opacity, markerBase.lightInfo);
+            const markerId = this.getTokenId(marker);
+            return {
+                ok: true,
+                marker,
+                markerId,
+                markerIds: [markerId],
+                markerName: markerBase.name,
+                markerGroup: {
+                    type: 'line',
+                    lengthFeet,
+                    widthFeet,
+                    pieces: [{ id: markerId, index: 0, width: widthPx, height: lengthPx }]
+                }
+            };
+        },
+
+        createStandardPlayerAreaMarker(request, sourceToken, markerBase) {
+            const payload = request && request.payload ? request.payload : {};
+            const areaInfo = payload.areaInfo && payload.areaInfo.isArea ? payload.areaInfo : null;
+            const sizePx = this.getAreaMarkerSizePixels(areaInfo, markerBase.pageId);
+            if (sizePx <= 0) return { ok: false, message: 'Area marker size could not be calculated.' };
+            const marker = this.createAreaMarkerGraphic({
+                pageId: markerBase.pageId,
+                imgsrc: markerBase.imgsrc,
+                name: markerBase.name,
+                left: Utils.toNumber(sourceToken.get('left'), 0),
+                top: Utils.toNumber(sourceToken.get('top'), 0),
+                width: sizePx,
+                height: sizePx,
+                rotation: 0,
+                controlledBy: markerBase.controlledBy,
+                gmnotes: 'Combat Assistant area marker for ' + String(request.id || '')
+            });
+            if (!marker) return { ok: false, message: 'Area marker token could not be created.' };
+            this.applyAreaMarkerVisuals(marker, markerBase.tooltip, markerBase.opacity, markerBase.lightInfo);
+            const markerId = this.getTokenId(marker);
+            return { ok: true, marker, markerId, markerIds: [markerId], markerName: markerBase.name };
+        },
+
+        getAreaMarkerName(actionId, sourceName) {
+            const id = String(actionId || '').trim();
+            const caster = Utils.normalizeName(sourceName || 'caster').replace(/\s+/g, '-').slice(0, 32) || 'caster';
+            return 'CA Area ' + caster + ' ' + id;
+        },
+
+        createPlayerAreaMarker(request, sourceToken, playerId) {
+            const payload = request && request.payload ? request.payload : {};
+            const areaInfo = payload.areaInfo && payload.areaInfo.isArea ? payload.areaInfo : null;
+            if (!areaInfo) return { ok: false, message: 'Area information was not found.' };
+            if (!sourceToken || !Utils.isFunction(sourceToken.get)) return { ok: false, message: 'Caster token was not found.' };
+            if (typeof createObj !== 'function') return { ok: false, message: 'Roll20 createObj is not available.' };
+            const imgsrc = this.getAreaMarkerImageUrl(areaInfo);
+            if (!imgsrc) return { ok: false, message: 'Area marker image URL is not configured.' };
+            const pageId = this.getTokenPageId(sourceToken);
+            if (!pageId) return { ok: false, message: 'Caster token page was not found.' };
+            const sourceTokenId = this.getTokenId(sourceToken);
+            const sourceCharacter = this.getCharacterFromToken(sourceToken);
+            const sourceCharacterId = sourceCharacter ? String(sourceCharacter.id || sourceToken.get('represents') || '').trim() : String(sourceToken.get('represents') || '').trim();
+            payload.casterTokenId = sourceTokenId;
+            payload.casterCharacterId = sourceCharacterId;
+            payload.casterPageId = pageId;
+            if (request) {
+                request.sourceTokenId = sourceTokenId;
+                request.sourceCharacterId = sourceCharacterId;
+                request.sourcePageId = pageId;
+            }
+            const opacity = Utils.clamp(Utils.toInt(RuntimeConfig.get('PLAYER_MARKER_OPACITY'), 60), 0, 100) / 100;
+            const controlledBy = this.getTokenControllerIds(sourceToken, sourceCharacter, playerId).join(',');
+            const name = this.getAreaMarkerName(request.id, payload.sourceName || request.characterName || 'caster');
+            const tooltip = this.playerAreaMarkerTooltip(request, payload, areaInfo);
+            const markerBase = { pageId, imgsrc, controlledBy, name, tooltip, opacity, lightInfo: payload.lightInfo || null };
+            if (this.isConeAreaShape(areaInfo.shape)) return this.createConePlayerAreaMarker(request, sourceToken, markerBase);
+            if (this.isLineAreaShape(areaInfo.shape)) return this.createLinePlayerAreaMarker(request, sourceToken, markerBase);
+            return this.createStandardPlayerAreaMarker(request, sourceToken, markerBase);
+        },
+
+        getAreaInfoOptions(areaInfo) {
+            const primary = areaInfo && areaInfo.isArea ? areaInfo : null;
+            const options = primary && Array.isArray(primary.options) ? primary.options : [];
+            const list = options.length ? options : (primary ? [primary] : []);
+            const seen = Object.create(null);
+            return list.filter((entry) => {
+                if (!entry || !entry.isArea) return false;
+                const key = [
+                    String(entry.shape || '').trim().toLowerCase(),
+                    Utils.toNumber(entry.sizeFeet, 0),
+                    Utils.toNumber(entry.widthFeet, 0)
+                ].join(':');
+                if (seen[key]) return false;
+                seen[key] = true;
+                return true;
+            });
+        },
+
+        createPlayerAreaMarkers(request, sourceToken, playerId) {
+            const payload = request && request.payload ? request.payload : {};
+            const options = this.getAreaInfoOptions(payload.areaInfo);
+            if (!options.length) return { ok: false, alternatives: [], message: 'Area information was not found.' };
+            const alternatives = [];
+            const errors = [];
+            options.forEach((areaInfo, index) => {
+                const variant = String(areaInfo.shape || 'area').toLowerCase() + '-' + String(index + 1);
+                const variantRequest = Object.assign({}, request, {
+                    id: String(request.id || '') + '-' + variant,
+                    payload: Object.assign({}, payload, { areaInfo })
+                });
+                const result = this.createPlayerAreaMarker(variantRequest, sourceToken, playerId);
+                if (!result || !result.ok) {
+                    errors.push((areaInfo.label || areaInfo.shape || 'Area') + ': ' + String(result && result.message || 'marker could not be created'));
+                    return;
+                }
+                alternatives.push({
+                    id: variant,
+                    areaInfo,
+                    markerTokenId: result.markerId,
+                    markerTokenIds: Array.isArray(result.markerIds) ? result.markerIds.slice() : [result.markerId].filter(Boolean),
+                    markerName: result.markerName,
+                    markerGroup: result.markerGroup || null,
+                    dismissed: false
+                });
+            });
+            return {
+                ok: alternatives.length > 0,
+                alternatives,
+                markerIds: alternatives.reduce((ids, alternative) => ids.concat(alternative.markerTokenIds || []), []),
+                message: errors.join(' ')
+            };
+        },
+
+        getActiveAreaMarkerAlternatives(request) {
+            const alternatives = request && Array.isArray(request.areaMarkerAlternatives) ? request.areaMarkerAlternatives : [];
+            if (!alternatives.length) {
+                const marker = this.findPlayerAreaMarker(request);
+                return marker ? [{
+                    id: 'legacy',
+                    areaInfo: request && request.payload && request.payload.areaInfo,
+                    markerTokenId: this.getTokenId(marker),
+                    markerTokenIds: this.findPlayerAreaMarkers(request).map((entry) => this.getTokenId(entry)).filter(Boolean),
+                    markerName: request && request.markerName,
+                    markerGroup: request && request.areaMarkerGroup
+                }] : [];
+            }
+            return alternatives.filter((alternative) => {
+                if (!alternative || alternative.dismissed) return false;
+                const expected = Array.isArray(alternative.markerTokenIds) ? alternative.markerTokenIds.filter(Boolean) : [];
+                const existing = expected.filter((id) => !!this.getTokenById(id));
+                if (!expected.length || existing.length !== expected.length) {
+                    alternative.dismissed = true;
+                    AREA_MARKER_DESTROY_ACTIVE = true;
+                    try {
+                        existing.forEach((id) => {
+                            const marker = this.getTokenById(id);
+                            if (marker) this.removeGraphic(marker);
+                        });
+                    } finally {
+                        AREA_MARKER_DESTROY_ACTIVE = false;
+                    }
+                    alternative.markerTokenId = '';
+                    alternative.markerTokenIds = [];
+                    return false;
+                }
+                return true;
+            });
+        },
+
+        activateAreaMarkerAlternative(request, alternative) {
+            if (!request || !alternative) return false;
+            request.payload = request.payload || {};
+            request.payload.areaInfo = alternative.areaInfo || request.payload.areaInfo;
+            request.markerTokenId = String(alternative.markerTokenId || '').trim();
+            request.markerTokenIds = Array.isArray(alternative.markerTokenIds) ? alternative.markerTokenIds.slice() : [request.markerTokenId].filter(Boolean);
+            request.markerName = alternative.markerName || request.markerName;
+            request.areaMarkerGroup = alternative.markerGroup || null;
+            request.activeAreaAlternativeId = alternative.id || '';
+            return true;
+        },
+
+        playerAreaMarkerTooltip(request, payload, areaInfo) {
+            const sourceName = String(payload && payload.sourceName || request && request.characterName || 'Caster').trim() || 'Caster';
+            const actionName = String(payload && payload.sourceAction || request && request.attackName || '').trim();
+            const saveAbility = CombatService.abilityNameToShortLabel(payload && payload.saveAbility || '') || '';
+            const challenge = Math.max(0, Utils.toInt(payload && payload.challenge, 0));
+            const check = saveAbility && challenge ? (saveAbility + ' DC ' + String(challenge)) : (challenge ? ('Roll ' + String(challenge)) : '');
+            const damageRolls = Array.isArray(payload && payload.damageRolls) ? payload.damageRolls : [];
+            const damage = damageRolls.map((roll) => {
+                const total = Math.max(0, Utils.toInt(roll && roll.total, 0));
+                const type = CombatService.normalizeDamageType(roll && roll.damageType || 'normal');
+                const label = type ? (type.charAt(0).toUpperCase() + type.slice(1)) : 'Damage';
+                return String(total) + ' ' + (type === 'normal' ? 'Damage' : (label + ' Damage'));
+            }).filter(Boolean).join(', ');
+            const damageFormula = CombatService.getPrimaryDamageFormula(payload);
+            const casterTokenId = String(payload && payload.casterTokenId || request && request.sourceTokenId || '').trim();
+            const rangeInfo = CombatService.getAreaMarkerRangeInfo(payload || {});
+            const range = rangeInfo.limited
+                ? (String(rangeInfo.rangeFeet) + ' ft')
+                : Utils.cleanRoll20Label(payload && payload.rangeText || '');
+            const areaSize = Math.max(0, Utils.toNumber(areaInfo && areaInfo.sizeFeet, 0));
+            const areaShape = String(areaInfo && areaInfo.shape || '').trim().toLowerCase();
+            const areaLabel = areaSize > 0 && areaShape ? (String(areaSize).replace(/\.0+$/, '') + ' ft ' + areaShape) : (areaInfo && areaInfo.label ? String(areaInfo.label) : '');
+            const lightInfo = payload && payload.lightInfo && payload.lightInfo.hasLight ? payload.lightInfo : null;
+            const lightLabel = lightInfo
+                ? (String(lightInfo.label || (String(Math.max(0, Utils.toNumber(lightInfo.brightFeet, 0))).replace(/\.0+$/, '') + ' ft bright')).trim())
+                : '';
+            return [
+                '[' + sourceName + ']',
+                actionName ? '[' + actionName + ']' : '',
+                check ? '[' + check + ']' : '',
+                damage ? '[' + damage + ']' : '',
+                range ? '[' + range + ']' : '',
+                areaLabel ? '[' + areaLabel + ']' : '',
+                lightLabel ? '[Light: ' + lightLabel + ']' : '',
+                damageFormula ? '[' + damageFormula + ']' : '',
+                casterTokenId ? '[' + casterTokenId + ']' : ''
+            ].filter(Boolean).join('');
+        },
+
+        findPlayerAreaMarker(request) {
+            const markerId = String(request && request.markerTokenId || '').trim();
+            const byId = markerId ? this.getTokenById(markerId) : null;
+            if (byId) return byId;
+            const name = String(request && request.markerName || this.getAreaMarkerName(request && request.id, request && request.characterName || '') || '').trim();
+            if (!name) return null;
+            const tokens = findObjs({ _type: 'graphic', name }) || [];
+            return tokens.find((token) => token && Utils.isFunction(token.get)) || null;
+        },
+
+        findPlayerAreaMarkers(request) {
+            const activeIds = request && request.activeAreaAlternativeId && Array.isArray(request.markerTokenIds)
+                ? request.markerTokenIds
+                : State.getPlayerActionMarkerIds(request);
+            const markers = activeIds.map((id) => this.getTokenById(id)).filter((token) => token && Utils.isFunction(token.get));
+            if (markers.length) return markers;
+            const marker = this.findPlayerAreaMarker(request);
+            return marker ? [marker] : [];
+        },
+
+        removeGraphic(token) {
+            if (!token || !Utils.isFunction(token.remove)) return false;
+            try {
+                token.remove();
+                return true;
+            } catch (error) {
+                Logger.debug('[graphic:remove]', error && error.message ? error.message : String(error));
+                return false;
+            }
+        },
+
+        getConeMarkerPieceLimit(piece, fallbackIndex) {
+            return Math.max(1, Utils.toInt(piece && piece.widthCells, 1));
+        },
+
+        measureTokenCenterToMarkerCenterPixels(token, marker) {
+            const tokenRect = this.getTokenRect(token);
+            const markerRect = this.getTokenRect(marker);
+            if (!tokenRect || !markerRect) return Infinity;
+            const dx = tokenRect.left - markerRect.left;
+            const dy = tokenRect.top - markerRect.top;
+            return Math.sqrt((dx * dx) + (dy * dy));
+        },
+
+        getConeMarkerPieceMeta(request, marker, fallbackIndex) {
+            const markerId = this.getTokenId(marker);
+            const pieces = request && request.areaMarkerGroup && Array.isArray(request.areaMarkerGroup.pieces)
+                ? request.areaMarkerGroup.pieces
+                : [];
+            return pieces.find((piece) => String(piece && piece.id || '').trim() === markerId) || {
+                id: markerId,
+                index: fallbackIndex || 0
+            };
+        },
+
+        getTokensInsideConeAreaMarker(markers, request, boundaryInsetPx, casterTokenId, isSelfRange) {
+            if (!Array.isArray(markers) || !markers.length) return [];
+            const selectedById = Object.create(null);
+            const markerIds = markers.map((entry) => this.getTokenId(entry)).filter(Boolean);
+            const candidates = this.getTokensOnPage(this.getTokenPageId(markers[0])).filter((token) => {
+                const tokenId = this.getTokenId(token);
+                if (!token || !tokenId || markerIds.indexOf(tokenId) >= 0) return false;
+                if (casterTokenId && tokenId === casterTokenId) return false;
+                return !!this.getTokenRect(token);
+            });
+            markers.forEach((pieceMarker, pieceIndex) => {
+                const pieceMeta = this.getConeMarkerPieceMeta(request, pieceMarker, pieceIndex);
+                const limit = this.getConeMarkerPieceLimit(pieceMeta, pieceIndex);
+                const pieceHits = candidates
+                    .map((token) => ({
+                        token,
+                        tokenId: this.getTokenId(token),
+                        distance: this.measureTokenCenterToMarkerCenterPixels(token, pieceMarker),
+                        intersects: this.tokenIntersectsRotatedMarker(token, pieceMarker, boundaryInsetPx)
+                    }))
+                    .filter((entry) => entry.intersects && !selectedById[entry.tokenId])
+                    .sort((a, b) => a.distance - b.distance)
+                    .slice(0, limit);
+                pieceHits.forEach((entry) => {
+                    selectedById[entry.tokenId] = entry.token;
+                });
+            });
+            return Object.keys(selectedById).map((tokenId) => selectedById[tokenId]).filter(Boolean);
+        },
+
+        getLineMarkerEndpoints(marker) {
+            const rect = this.getTokenRect(marker);
+            if (!rect) return null;
+            const center = { x: rect.left, y: rect.top };
+            const halfLength = rect.height / 2;
+            return {
+                first: this.rotatePoint({ x: rect.left, y: rect.top - halfLength }, center, this.getTokenRotationDegrees(marker)),
+                second: this.rotatePoint({ x: rect.left, y: rect.top + halfLength }, center, this.getTokenRotationDegrees(marker))
+            };
+        },
+
+        getLineMarkerStartEnd(marker, sourceToken) {
+            const endpoints = this.getLineMarkerEndpoints(marker);
+            const sourceRect = this.getTokenRect(sourceToken);
+            if (!endpoints) return null;
+            if (!sourceRect) return { start: endpoints.first, end: endpoints.second };
+            const distance = (point) => {
+                const dx = point.x - sourceRect.left;
+                const dy = point.y - sourceRect.top;
+                return Math.sqrt((dx * dx) + (dy * dy));
+            };
+            return distance(endpoints.first) <= distance(endpoints.second)
+                ? { start: endpoints.first, end: endpoints.second }
+                : { start: endpoints.second, end: endpoints.first };
+        },
+
+        getTokensInsideLineAreaMarker(marker, request, boundaryInsetPx, casterTokenId, isSelfRange) {
+            const pageId = this.getTokenPageId(marker);
+            const markerId = this.getTokenId(marker);
+            if (!pageId || !markerId) return [];
+            return this.getTokensOnPage(pageId).filter((token) => {
+                const tokenId = this.getTokenId(token);
+                if (!token || !tokenId || tokenId === markerId) return false;
+                if (isSelfRange && casterTokenId && tokenId === casterTokenId) return false;
+                return this.tokenIntersectsRotatedMarker(token, marker, boundaryInsetPx);
+            });
+        },
+
+        tokenCircleIntersectsAreaRadius(token, markerRect, pageId, radiusFeet, boundaryInsetFeet) {
+            const rect = this.getTokenRect(token);
+            if (!rect || !markerRect || !pageId) return false;
+            const dx = Utils.toNumber(rect.left, 0) - Utils.toNumber(markerRect.left, 0);
+            const dy = Utils.toNumber(rect.top, 0) - Utils.toNumber(markerRect.top, 0);
+            const centerDistanceFeet = this.pixelsToPageFeet(pageId, Math.sqrt((dx * dx) + (dy * dy)));
+            const tokenRadiusPx = Math.max(0, Math.min(Utils.toNumber(rect.width, 0), Utils.toNumber(rect.height, 0)) / 2);
+            const tokenRadiusFeet = this.pixelsToPageFeet(pageId, tokenRadiusPx);
+            return centerDistanceFeet <= Math.max(0, Utils.toNumber(radiusFeet, 0) + tokenRadiusFeet - Utils.toNumber(boundaryInsetFeet, 0));
+        },
+
+        debugCirclePath(radiusPx, segments) {
+            const radius = Math.max(1, Utils.toNumber(radiusPx, 1));
+            const count = Math.max(12, Utils.toInt(segments, 36));
+            const center = radius;
+            const path = [];
+            for (let i = 0; i <= count; i += 1) {
+                const angle = (Math.PI * 2 * i) / count;
+                const x = Math.round((center + Math.cos(angle) * radius) * 100) / 100;
+                const y = Math.round((center + Math.sin(angle) * radius) * 100) / 100;
+                path.push([i === 0 ? 'M' : 'L', x, y]);
+            }
+            return JSON.stringify(path);
+        },
+
+        debugDrawCircle(pageId, centerX, centerY, radiusPx, options) {
+            const opts = options || {};
+            const radius = Math.max(1, Utils.toNumber(radiusPx, 0));
+            const safePageId = String(pageId || '').trim();
+            if (!safePageId || typeof createObj !== 'function') return null;
+            let path = null;
+            try {
+                path = createObj('path', {
+                    _pageid: safePageId,
+                    layer: opts.layer || 'gmlayer',
+                    left: Utils.toNumber(centerX, 0),
+                    top: Utils.toNumber(centerY, 0),
+                    width: radius * 2,
+                    height: radius * 2,
+                    stroke: opts.stroke || 'rgb(80,180,255)',
+                    stroke_width: Math.max(1, Utils.toInt(opts.strokeWidth, 2)),
+                    fill: opts.fill || 'transparent',
+                    _path: this.debugCirclePath(radius, opts.segments || 48)
+                });
+                if (path && Utils.isFunction(path.set)) {
+                    path.set({
+                        controlledby: '',
+                        name: opts.name || 'CA Area Radius Debug',
+                        gmnotes: opts.gmnotes || 'Temporary Combat Assistant area radius debug drawing.'
+                    });
+                }
+                const ttlMs = Math.max(5000, Utils.toInt(opts.ttlMs, 45000));
+                setTimeout(() => {
+                    try {
+                        if (path && Utils.isFunction(path.remove)) path.remove();
+                    } catch (ignored) {}
+                }, ttlMs);
+            } catch (error) {
+                Logger.debug('[area-radius-debug-draw]', error && error.message ? error.message : String(error));
+            }
+            return path;
+        },
+
+        debugDrawAreaRadiusMeasurement(pageId, markerRect, token, radiusFeet, included, drawAreaCircle) {
+            if (!RuntimeConfig.get('AREA_RADIUS_DEBUG_DRAW')) return;
+            const rect = this.getTokenRect(token);
+            if (!pageId || !markerRect || !rect) return;
+            const tokenRadiusPx = Math.max(1, Math.min(Utils.toNumber(rect.width, 0), Utils.toNumber(rect.height, 0)) / 2);
+            if (drawAreaCircle) {
+                const areaRadiusPx = this.pageFeetToPixels(pageId, Math.max(0, Utils.toNumber(radiusFeet, 0)));
+                this.debugDrawCircle(pageId, markerRect.left, markerRect.top, areaRadiusPx, {
+                    stroke: 'rgb(80,180,255)',
+                    strokeWidth: 2,
+                    name: 'CA Area Radius Debug',
+                    gmnotes: 'Combat Assistant debug: circular area reference.',
+                    ttlMs: 45000
+                });
+            }
+            this.debugDrawCircle(pageId, rect.left, rect.top, tokenRadiusPx, {
+                stroke: included ? 'rgb(90,230,120)' : 'rgb(230,80,80)',
+                strokeWidth: 2,
+                name: 'CA Token Radius Debug',
+                gmnotes: 'Combat Assistant debug: token circular radius reference.',
+                ttlMs: 45000
+            });
+        },
+
+        getTokensInsideAreaMarker(marker, request) {
+            if (!marker || !Utils.isFunction(marker.get)) return [];
+            const payload = request && request.payload ? request.payload : {};
+            const areaInfo = payload.areaInfo && payload.areaInfo.isArea ? payload.areaInfo : {};
+            const casterTokenId = String(payload.casterTokenId || request && request.sourceTokenId || '').trim();
+            const isSelfRange = /^self\b/i.test(Utils.cleanRoll20Label(payload.rangeText || payload.range || ''));
+            const markers = this.findPlayerAreaMarkers(request);
+            const markerIds = markers.map((entry) => this.getTokenId(entry)).filter(Boolean);
+            const pageId = this.getTokenPageId(marker);
+            const markerRect = this.getTokenRect(marker);
+            if (!pageId || !markerRect) return [];
+            const shape = String(areaInfo.shape || '').trim();
+            const isCone = this.isConeAreaShape(shape);
+            const isLine = this.isLineAreaShape(shape);
+            const isSquare = this.isSquareAreaShape(shape);
+            const radiusFeet = isSquare || isLine ? 0 : this.pixelsToPageFeet(pageId, markerRect.width / 2);
+            const boundaryInsetFeet = 0.1;
+            const boundaryInsetPx = this.pageFeetToPixels(pageId, boundaryInsetFeet);
+            if (isCone) return this.getTokensInsideConeAreaMarker(markers, request, boundaryInsetPx, casterTokenId, isSelfRange);
+            if (isLine) return this.getTokensInsideLineAreaMarker(marker, request, boundaryInsetPx, casterTokenId, isSelfRange);
+            let radiusDebugAreaDrawn = false;
+            return this.getTokensOnPage(pageId).filter((token) => {
+                const tokenId = this.getTokenId(token);
+                if (!token || !tokenId || markerIds.indexOf(tokenId) >= 0) return false;
+                if (isSelfRange && casterTokenId && tokenId === casterTokenId) return false;
+                const rect = this.getTokenRect(token);
+                if (!rect) return false;
+                if (isSquare) {
+                    return rect.maxX > markerRect.minX + boundaryInsetPx &&
+                        rect.minX < markerRect.maxX - boundaryInsetPx &&
+                        rect.maxY > markerRect.minY + boundaryInsetPx &&
+                        rect.minY < markerRect.maxY - boundaryInsetPx;
+                }
+                const included = this.tokenCircleIntersectsAreaRadius(token, markerRect, pageId, radiusFeet, boundaryInsetFeet);
+                const drawAreaCircle = !radiusDebugAreaDrawn;
+                if (drawAreaCircle) radiusDebugAreaDrawn = true;
+                this.debugDrawAreaRadiusMeasurement(pageId, markerRect, token, radiusFeet, included, drawAreaCircle);
+                return included;
+            });
+        },
+
+        getAreaMarkerSourceToken(request) {
+            const payload = request && request.payload ? request.payload : {};
+            const sourceId = String(payload.casterTokenId || request && request.sourceTokenId || '').trim();
+            return sourceId ? this.getTokenById(sourceId) : null;
+        },
+
+        isSelfAreaMarkerRequest(request) {
+            const payload = request && request.payload ? request.payload : {};
+            return /^self\b/i.test(Utils.cleanRoll20Label(payload.rangeText || payload.range || ''));
+        },
+
+        snapSelfAreaMarkerToSource(marker, request) {
+            const sourceToken = this.getAreaMarkerSourceToken(request);
+            const markerPageId = this.getTokenPageId(marker);
+            const sourcePageId = this.getTokenPageId(sourceToken);
+            const sourceRect = this.getTokenRect(sourceToken);
+            if (!marker || !Utils.isFunction(marker.set) || !sourceRect || !markerPageId || markerPageId !== sourcePageId) return false;
+            marker.set({
+                left: sourceRect.left,
+                top: sourceRect.top
+            });
+            return true;
+        },
+
+        syncLineAreaMarkerToSource(marker, request) {
+            const sourceToken = this.getAreaMarkerSourceToken(request);
+            const sourceRect = this.getTokenRect(sourceToken);
+            const markerRect = this.getTokenRect(marker);
+            const sourcePageId = this.getTokenPageId(sourceToken);
+            const markerPageId = this.getTokenPageId(marker);
+            if (!sourceRect || !markerRect || !sourcePageId || sourcePageId !== markerPageId || !Utils.isFunction(marker.set)) return false;
+            const endpoints = this.getLineMarkerStartEnd(marker, sourceToken);
+            if (!endpoints) return false;
+            const maxDistancePx = this.pageFeetToPixels(sourcePageId, 5);
+            const clamped = this.clampPointToDistance(endpoints.start, { x: sourceRect.left, y: sourceRect.top }, maxDistancePx);
+            const shiftX = clamped.x - endpoints.start.x;
+            const shiftY = clamped.y - endpoints.start.y;
+            if (Math.abs(shiftX) < 0.01 && Math.abs(shiftY) < 0.01) return true;
+            marker.set({ left: markerRect.left + shiftX, top: markerRect.top + shiftY });
+            return true;
+        },
+
+        syncAreaMarkerGroupForMovedToken(token) {
+            if (AREA_MARKER_GROUP_SYNC_ACTIVE || !token || !Utils.isFunction(token.get)) return false;
+            const markerId = this.getTokenId(token);
+            const found = State.findAreaMarkerRequestByTokenId(markerId);
+            if (!found || !found.request) return false;
+            const payload = found.request.payload || {};
+            const areaInfo = found.alternative && found.alternative.areaInfo
+                ? found.alternative.areaInfo
+                : (payload.areaInfo && payload.areaInfo.isArea ? payload.areaInfo : null);
+            if (areaInfo && this.isLineAreaShape(areaInfo.shape) && this.isSelfAreaMarkerRequest(found.request)) {
+                AREA_MARKER_GROUP_SYNC_ACTIVE = true;
+                try {
+                    return this.syncLineAreaMarkerToSource(token, found.request);
+                } finally {
+                    AREA_MARKER_GROUP_SYNC_ACTIVE = false;
+                }
+            }
+            if (areaInfo && !this.isConeAreaShape(areaInfo.shape) && this.isSelfAreaMarkerRequest(found.request)) {
+                AREA_MARKER_GROUP_SYNC_ACTIVE = true;
+                try {
+                    return this.snapSelfAreaMarkerToSource(token, found.request);
+                } finally {
+                    AREA_MARKER_GROUP_SYNC_ACTIVE = false;
+                }
+            }
+            if (!found.group || String(found.group.type || '').toLowerCase() !== 'cone') return false;
+            const pieces = Array.isArray(found.group.pieces) ? found.group.pieces : [];
+            const movedPiece = pieces.find((piece) => String(piece && piece.id || '').trim() === markerId);
+            if (!movedPiece) return false;
+            const movedRect = this.getTokenRect(token);
+            if (!movedRect) return false;
+            const rotation = this.getTokenRotationDegrees(token) - Utils.toNumber(movedPiece.rotationOffset, 0);
+            const rotatedOffset = this.rotatePoint(
+                { x: Utils.toNumber(movedPiece.offsetX, 0), y: Utils.toNumber(movedPiece.offsetY, 0) },
+                { x: 0, y: 0 },
+                rotation
+            );
+            const center = {
+                x: movedRect.left - rotatedOffset.x,
+                y: movedRect.top - rotatedOffset.y
+            };
+            const sourceToken = this.getAreaMarkerSourceToken(found.request);
+            const sourceRect = this.getTokenRect(sourceToken);
+            const sourcePageId = this.getTokenPageId(sourceToken);
+            const markerPageId = this.getTokenPageId(token);
+            const firstPiece = pieces[0] || movedPiece;
+            if (sourceRect && sourcePageId && sourcePageId === markerPageId && firstPiece) {
+                const firstOffset = this.rotatePoint(
+                    { x: Utils.toNumber(firstPiece.offsetX, 0), y: Utils.toNumber(firstPiece.offsetY, 0) },
+                    { x: 0, y: 0 },
+                    rotation
+                );
+                const firstCenter = {
+                    x: center.x + firstOffset.x,
+                    y: center.y + firstOffset.y
+                };
+                const maxDistancePx = this.pageFeetToPixels(sourcePageId, 5);
+                const clampedFirstCenter = this.clampPointToDistance(firstCenter, { x: sourceRect.left, y: sourceRect.top }, maxDistancePx);
+                center.x = clampedFirstCenter.x - firstOffset.x;
+                center.y = clampedFirstCenter.y - firstOffset.y;
+            }
+            AREA_MARKER_GROUP_SYNC_ACTIVE = true;
+            try {
+                found.group.centerLeft = center.x;
+                found.group.centerTop = center.y;
+                found.group.rotation = rotation;
+                pieces.forEach((piece) => {
+                    const marker = this.getTokenById(piece.id);
+                    if (!marker || !Utils.isFunction(marker.set)) return;
+                    const offset = this.rotatePoint(
+                        { x: Utils.toNumber(piece.offsetX, 0), y: Utils.toNumber(piece.offsetY, 0) },
+                        { x: 0, y: 0 },
+                        rotation
+                    );
+                    marker.set({
+                        left: center.x + offset.x,
+                        top: center.y + offset.y,
+                        width: Math.max(1, Utils.toNumber(piece.width, 1)),
+                        height: Math.max(1, Utils.toNumber(piece.height, 1)),
+                        rotation: rotation + Utils.toNumber(piece.rotationOffset, 0)
+                    });
+                });
+            } catch (error) {
+                Logger.debug('[area-marker-sync]', error && error.message ? error.message : String(error));
+                return false;
+            } finally {
+                AREA_MARKER_GROUP_SYNC_ACTIVE = false;
+            }
+            return true;
+        },
+
+        handleAreaMarkerDestroyed(token) {
+            if (AREA_MARKER_DESTROY_ACTIVE || !token) return false;
+            const markerId = this.getTokenId(token);
+            const found = State.findAreaMarkerRequestByTokenId(markerId);
+            if (!found || !found.request) return false;
+            const request = found.request;
+            const alternative = found.alternative;
+            const concentrationCasterTokenId = String(request.concentrationCasterTokenId || '').trim();
+            const shouldEndConcentration = !!(request.concentrationAreaActive && concentrationCasterTokenId);
+            const ids = alternative
+                ? (Array.isArray(alternative.markerTokenIds) ? alternative.markerTokenIds.slice() : [alternative.markerTokenId].filter(Boolean))
+                : State.getPlayerActionMarkerIds(request);
+            if (alternative) {
+                alternative.dismissed = true;
+                alternative.markerTokenId = '';
+                alternative.markerTokenIds = [];
+            }
+            request.markerTokenIds = (Array.isArray(request.markerTokenIds) ? request.markerTokenIds : [])
+                .filter((id) => ids.indexOf(String(id || '').trim()) < 0);
+            if (ids.indexOf(String(request.markerTokenId || '').trim()) >= 0) {
+                request.markerTokenId = '';
+                request.markerName = '';
+                request.areaMarkerGroup = null;
+            }
+            AREA_MARKER_DESTROY_ACTIVE = true;
+            try {
+                ids.forEach((id) => {
+                    const safeId = String(id || '').trim();
+                    if (!safeId || safeId === markerId) return;
+                    const remaining = this.getTokenById(safeId);
+                    if (remaining) this.removeGraphic(remaining);
+                });
+            } finally {
+                AREA_MARKER_DESTROY_ACTIVE = false;
+            }
+            if (shouldEndConcentration && typeof CombatService !== 'undefined' && CombatService.endConcentrationByTokenId) {
+                CombatService.endConcentrationByTokenId(concentrationCasterTokenId, 'area marker removed');
+            }
+            return true;
         },
 
         findTokenByCharacterIdOnPage(characterId, pageId) {
@@ -1023,6 +2730,20 @@ const CombatAssistant = (() => {
             }).filter(Boolean));
         },
 
+        getTokenControllerIds(token, character, fallbackPlayerId) {
+            const ids = [];
+            const addIds = (raw) => {
+                String(raw || '').split(',').forEach((id) => {
+                    const safeId = String(id || '').trim();
+                    if (safeId && ids.indexOf(safeId) < 0) ids.push(safeId);
+                });
+            };
+            if (token && Utils.isFunction(token.get)) addIds(token.get('controlledby'));
+            if (character && Utils.isFunction(character.get)) addIds(character.get('controlledby'));
+            if (!ids.length && fallbackPlayerId) addIds(fallbackPlayerId);
+            return ids;
+        },
+
         isPlayerControlledToken(token, character) {
             const tokenControlledBy = token && Utils.isFunction(token.get) ? String(token.get('controlledby') || '').trim() : '';
             return !!tokenControlledBy || this.isPlayerControlledCharacter(character);
@@ -1079,7 +2800,7 @@ const CombatAssistant = (() => {
             if (storeRoots.some((root) => root && typeof root === 'object' && (root.integrants || root.settings || root.hitpoints))) return '2024';
 
             const attrs = findObjs({ _type: 'attribute', _characterid: safeCharacterId }) || [];
-            const names = {};
+            const names = Object.create(null);
             attrs.forEach((attr) => {
                 if (!attr || !Utils.isFunction(attr.get)) return;
                 const name = String(attr.get('name') || '').trim().toLowerCase();
@@ -1088,6 +2809,330 @@ const CombatAssistant = (() => {
             const classicSignals = ['rtype', 'wtype', 'npc', 'spellcasting_ability', 'strength_save_roll', 'dexterity_save_roll', 'constitution_save_roll'];
             if (classicSignals.some((name) => names[name])) return '2014';
             return storeRoots.length ? '2024' : '2014';
+        }
+    };
+
+
+    /** -----------------------------------------------------------------------
+     * Combat visual effects
+     * --------------------------------------------------------------------- */
+    const CombatEffects = {
+        DAMAGE_TYPE_EFFECT_COLORS: Object.freeze({
+            normal: 'death',
+            bludgeoning: 'death',
+            piercing: 'death',
+            slashing: 'death',
+            fire: 'fire',
+            acid: 'acid',
+            poison: 'slime',
+            cold: 'water',
+            lightning: 'water',
+            thunder: 'frost',
+            force: 'magic',
+            psychic: 'charm',
+            necrotic: 'smoke',
+            radiant: 'holy',
+            healing: 'slime',
+            'temp healing': 'charm'
+        }),
+
+        isEnabled() {
+            return Utils.toBoolean(RuntimeConfig.get('COMBAT_VISUAL_EFFECTS'), false);
+        },
+
+        normalizeDamageType(value) {
+            const normalized = String(value || 'normal')
+                .trim()
+                .toLowerCase()
+                .replace(/[_-]+/g, ' ')
+                .replace(/\s+/g, ' ');
+            if (normalized === 'temporary healing' || normalized === 'temporary hp' || normalized === 'temp hp') return 'temp healing';
+            return normalized || 'normal';
+        },
+
+        getEffectColor(damageType) {
+            const normalized = this.normalizeDamageType(damageType);
+            return this.DAMAGE_TYPE_EFFECT_COLORS[normalized] || this.DAMAGE_TYPE_EFFECT_COLORS.normal;
+        },
+
+        getPrimaryDamageType(payloadOrParts) {
+            const source = payloadOrParts || {};
+            const parts = Array.isArray(source.parts) ? source.parts : [];
+            const damagingPart = parts.find((part) => Math.max(0, Utils.toInt(part && part.finalDamage, 0)) > 0);
+            if (damagingPart) return this.normalizeDamageType(damagingPart.damageType || 'normal');
+
+            const damageRolls = Array.isArray(source.damageRolls) ? source.damageRolls : [];
+            const positiveRoll = damageRolls.find((roll) => Math.max(0, Utils.toInt(roll && (roll.total || roll.amount || roll.damage), 0)) > 0);
+            const firstRoll = positiveRoll || damageRolls[0];
+            return this.normalizeDamageType(firstRoll && firstRoll.damageType || source.damageType || 'normal');
+        },
+
+        spawnAtToken(token, effectName, color) {
+            if (!this.isEnabled()) return false;
+            if (!token || !Utils.isFunction(token.get) || typeof spawnFx !== 'function') return false;
+            const rect = R20.getTokenRect(token);
+            const pageId = R20.getTokenPageId(token);
+            const effectRef = this.resolveColoredEffectReference(effectName, color);
+            if (!rect || !pageId || !effectRef) return false;
+            try {
+                spawnFx(rect.left, rect.top, effectRef, pageId);
+                return true;
+            } catch (error) {
+                Logger.debug('[combat-fx]', error && error.message ? error.message : String(error));
+                return false;
+            }
+        },
+
+        spawnTimedAtToken(token, effectName, color, durationMs) {
+            if (!this.isEnabled()) return false;
+            const duration = Utils.clamp(Utils.toInt(durationMs, 1000), 1, 10000);
+            const repeats = Math.max(1, Math.ceil(duration / 1000));
+            const interval = repeats > 1 ? Math.max(1, Math.floor(duration / repeats)) : 0;
+            for (let index = 0; index < repeats; index += 1) {
+                setTimeout(() => {
+                    this.spawnAtToken(token, effectName, color);
+                }, index * interval);
+            }
+            return true;
+        },
+
+        getProjectileEffectName() {
+            return String(RuntimeConfig.get('PROJECTILE_EFFECT_NAME') || '').trim();
+        },
+
+        getDirectHitEffectName() {
+            return String(RuntimeConfig.get('DIRECT_HIT_EFFECT_NAME') || '').trim();
+        },
+
+        getAreaHitEffectName() {
+            return String(RuntimeConfig.get('AREA_HIT_EFFECT_NAME') || '').trim();
+        },
+
+        findCustomEffectReference(effectName) {
+            const safeName = String(effectName || '').trim();
+            if (!safeName) return '';
+            try {
+                const exact = findObjs({ _type: 'custfx', name: safeName }) || [];
+                if (exact.length) return String(exact[0].id || exact[0].get('_id') || '');
+                const normalized = safeName.toLowerCase();
+                const custom = (findObjs({ _type: 'custfx' }) || []).find((effect) => {
+                    if (!effect || !Utils.isFunction(effect.get)) return false;
+                    return String(effect.get('name') || '').trim().toLowerCase() === normalized;
+                });
+                return custom ? String(custom.id || custom.get('_id') || '') : '';
+            } catch (error) {
+                Logger.debug('[combat-fx:custom]', error && error.message ? error.message : String(error));
+                return '';
+            }
+        },
+
+        resolveColoredEffectReference(effectName, color) {
+            const safeName = String(effectName || '').trim();
+            const safeColor = String(color || '').trim().toLowerCase();
+            if (!safeName || !safeColor) return '';
+            const exactCustom = this.findCustomEffectReference(safeName);
+            if (exactCustom) return exactCustom;
+            const normalizedName = safeName.toLowerCase();
+            const hasColorSuffix = /-(?:acid|blood|charm|death|fire|frost|holy|magic|slime|smoke|water)$/.test(normalizedName);
+            const coloredName = hasColorSuffix ? normalizedName : (normalizedName + '-' + safeColor);
+            return this.resolveEffectReference(coloredName);
+        },
+
+        resolveEffectReference(effectName) {
+            const safeName = String(effectName || '').trim();
+            if (!safeName) return '';
+            const customRef = this.findCustomEffectReference(safeName);
+            return customRef || safeName;
+        },
+
+        spawnBetweenTokens(sourceToken, targetToken, effectName) {
+            if (!this.isEnabled()) return false;
+            if (!sourceToken || !targetToken || !Utils.isFunction(sourceToken.get) || !Utils.isFunction(targetToken.get)) return false;
+            if (typeof spawnFxBetweenPoints !== 'function') return false;
+            const sourcePageId = R20.getTokenPageId(sourceToken);
+            const targetPageId = R20.getTokenPageId(targetToken);
+            const effectRef = this.resolveEffectReference(effectName);
+            if (!sourcePageId || sourcePageId !== targetPageId || !effectRef) return false;
+            const source = R20.getTokenRect(sourceToken);
+            const target = R20.getTokenRect(targetToken);
+            if (!source || !target) return false;
+            try {
+                spawnFxBetweenPoints(
+                    { x: source.left, y: source.top },
+                    { x: target.left, y: target.top },
+                    effectRef,
+                    sourcePageId
+                );
+                return true;
+            } catch (error) {
+                Logger.debug('[combat-fx:projectile]', error && error.message ? error.message : String(error));
+                return false;
+            }
+        },
+
+        spawnColoredBetweenPoints(sourceToken, targetToken, effectName, color) {
+            if (!this.isEnabled()) return false;
+            if (!sourceToken || !targetToken || !Utils.isFunction(sourceToken.get) || !Utils.isFunction(targetToken.get)) return false;
+            if (typeof spawnFxBetweenPoints !== 'function') return false;
+            const sourcePageId = R20.getTokenPageId(sourceToken);
+            const targetPageId = R20.getTokenPageId(targetToken);
+            const effectRef = this.resolveColoredEffectReference(effectName, color);
+            if (!sourcePageId || sourcePageId !== targetPageId || !effectRef) return false;
+            const source = R20.getTokenRect(sourceToken);
+            const target = R20.getTokenRect(targetToken);
+            if (!source || !target) return false;
+            try {
+                spawnFxBetweenPoints(
+                    { x: source.left, y: source.top },
+                    { x: target.left, y: target.top },
+                    effectRef,
+                    sourcePageId
+                );
+                return true;
+            } catch (error) {
+                Logger.debug('[combat-fx:breath]', error && error.message ? error.message : String(error));
+                return false;
+            }
+        },
+
+        spawnColoredBetweenCoordinates(start, end, pageId, effectName, color) {
+            if (!this.isEnabled() || typeof spawnFxBetweenPoints !== 'function') return false;
+            const effectRef = this.resolveColoredEffectReference(effectName, color);
+            if (!start || !end || !pageId || !effectRef) return false;
+            try {
+                spawnFxBetweenPoints(
+                    { x: Utils.toNumber(start.x, 0), y: Utils.toNumber(start.y, 0) },
+                    { x: Utils.toNumber(end.x, 0), y: Utils.toNumber(end.y, 0) },
+                    effectRef,
+                    pageId
+                );
+                return true;
+            } catch (error) {
+                Logger.debug('[combat-fx:coordinates]', error && error.message ? error.message : String(error));
+                return false;
+            }
+        },
+
+        isSelfRange(payload) {
+            const source = payload || {};
+            const rangeText = Utils.cleanRoll20Label(source.rangeText || source.range || '');
+            return /^self\b/i.test(rangeText);
+        },
+
+        isRangedProjectile(payload) {
+            const source = payload || {};
+            const areaInfo = source.areaInfo && source.areaInfo.isArea ? source.areaInfo : null;
+            if (String(source.type || '').trim().toLowerCase() !== 'damage' || areaInfo || this.isSelfRange(source)) return false;
+            const rangeText = Utils.cleanRoll20Label(source.rangeText || source.range || '').toLowerCase();
+            if (!rangeText || /\btouch\b|\breach\b/.test(rangeText)) return false;
+            const rangeInfo = CombatService.parseActionRangeFeet(rangeText);
+            if (!rangeInfo.ok || !rangeInfo.limited) return false;
+            if (/\branged\b/.test(rangeText) || /\d+(?:\.\d+)?\s*\/\s*\d+(?:\.\d+)?/.test(rangeText)) return true;
+            if (Utils.toBoolean(source.isSpellAction, false) && rangeInfo.rangeFeet > 5) return true;
+            return rangeInfo.rangeFeet > 10;
+        },
+
+        playProjectile(request, targetToken, resolvedSourceToken) {
+            if (!this.isEnabled()) return false;
+            const safeRequest = request || {};
+            const payload = safeRequest.payload || {};
+            const effectName = this.getProjectileEffectName();
+            const forceProjectile = !!(payload.forceProjectileFx || safeRequest.forceProjectileFx);
+            if (!effectName || (!forceProjectile && !this.isRangedProjectile(payload))) return false;
+            const sourceTokenId = String(payload.casterTokenId || safeRequest.sourceTokenId || '').trim();
+            const sourceToken = resolvedSourceToken || (sourceTokenId ? R20.getTokenById(sourceTokenId) : null);
+            if (forceProjectile) {
+                const measured = R20.measureTokenCenterToTargetEdgeFeet(sourceToken, targetToken);
+                if (measured.ok && measured.feet <= 10) return false;
+            }
+            return this.spawnBetweenTokens(sourceToken, targetToken, effectName);
+        },
+
+        playDamageReceived(token, result) {
+            if (!this.isEnabled() || !result || Math.max(0, Utils.toInt(result.totalDamage, 0)) <= 0) return false;
+            const isSavingThrowDamage = !!(result.save && result.save.used);
+            const effectName = isSavingThrowDamage ? this.getAreaHitEffectName() : this.getDirectHitEffectName();
+            const color = isSavingThrowDamage
+                ? this.getEffectColor(this.getPrimaryDamageType(result))
+                : 'blood';
+            return this.spawnAtToken(token, effectName, color);
+        },
+
+        playHealingReceived(token, mode, effectiveAmount) {
+            if (!this.isEnabled() || Math.max(0, Utils.toInt(effectiveAmount, 0)) <= 0) return false;
+            const type = String(mode || '').trim().toLowerCase() === 'temp' ? 'temp healing' : 'healing';
+            return this.spawnTimedAtToken(token, 'sparkle', this.getEffectColor(type), 1000);
+        },
+
+        playConeBreath(request, payload, fallbackMarkerToken) {
+            if (!this.isEnabled()) return false;
+            const safeRequest = request || {};
+            const safePayload = payload || safeRequest.payload || {};
+            const areaInfo = safePayload.areaInfo && safePayload.areaInfo.isArea ? safePayload.areaInfo : null;
+            if (!areaInfo || !R20.isConeAreaShape(areaInfo.shape)) return false;
+            const casterTokenId = String(safePayload.casterTokenId || safeRequest.sourceTokenId || '').trim();
+            const casterToken = casterTokenId ? R20.getTokenById(casterTokenId) : null;
+            if (!casterToken) return false;
+            const pieces = safeRequest.areaMarkerGroup && Array.isArray(safeRequest.areaMarkerGroup.pieces)
+                ? safeRequest.areaMarkerGroup.pieces.slice()
+                : [];
+            pieces.sort((a, b) => Utils.toInt(a && a.index, 0) - Utils.toInt(b && b.index, 0));
+            const lastPiece = pieces.length ? pieces[pieces.length - 1] : null;
+            const lastMarker = lastPiece && lastPiece.id ? R20.getTokenById(lastPiece.id) : fallbackMarkerToken;
+            if (!lastMarker) return false;
+            const color = this.getEffectColor(this.getPrimaryDamageType(safePayload));
+            return this.spawnColoredBetweenPoints(casterToken, lastMarker, 'breath', color);
+        },
+
+        playLineBeam(request, payload, markerToken) {
+            if (!this.isEnabled()) return false;
+            const safeRequest = request || {};
+            const safePayload = payload || safeRequest.payload || {};
+            const areaInfo = safePayload.areaInfo && safePayload.areaInfo.isArea ? safePayload.areaInfo : null;
+            if (!areaInfo || !R20.isLineAreaShape(areaInfo.shape)) return false;
+            const marker = markerToken || R20.findPlayerAreaMarker(safeRequest);
+            if (!marker) return false;
+            const casterTokenId = String(safePayload.casterTokenId || safeRequest.sourceTokenId || '').trim();
+            const casterToken = casterTokenId ? R20.getTokenById(casterTokenId) : null;
+            const endpoints = R20.getLineMarkerStartEnd(marker, casterToken);
+            if (!endpoints) return false;
+            const color = this.getEffectColor(this.getPrimaryDamageType(safePayload));
+            return this.spawnColoredBetweenCoordinates(
+                endpoints.start,
+                endpoints.end,
+                R20.getTokenPageId(marker),
+                'beam',
+                color
+            );
+        },
+
+        playSelfAreaNova(request, payload) {
+            if (!this.isEnabled()) return false;
+            const safeRequest = request || {};
+            const safePayload = payload || safeRequest.payload || {};
+            const areaInfo = safePayload.areaInfo && safePayload.areaInfo.isArea ? safePayload.areaInfo : null;
+            if (!areaInfo || !this.isSelfRange(safePayload)) return false;
+            if (String(safeRequest.type || safePayload.type || '').trim().toLowerCase() === 'heal') return false;
+            if (R20.isConeAreaShape(areaInfo.shape)) return this.playConeBreath(safeRequest, safePayload);
+            if (R20.isLineAreaShape(areaInfo.shape)) return this.playLineBeam(safeRequest, safePayload);
+            const casterTokenId = String(safePayload.casterTokenId || safeRequest.sourceTokenId || '').trim();
+            const casterToken = casterTokenId ? R20.getTokenById(casterTokenId) : null;
+            if (!casterToken) return false;
+            const color = this.getEffectColor(this.getPrimaryDamageType(safePayload));
+            return this.spawnAtToken(casterToken, 'nova', color);
+        },
+
+        playThrownAreaExplosion(request, payload, markerToken) {
+            if (!this.isEnabled()) return false;
+            const safeRequest = request || {};
+            const safePayload = payload || safeRequest.payload || {};
+            const areaInfo = safePayload.areaInfo && safePayload.areaInfo.isArea ? safePayload.areaInfo : null;
+            if (!areaInfo || this.isSelfRange(safePayload)) return false;
+            if (String(safeRequest.type || safePayload.type || '').trim().toLowerCase() === 'heal') return false;
+            if (R20.isConeAreaShape(areaInfo.shape)) return this.playConeBreath(safeRequest, safePayload, markerToken);
+            if (R20.isLineAreaShape(areaInfo.shape)) return this.playLineBeam(safeRequest, safePayload, markerToken);
+            const color = this.getEffectColor(this.getPrimaryDamageType(safePayload));
+            return this.spawnAtToken(markerToken, 'explode', color);
         }
     };
 
@@ -1176,7 +3221,7 @@ const CombatAssistant = (() => {
                 })
                 .filter((entry) => entry.value);
             const ordered = [];
-            const seen = {};
+            const seen = Object.create(null);
             const addOption = (entry) => {
                 const value = String(entry && entry.value || '').trim();
                 if (!value) return;
@@ -1208,6 +3253,53 @@ const CombatAssistant = (() => {
                 ['Slashing', 'slashing'],
                 ['Thunder', 'thunder']
             ]);
+        },
+
+        playerAreaFooterHtml(targetCount, areaInfo) {
+            const count = Math.max(0, Utils.toInt(targetCount, 0));
+            const label = areaInfo && areaInfo.label ? String(areaInfo.label) : 'Area';
+            return '<span style="color:rgb(105,220,120);font-weight:900;">' + Utils.escapeHtml(String(count)) + '</span> ' +
+                'Targets found in a ' +
+                '<span style="color:rgb(235,205,75);font-weight:900;">' + Utils.escapeHtml(label) + '</span>, ' +
+                'use this button once per target.';
+        },
+
+        playerAreaMarkerFooterHtml(areaInfo, payload) {
+            const options = payload && Array.isArray(payload.areaOptions) && payload.areaOptions.length
+                ? payload.areaOptions
+                : (areaInfo && Array.isArray(areaInfo.options) ? areaInfo.options : []);
+            if (options.length > 1) {
+                const labels = options.map((entry) => String(entry && (entry.label || entry.shape) || 'Area')).filter(Boolean);
+                return 'Multiple area choices detected: <span style="color:rgb(235,205,75);font-weight:900;">' +
+                    Utils.escapeHtml(labels.join(' or ')) +
+                    '</span>. Delete the marker you will not use. Roll works only when exactly one area remains.';
+            }
+            const label = areaInfo && areaInfo.label ? String(areaInfo.label) : 'Area';
+            const rangeInfo = RuntimeConfig.get('PLAYER_ACTION_RANGE_CHECK') ? CombatService.getAreaMarkerRangeInfo(payload || {}) : { ok: false };
+            const rangeText = rangeInfo.ok && rangeInfo.limited ? (String(rangeInfo.rangeFeet) + ' ft') : '';
+            return 'Move the ' +
+                '<span style="color:rgb(235,205,75);font-weight:900;">' + Utils.escapeHtml(label) + '</span> marker' +
+                (rangeText ? (' within <span style="color:rgb(235,205,75);font-weight:900;">' + Utils.escapeHtml(rangeText) + '</span>') : '') +
+                ', then press Roll.';
+        },
+
+        playerSingleTargetFooterHtml(payloadOrRangeText) {
+            if (!RuntimeConfig.get('PLAYER_ACTION_RANGE_CHECK')) {
+                return 'Single Use Button. Press the button, then choose a target when Roll20 asks.';
+            }
+            const isPayload = payloadOrRangeText && typeof payloadOrRangeText === 'object';
+            const rangeText = isPayload
+                ? CombatService.getRangeTextForFooter(payloadOrRangeText)
+                : '';
+            if (rangeText) {
+                return 'Single Use Button. Select a target within <span style="color:rgb(235,205,75);font-weight:900;">' + Utils.escapeHtml(rangeText) + '</span>.';
+            }
+            const range = Utils.cleanRoll20Label(isPayload ? '' : (payloadOrRangeText || ''));
+            const rangeInfo = CombatService.parseActionRangeFeet(range);
+            if (rangeInfo.ok && rangeInfo.limited) {
+                return 'Single Use Button. Select a target within <span style="color:rgb(235,205,75);font-weight:900;">' + Utils.escapeHtml(String(rangeInfo.rangeFeet)) + ' ft</span>.';
+            }
+            return 'Single Use Button. Press the button, then choose a target when Roll20 asks.';
         },
 
         saveAbilityQuery(defaultAbility) {
@@ -1244,6 +3336,7 @@ const CombatAssistant = (() => {
             const margin = String(options.margin || '0 1px');
             const paddingTop = Math.max(0, Utils.toInt(options.paddingTop, 5));
             const labelPaddingTop = Math.max(0, Utils.toInt(options.labelPaddingTop, 0));
+            const labelWhiteSpace = options.labelNoWrap ? 'nowrap' : 'normal';
             const safeTooltip = String(options.tooltip || '').trim();
             const titleAttr = safeTooltip ? (' title="' + Utils.attrSafe(safeTooltip) + '"') : '';
             return (
@@ -1253,9 +3346,32 @@ const CombatAssistant = (() => {
                     'background:' + backgroundColor + ';color:' + textColor + ';font-family:Arial,Helvetica,sans-serif;overflow:hidden;vertical-align:middle;margin:' + margin + ';padding:' + paddingTop + 'px 0 0 0;' +
                 '">' +
                     '<strong><span style="display:block;height:20px;line-height:19px;font-size:' + iconSize + 'px;text-align:center;">' + iconHtml + '</span></strong>' +
-                    '<strong><span style="display:block;height:' + labelHeight + 'px;line-height:' + labelLineHeight + 'px;padding:' + labelPaddingTop + 'px;font-size:' + labelSize + 'px;text-align:center;white-space:normal;">' + Utils.escapeHtml(label) + '</span></strong>' +
+                    '<strong><span style="display:block;height:' + labelHeight + 'px;line-height:' + labelLineHeight + 'px;padding:' + labelPaddingTop + 'px;font-size:' + labelSize + 'px;text-align:center;white-space:' + labelWhiteSpace + ';">' + Utils.escapeHtml(label) + '</span></strong>' +
                 '</a>'
             );
+        },
+
+        areaRollControlButtons(buildOptions) {
+            const options = buildOptions || {};
+            const actionId = String(options.actionId || '').trim();
+            const casterTokenId = String(options.casterTokenId || '').trim();
+            const buttons = [this.iconButtonHtml({
+                iconHtml: '&#127922;',
+                label: 'Roll',
+                command: options.rollCommand || ('!combatAssistant usearea ' + Utils.attrSafe(actionId)),
+                backgroundColor: 'rgba(120,40,40,0.95)',
+                tooltip: options.rollTooltip || 'Move the area marker, then roll every token inside it'
+            })];
+            if (options.isConcentration && casterTokenId) {
+                buttons.push(this.iconButtonHtml({
+                    iconHtml: '&#9201;&#65039;',
+                    label: 'End',
+                    command: '!combatAssistant conend ' + Utils.attrSafe(casterTokenId) + ' ' + Utils.attrSafe(actionId),
+                    backgroundColor: 'rgba(80,80,80,0.95)',
+                    tooltip: options.endTooltip || 'End concentration and remove the area marker'
+                }));
+            }
+            return buttons;
         },
 
         iconButtonTableHtml(buttons, options) {
@@ -1263,6 +3379,7 @@ const CombatAssistant = (() => {
             const safeButtons = Array.isArray(buttons) ? buttons.filter(Boolean) : [];
             const columns = Math.max(1, Utils.toInt(options.columns || safeButtons.length || 1, 1));
             const footer = String(options.footer || '').trim();
+            const footerHtml = String(options.footerHtml || '').trim();
             const colWidth = 100 / columns;
             const rows = [];
             for (let i = 0; i < safeButtons.length; i += columns) {
@@ -1275,7 +3392,7 @@ const CombatAssistant = (() => {
             }
             return (
                 '<table style="width:100%;border-collapse:collapse;table-layout:fixed;"><tbody>' + rows.join('') + '</tbody></table>' +
-                (footer ? '<div style="padding-top:5px;color:rgb(170,170,170);font-size:10px;line-height:12px;text-align:center;">' + Utils.escapeHtml(footer) + '</div>' : '')
+                (footerHtml || footer ? '<div style="padding-top:5px;color:rgb(170,170,170);font-size:10px;line-height:12px;text-align:center;">' + (footerHtml || Utils.escapeHtml(footer)) + '</div>' : '')
             );
         },
 
@@ -1336,10 +3453,20 @@ const CombatAssistant = (() => {
                     modifier,
                     success: !!roll.success,
                     dimmed: rolls.length > 1 && !isChosen,
-                    tooltip: ability + ' Save<br>Roll: ' + String(natural) + '<br>Modifier: ' + Utils.formatSigned(modifier) + '<br>Total: ' + String(total) + '<br>DC: ' + String(roll.dc) + (mode !== 'normal' ? ('<br>Mode: ' + mode) : '')
+                    tooltip: ability + ' Save<br>Roll: ' + String(natural) + '<br>Modifier: ' + Utils.formatSigned(modifier) + '<br>Total: ' + String(total) + '<br>DC: ' + String(roll.dc) + (mode !== 'normal' ? ('<br>Mode: ' + mode) : '') + (roll.rollModeReason ? ('<br>Reason: ' + Utils.escapeHtml(String(roll.rollModeReason))) : '')
                 }, marker, { size: 34, fontSize: '18px' });
             }).reverse().join('');
             return '<div style="display:inline-block;text-align:right;white-space:nowrap;">' + badges + '</div>';
+        },
+
+        numericRollBoxHtml(total, tooltip, options) {
+            options = options || {};
+            return this.rollBadgeHtml({
+                natural: Utils.toInt(total, 0),
+                total: Utils.toInt(total, 0),
+                tooltip: String(tooltip || 'Roll total: ' + String(total || 0)),
+                success: options.success
+            }, options.marker || '', { size: options.size || 40, fontSize: options.fontSize || '20px' });
         },
 
         attackPromptTitleHtml(result) {
@@ -1420,13 +3547,21 @@ const CombatAssistant = (() => {
                 type: 'damage',
                 mode: result.isSaveAttack || saveAbility ? 'save' : 'attack',
                 challenge,
+                attackNatural: Math.max(0, Utils.toInt(result.attackNatural, 0)),
+                isCritical: !!result.isCritical,
                 saveAbility,
                 halfOnSuccess: !!result.halfOnSuccess,
                 halfOnSuccessKnown: !!result.halfOnSuccessKnown,
                 damageRolls,
                 sourceName: String(result.tokenName || result.characterName || ''),
                 sourceAction: String(result.attackName || ''),
-                sourceImgsrc: String(result.tokenImgsrc || '')
+                sourceImgsrc: String(result.tokenImgsrc || ''),
+                rangeText: String(result.rangeText || result.range || ''),
+                isSpellAction: !!result.isSpellAction,
+                isConcentration: !!result.isConcentration,
+                lightInfo: result.lightInfo && result.lightInfo.hasLight ? result.lightInfo : { hasLight: false },
+                areaInfo: result.areaInfo && result.areaInfo.isArea ? result.areaInfo : { isArea: false },
+                areaOptions: result.areaOptions || R20.getAreaInfoOptions(result.areaInfo)
             });
             const hitPayload = Utils.encodeJsonPayload({
                 type: 'damage',
@@ -1481,7 +3616,41 @@ const CombatAssistant = (() => {
                 backgroundColor: 'rgba(45,45,45,0.95)',
                 tooltip: 'Edit damage manually'
             });
-            const body = this.iconButtonTableHtml([attackButton, hitButton, missButton, editButton], { columns: 4, footer: 'Select target token(s) before pressing any button.' });
+            const buttons = [attackButton, hitButton, missButton, editButton];
+            const areaInfo = result.areaInfo && result.areaInfo.isArea ? result.areaInfo : null;
+            const npcSetEligible = !!result.npcSetEligible;
+            const npcSetPayload = npcSetEligible ? Utils.encodeJsonPayload(Object.assign({}, Utils.decodeJsonPayload(attackPayload, {}), {
+                sourceName: String(result.tokenName || result.characterName || ''),
+                sourceAction: String(result.attackName || ''),
+                sourceImgsrc: String(result.tokenImgsrc || '')
+            })) : '';
+            if (npcSetEligible && areaInfo && RuntimeConfig.get('PLAYER_TOKEN_AREA_MARK')) {
+                buttons.push(this.iconButtonHtml({
+                    iconHtml: '&#127922;',
+                    label: 'Source',
+                    command: '!combatAssistant npcarea ' + npcSetPayload + ' &#64;{target|Source|token_id}',
+                    labelSize: 8,
+                    labelNoWrap: true,
+                    backgroundColor: 'rgba(95,55,135,0.95)',
+                    tooltip: 'Set an NPC area attack: choose source, move the marker, then roll'
+                }));
+            } else if (npcSetEligible) {
+                buttons.push(this.iconButtonHtml({
+                    iconHtml: '&#9876;&#65039;',
+                    label: 'AtkFX',
+                    command: '!combatAssistant npcset ' + npcSetPayload + ' &#64;{target|Source|token_id} &#64;{target|Target|token_id}',
+                    labelSize: 9,
+                    labelNoWrap: true,
+                    backgroundColor: 'rgba(95,55,135,0.95)',
+                    tooltip: 'Set an NPC attack: choose source, then target'
+                }));
+            }
+            const footer = buttons.length > 4
+                ? (areaInfo
+                    ? 'Select target token(s), or use Source to choose the NPC source and place an area marker.'
+                    : 'Select target token(s), or use AtkFX to choose an NPC source and target.')
+                : 'Select target token(s) before pressing any button.';
+            const body = this.iconButtonTableHtml(buttons, { columns: Math.min(buttons.length, 5), footer });
             return Html.card({
                 title: META.NAME,
                 body,
@@ -1489,13 +3658,17 @@ const CombatAssistant = (() => {
             });
         },
 
-        showConfigMenu(target) {
-            const settings = RuntimeConfig.getAll();
-            const fields = RuntimeConfig.fields();
-            const buttonH = 8;
-            const buttonW = 24;
-            
-            const baseButtonStyle =
+        compactSettingButtonHtml(buildOptions) {
+            const options = buildOptions || {};
+            const buttonH = Math.max(1, Utils.toInt(options.height, 8));
+            const buttonW = Math.max(1, Utils.toInt(options.width, 24));
+            const command = this.sanitizeCommand(options.command || '#');
+            const label = Utils.escapeHtml(String(options.label === undefined || options.label === null ? '' : options.label));
+            const tooltip = String(options.tooltip || '').trim();
+            return (
+                '<a href="' + command + '"' +
+                (tooltip ? (' title="' + Utils.attrSafe(tooltip) + '"') : '') +
+                ' style="' +
                 'display:inline-flex;' +
                 'align-items:center;' +
                 'justify-content:center;' +
@@ -1509,46 +3682,103 @@ const CombatAssistant = (() => {
                 'color:rgb(255,255,255);' +
                 'font-size:10px;' +
                 'font-weight:900;' +
-                'box-sizing:border-box;';
+                'box-sizing:border-box;' +
+                'background:' + String(options.backgroundColor || 'rgba(0,105,160,0.95)') + ';">' +
+                    label +
+                '</a>'
+            );
+        },
+
+        combatMenuTitleHtml() {
+            return (
+                '<table style="width:100%;border-collapse:collapse;table-layout:fixed;"><tbody><tr>' +
+                    '<td style="width:34px;text-align:left;vertical-align:middle;white-space:nowrap;">' +
+                        '<a href="!combatAssistant help" title="Open help" style="display:inline-block;background:transparent;border:0;color:rgb(230,230,230);text-decoration:none;font-size:15px;line-height:15px;padding:0;margin:0;">&#10067;</a>' +
+                    '</td>' +
+                    '<td style="text-align:center;vertical-align:middle;">' + Utils.escapeHtml(META.NAME) + '</td>' +
+                    '<td style="width:34px;text-align:right;vertical-align:middle;white-space:nowrap;">' +
+                        '<a href="!combatAssistant config" title="Open settings" style="display:inline-block;background:transparent;border:0;color:rgb(230,230,230);text-decoration:none;font-size:15px;line-height:15px;padding:0;margin:0;">&#9881;&#65039;</a>' +
+                    '</td>' +
+                '</tr></tbody></table>'
+            );
+        },
+
+        showBootstrapCard() {
+            R20.whisper('GM', 
+                Html.card({
+                    title: META.NAME,
+                    body:
+                        '<div style="position:relative;min-height:106px;">' +
+                            '<div style="position:absolute;left:0;right:0;bottom:-6px;display:table;width:100%;font-size:12px;line-height:14px;">' +
+                                '<div style="display:table-cell;text-align:left;padding-left:4px;color:rgb(160,160,160);">Created by <a href="' + Utils.attrSafe(META.DEVELOPER_URL) + '" target="_blank" style="color:rgb(0, 180, 180);text-decoration:none;font-weight:700;"><b>' + Utils.escapeHtml(META.DEVELOPER) + '</b></a></div>' +
+                                '<div style="display:table-cell;text-align:right;padding-right:4px;color:rgb(160,160,160);">Version <span style="color:rgb(160, 160, 0);font-weight:700;"><b>' + Utils.escapeHtml(META.VERSION) + '</b></span></div>' +
+                            '</div>' +
+                        '</div>',
+                    buildOptions: {
+                        titleHtml: this.combatMenuTitleHtml(),
+                        titleColor: 'rgb(188, 138, 32)',
+                        bgOverlayStart: 'rgba(0,0,0,0)',
+                        bgOverlayEnd: 'rgba(0,0,0,0)',
+                        bgSize: 'cover',
+                        bgAttachment: 'scroll',
+                        bgPosition: 'center center',
+                        bgImageURL: 'https://raw.githubusercontent.com/AmadeusVF/Trinkets-Trackers_Images/refs/heads/main/CA.png'
+                    }
+                })
+            );
+        },
+
+        showConfigMenu(target) {
+            const settings = RuntimeConfig.getAll();
+            const fields = RuntimeConfig.fields();
 
             const rows = fields.map((field) => {
+                if (field.type === 'section') {
+                    return '<tr><td colspan="2" style="padding:8px 0 3px 0;text-align:center;color:rgb(165,165,165);font-size:13px;line-height:15px;font-weight:700;">' +
+                        Utils.escapeHtml(field.label || '') +
+                    '</td></tr>';
+                }
                 const value = settings[field.key];
                 let button = '';
-                    if (field.type === 'boolean') {
-                        button =
-                            '<a href="!combatAssistant toggle ' + Utils.attrSafe(field.key) + '"' +
-                            ' title="' + Utils.attrSafe('Toggle ' + field.label) + '"' +
-                            ' style="' + baseButtonStyle + 'background:' + (value ? 'rgba(20,115,55,0.95)' : 'rgba(120,40,40,0.95)') + ';">' +
-                                (value ? 'ON' : 'OFF') +
-                            '</a>';
-                    } else if (field.type === 'bar' || field.type === 'bar0') {
-                        const opts = field.type === 'bar0' ? '0|1|2|3' : '1|2|3';
-                        button =
-                            '<a href="!combatAssistant set ' + Utils.attrSafe(field.key) + ' &#63;{' + Utils.attrSafe(field.label) + '|' + opts + '}"' +
-                            ' title="' + Utils.attrSafe('Edit ' + field.label) + '"' +
-                            ' style="' + baseButtonStyle + 'background:rgba(0,105,160,0.95);">' +
-                                value +
-                            '</a>';
-                    } else {
-                        button =
-                            '<a href="!combatAssistant set ' + Utils.attrSafe(field.key) + ' &#63;{' + Utils.attrSafe(field.label) + '|' + Utils.attrSafe(String(value || '').replace(/\|/g, ' ')) + '}"' +
-                            ' title="' + Utils.attrSafe('Edit ' + field.label) + '"' +
-                            ' style="' + baseButtonStyle + 'background:rgba(0,105,160,0.95);">' +
-                                'EDIT' +
-                            '</a>';
-                    }
+                if (field.type === 'boolean') {
+                    button = this.compactSettingButtonHtml({
+                        label: value ? 'ON' : 'OFF',
+                        command: '!combatAssistant toggle ' + Utils.attrSafe(field.key),
+                        tooltip: 'Toggle ' + field.label,
+                        backgroundColor: value ? 'rgba(20,115,55,0.95)' : 'rgba(120,40,40,0.95)'
+                    });
+                } else if (field.type === 'bar' || field.type === 'bar0') {
+                    const opts = field.type === 'bar0' ? '0|1|2|3|4' : '1|2|3|4';
+                    button = this.compactSettingButtonHtml({
+                        label: value,
+                        command: '!combatAssistant set ' + Utils.attrSafe(field.key) + ' &#63;{' + Utils.attrSafe(field.label) + '|' + opts + '}',
+                        tooltip: 'Edit ' + field.label
+                    });
+                } else if (field.type === 'percent') {
+                    button = this.compactSettingButtonHtml({
+                        label: String(value || 0),
+                        command: '!combatAssistant set ' + Utils.attrSafe(field.key) + ' &#63;{' + Utils.attrSafe(field.label) + '|' + Utils.attrSafe(String(value || 0)) + '}',
+                        tooltip: 'Edit ' + field.label
+                    });
+                } else {
+                    button = this.compactSettingButtonHtml({
+                        label: 'EDIT',
+                        command: '!combatAssistant set ' + Utils.attrSafe(field.key) + ' &#63;{' + Utils.attrSafe(field.label) + '|' + Utils.attrSafe(String(value || '').replace(/\|/g, ' ')) + '}',
+                        tooltip: 'Edit ' + field.label
+                    });
+                }
                 const displayValue = field.type === 'boolean'
                     ? (value ? 'ON' : 'OFF')
                     : String(value === undefined || value === null || value === '' ? '-' : value);
                 return (
                     '<tr>' +
-                        '<td title="' + Utils.attrSafe(field.tip || field.label) + '" style="text-align:left;vertical-align:middle;padding:2px 2px 2px 2px;color:rgb(225,225,225);font-size:12px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + Utils.escapeHtml(field.label) + '</td>' +
+                        '<td title="' + Utils.attrSafe(field.tip || field.label) + '" style="text-align:left;vertical-align:middle;padding:2px 2px 2px 2px;color:rgb(225,225,225);font-size:12px;font-weight:700;white-space:nowrap;">' + Utils.escapeHtml(field.label) + '</td>' +
                         '<td style="width:40px;text-align:right;vertical-align:middle;padding:2px 0;">' + button + '</td>' +
                     '</tr>'
                 );
             }).join('');
             const body =
-                '<table style="width:100%;border-collapse:collapse;table-layout:fixed;"><tbody>' + rows + '</tbody></table>';
+                '<table style="width:100%;border-collapse:collapse;"><tbody>' + rows + '</tbody></table>';
             R20.whisper(target || 'GM', Html.card({ title: META.NAME + ' Settings', body }));
         },
 
@@ -1586,44 +3816,45 @@ const CombatAssistant = (() => {
                 backgroundColor: 'rgba(70,115,170,0.85)',
                 tooltip: 'Roll initiative for selected token(s)'
             });
-            const body = this.iconButtonTableHtml([dmgButton, healButton, saveButton, initButton], {
-                columns: 4,
+            const concButton = this.iconButtonHtml({
+                iconHtml: '&#9203;',
+                label: 'Conc.',
+                command: '!ca conc',
+                backgroundColor: 'rgba(80,80,120,0.95)',
+                tooltip: 'Open active concentration area controls'
+            });
+            const body = this.iconButtonTableHtml([dmgButton, healButton, saveButton, initButton, concButton], {
+                columns: 5,
                 footer: 'Select target token(s) before pressing a button.'
             });
-            const titleHtml =
-                '<table style="width:100%;border-collapse:collapse;table-layout:fixed;"><tbody><tr>' +
-                    '<td style="width:34px;text-align:left;vertical-align:middle;white-space:nowrap;">' +
-                        '<a href="!combatAssistant help" title="Open help" style="display:inline-block;background:transparent;border:0;color:rgb(230,230,230);text-decoration:none;font-size:15px;line-height:15px;padding:0;margin:0;">&#10067;</a>' +
-                    '</td>' +
-                    '<td style="text-align:center;vertical-align:middle;">' + Utils.escapeHtml(META.NAME) + '</td>' +
-                    '<td style="width:34px;text-align:right;vertical-align:middle;white-space:nowrap;">' +
-                        '<a href="!combatAssistant config" title="Open settings" style="display:inline-block;background:transparent;border:0;color:rgb(230,230,230);text-decoration:none;font-size:15px;line-height:15px;padding:0;margin:0;">&#9881;&#65039;</a>' +
-                    '</td>' +
-                '</tr></tbody></table>';
-            R20.whisper(target || 'GM', Html.card({ title: META.NAME, body, buildOptions: { titleHtml } }));
+            R20.whisper(target || 'GM', Html.card({
+                title: META.NAME,
+                body,
+                buildOptions: { titleHtml: this.combatMenuTitleHtml() }
+            }));
         },
 
         showHelp(target) {
             const body =
                 '<div style="text-align:left;font-size:12px;line-height:16px;color:rgb(225,225,225);">' +
                     '<b>Commands</b><br>' +
-                    '<code>!combat-assistant help</code><br>' +
-                    '<code>!combatAssistant menu</code><br>' +
-                    '<code>!combatAssistant config</code><br>' +
-                    '<code>!combatAssistant set hpbar 1</code><br>' +
-                    '<code>!combatAssistant set acbar 2</code><br>' +
-                    '<code>!combatAssistant set tempbar 3</code><br>' +
-                    '<code>!combatAssistant deal manual 8 fire</code> with target token(s) selected<br>' +
-                    '<code>!combatAssistant heal manual hp 10</code> with target token(s) selected<br><br>' +
-                    '<code>!combatAssistant save dexterity</code> with token(s) selected<br>' +
-                    '<code>!combatAssistant init</code> with token(s) selected<br><br>' +
+                    '<code>!ca menu</code> open the main menu<br>' +
+                    '<code>!ca help</code> show this help card<br>' +
+                    '<code>!ca config</code> open settings<br>' +
+                    '<code>!ca conc</code> recall active concentration area buttons<br><br>' +
+
+                    '<b>Examples</b><br>' +
+                    'with token(s) selected<br>'+
+                    '<code>!ca deal manual 8 fire</code><br>' +
+                    '<code>!ca heal manual hp 10</code><br>' +
+                    '<code>!ca save dexterity</code><br>' +
+                    '<code>!ca init</code><br><br>' +
+
                     '<b>Bar setup</b><br>' +
                     'HP Bar: ' + Utils.escapeHtml(String(RuntimeConfig.get('HP_BAR'))) + '<br>' +
                     'AC Bar: ' + Utils.escapeHtml(String(RuntimeConfig.get('AC_BAR'))) + '<br>' +
                     'Temp HP Bar: ' + Utils.escapeHtml(String(RuntimeConfig.get('TEMP_HP_BAR'))) + '<br><br>' +
-                    '<b>Important</b><br>' +
-                    'If the HP bar is linked, Combat Assistant updates character sheet HP through Beacon. If HP is not linked, only the token bar is changed.<br>' +
-                    'Temp HP uses the linked/configured token bar and does not require sheet HP.<br><br>' +
+
                     '<div style="text-align:center;font-size:11px;line-height:14px;color:rgb(190,190,190);padding:4px 0 6px 0;">' +
                         'This is a lightweight version extracted from the original code. Try <a href="https://app.roll20.net/forum/post/12758022/t-and-t-chat-based-inventory-dynamic-shops-auto-healing-loot-and-item-automation-for-roll20-d-and-d-2024" target="_blank" style="color:rgb(0,180,180);text-decoration:none;font-weight:700;"><b>Trinkets and Trackers</b></a> for the full immersive experience.' +
                     '</div>' +
@@ -1638,7 +3869,7 @@ const CombatAssistant = (() => {
 
         buildDamageNarrative(result) {
             result = result || {};
-            const hideNames = RuntimeConfig.get('HIDE_TOKEN_NAMES_IN_LOG');
+            const hideNames = !RuntimeConfig.get('REVEAL_TOKEN_NAMES_IN_LOG');
             const targetLabel = hideNames ? 'Target' : String(result.tokenName || 'Target');
             const targetName = Html.span(Utils.escapeHtml(targetLabel), 'color:' + CONFIG.DEFAULT_TEXT_CHARACTER_COLOR + ';font-weight:900;');
             const sourceName = String(result.sourceName || '').trim();
@@ -1665,8 +3896,8 @@ const CombatAssistant = (() => {
                 const ability = CombatService.abilityNameToShortLabel(roll.ability) || 'SAVE';
                 const badge = this.savingThrowBadgesHtml(roll, ability);
                 const damageParts = this.buildDamagePartsHtml(result);
-                const blockedByImmunity = damageParts && damageParts.indexOf('blocked by ') >= 0 && damageParts.indexOf(' immunity') >= 0;
-                const joinedSourcePhrase = blockedByImmunity && sourcePhrase ? (',' + sourcePhrase) : sourcePhrase;
+                const hasDamageAdjustment = damageParts && /\b(?:blocked by|reduced by|increased by)\b/i.test(damageParts);
+                const joinedSourcePhrase = hasDamageAdjustment && sourcePhrase ? (',' + sourcePhrase) : sourcePhrase;
                 const phrase = targetName + outcome + ' on the ' + ability + ' Save and takes ' + (damageParts || 'no damage') + joinedSourcePhrase + (result.fainted ? ' and falls unconscious' : '') + '.';
                 const tempLine = result.tempAbsorbed > 0
                     ? '<div style="padding-top:2px;color:rgb(52,203,116);font-size:10px;line-height:12px;text-align:center;">(Some damage was absorbed by Temporary HP)</div>'
@@ -1675,16 +3906,18 @@ const CombatAssistant = (() => {
             }
             if (result.noDamage) {
                 const damageParts = this.buildDamagePartsHtml(result);
-                const blockedByImmunity = damageParts && damageParts.indexOf('blocked by ') >= 0 && damageParts.indexOf(' immunity') >= 0;
-                const joinedSourcePhrase = blockedByImmunity && sourcePhrase ? (',' + sourcePhrase) : sourcePhrase;
+                const hasDamageAdjustment = damageParts && /\b(?:blocked by|reduced by|increased by)\b/i.test(damageParts);
+                const joinedSourcePhrase = hasDamageAdjustment && sourcePhrase ? (',' + sourcePhrase) : sourcePhrase;
                 return targetName + ' takes ' + (damageParts || 'no damage') + joinedSourcePhrase + '.';
             }
 
             const damageParts = this.buildDamagePartsHtml(result);
+            const hasDamageAdjustment = damageParts && /\b(?:blocked by|reduced by|increased by)\b/i.test(damageParts);
+            const joinedSourcePhrase = hasDamageAdjustment && sourcePhrase ? (',' + sourcePhrase) : sourcePhrase;
             const tempLine = result.tempAbsorbed > 0
                 ? '<div style="padding-top:2px;color:rgb(52,203,116);font-size:10px;line-height:12px;text-align:center;">(Some damage was absorbed by Temporary HP)</div>'
                 : '';
-            return targetName + ' takes ' + (damageParts || '0 damage') + sourcePhrase + (result.fainted ? ' and falls unconscious' : '') + '.' + tempLine;
+            return targetName + ' takes ' + (damageParts || '0 damage') + joinedSourcePhrase + (result.fainted ? ' and falls unconscious' : '') + '.' + tempLine;
         },
 
         titleTokenIconHtml(imgsrc) {
@@ -1709,6 +3942,75 @@ const CombatAssistant = (() => {
                     '<td style="width:28px;text-align:right;vertical-align:middle;padding:0;">' + targetHtml + '</td>' +
                 '</tr></tbody></table>'
             );
+        },
+
+        concentrationTitleHtml(imgsrc, title) {
+            return (
+                '<table style="width:100%;border-collapse:collapse;table-layout:fixed;"><tbody><tr>' +
+                    '<td style="width:28px;text-align:left;vertical-align:middle;padding:0;">' + this.titleTokenIconHtml(imgsrc || '') + '</td>' +
+                    '<td style="text-align:center;vertical-align:middle;">' + Utils.escapeHtml(title || 'Concentration') + '</td>' +
+                    '<td style="width:28px;text-align:right;vertical-align:middle;padding:0;"></td>' +
+                '</tr></tbody></table>'
+            );
+        },
+
+        sendConcentrationSpellReroll(result) {
+            result = result || {};
+            const spellName = String(result.spellName || 'Concentration').trim();
+            const formula = String(result.formula || '').trim();
+            const total = Math.max(0, Utils.toInt(result.total, 0));
+            const diceValues = Array.isArray(result.diceValues) ? result.diceValues.map((value) => Utils.toInt(value, 0)).filter((value) => value > 0) : [];
+            const modifier = Utils.toInt(result.modifier, 0);
+            const tooltip = 'Roll:(' + (diceValues.length ? diceValues.join('+') : String(total - modifier)) + ')' +
+                '<br>Modifier:' + Utils.formatSigned(modifier) +
+                '<br>Total:' + String(total);
+            const body =
+                '<table style="width:100%;border-collapse:collapse;table-layout:fixed;"><tbody><tr>' +
+                    '<td style="text-align:left;vertical-align:middle;font-size:14px;line-height:16px;">' +
+                        '<strong style="color:rgb(235,220,170);">' + Utils.escapeHtml(spellName) + '</strong>' +
+                        (formula ? ' <span style="color:rgb(145,145,145);font-weight:900;">[' + Utils.escapeHtml(formula) + ']</span>' : '') +
+                    '</td>' +
+                    '<td style="width:48px;text-align:right;vertical-align:middle;">' + this.numericRollBoxHtml(total, tooltip, { size: 34, fontSize: '18px' }) + '</td>' +
+                '</tr></tbody></table>';
+            this.sendPublicMessage('Concentration Spell', body, 'normal', {
+                titleHtml: this.concentrationTitleHtml(result.casterImgsrc || '', 'Concentration Spell')
+            });
+        },
+
+        sendConcentrationLost(result) {
+            result = result || {};
+            const revealNames = RuntimeConfig.get('REVEAL_TOKEN_NAMES_IN_LOG');
+            const revealSource = RuntimeConfig.get('REVEAL_DAMAGE_SOURCE');
+            const casterLabel = revealNames ? String(result.casterName || 'Caster') : 'Caster';
+            const spellName = String(result.spellName || '').trim();
+            const casterHtml = Html.span(Utils.escapeHtml(casterLabel), 'color:' + CONFIG.DEFAULT_TEXT_CHARACTER_COLOR + ';font-weight:900;');
+            const spellHtml = spellName && revealSource
+                ? (' on ' + Html.span(Utils.escapeHtml(spellName), 'color:rgb(245,220,80);font-weight:900;'))
+                : '';
+            const roll = result.roll || {};
+            const dc = Math.max(10, Utils.toInt(result.dc, 10));
+            const total = Utils.toInt(roll.total, 0);
+            const modifier = Utils.toInt(roll.modifier, 0);
+            const natural = roll.natural !== undefined && roll.natural !== null ? Utils.toInt(roll.natural, total - modifier) : total;
+            const rollBox = this.rollBadgeHtml({
+                natural,
+                total,
+                modifier,
+                rolls: roll.rolls,
+                mode: roll.mode || 'normal',
+                success: false,
+                tooltip: 'CON Save<br>Total: ' + String(total) + '<br>DC: ' + String(dc)
+            }, '', { size: 40, fontSize: '20px' });
+            const body =
+                '<table style="width:100%;border-collapse:collapse;table-layout:fixed;"><tbody><tr>' +
+                    '<td style="text-align:left;vertical-align:middle;font-size:14px;line-height:16px;">' +
+                        casterHtml + ' lost concentration' + spellHtml + '.' +
+                    '</td>' +
+                    '<td style="width:54px;text-align:right;vertical-align:middle;">' + rollBox + '</td>' +
+                '</tr></tbody></table>';
+            this.sendPublicMessage('Concentration Lost', body, 'failure', {
+                titleHtml: this.concentrationTitleHtml(result.casterImgsrc || '', 'Concentration Lost')
+            });
         },
 
         buildDamagePartsHtml(result) {
@@ -1739,9 +4041,10 @@ const CombatAssistant = (() => {
 
         buildHealNarrative(result) {
             result = result || {};
-            const hideNames = RuntimeConfig.get('HIDE_TOKEN_NAMES_IN_LOG');
+            const hideNames = !RuntimeConfig.get('REVEAL_TOKEN_NAMES_IN_LOG');
             const targetName = Html.span(Utils.escapeHtml(hideNames ? 'Target' : String(result.tokenName || 'Target')), 'color:' + CONFIG.DEFAULT_TEXT_CHARACTER_COLOR + ';font-weight:900;');
-            const amount = Html.span(Utils.escapeHtml(String(result.amount || 0)), 'color:' + (result.mode === 'temp' ? 'rgb(255,105,180)' : CONFIG.DEFAULT_TEXT_HEAL_COLOR) + ';font-weight:900;');
+            const displayedAmount = result.effectiveAmount !== undefined && result.effectiveAmount !== null ? result.effectiveAmount : (result.amount || 0);
+            const amount = Html.span(Utils.escapeHtml(String(displayedAmount)), 'color:' + (result.mode === 'temp' ? 'rgb(255,105,180)' : CONFIG.DEFAULT_TEXT_HEAL_COLOR) + ';font-weight:900;');
             const sourceNameRaw = String(result.sourceName || '').trim();
             const sourceActionRaw = String(result.sourceAction || '').trim();
             const sourceName = sourceNameRaw && !/^manual$/i.test(sourceNameRaw)
@@ -1770,6 +4073,17 @@ const CombatAssistant = (() => {
             const damageType = CombatService.normalizeDamageType(request.damageType || 'normal');
             const damageIcon = this.getDamageTypeIcon(damageType);
             const damageColor = this.getDamageTypeColor(damageType);
+            const note = String(request.note || '').trim();
+            const concentrationSpellName = String(request.concentrationSpellName || request.maintainSpellName || '').trim();
+            const concentrationLine = concentrationSpellName
+                ? ('<br><span style="color:rgb(190,190,190);font-size:12px;">to Maintain </span>' +
+                    '<strong style="color:rgb(245,220,80);">' + Utils.escapeHtml(concentrationSpellName) + '</strong>')
+                : '';
+            const damageLine = concentrationLine || (
+                '<br><span style="color:rgb(190,190,190);font-size:12px;">Damage: </span>' +
+                '<strong style="color:' + damageColor + ';">' + damageIcon + ' ' + Utils.escapeHtml(String(request.damage || 0)) +
+                (damageType === 'normal' ? '' : (' ' + Utils.escapeHtml(damageType))) + '</strong>'
+            );
             const button = this.iconButtonHtml({
                 iconHtml: '&#127922;',
                 label: ability,
@@ -1781,9 +4095,8 @@ const CombatAssistant = (() => {
                 '<table style="width:100%;border-collapse:collapse;table-layout:fixed;"><tbody><tr>' +
                     '<td style="text-align:center;vertical-align:middle;padding:2px 8px 6px 0;font-size:13px;line-height:16px;color:rgb(235,235,235);">' +
                         tokenName + ' must roll a <strong>' + Utils.escapeHtml(ability) + '</strong> saving throw' + (challenge > 0 ? (' <strong>DC ' + Utils.escapeHtml(String(challenge)) + '</strong>') : '') + '.' +
-                        '<br><span style="color:rgb(190,190,190);font-size:12px;">Damage: </span>' +
-                        '<strong style="color:' + damageColor + ';">' + damageIcon + ' ' + Utils.escapeHtml(String(request.damage || 0)) +
-                        (damageType === 'normal' ? '' : (' ' + Utils.escapeHtml(damageType))) + '</strong>' +
+                        damageLine +
+                        (note ? '<br><span style="color:rgb(235,205,75);font-size:11px;font-weight:700;">' + Utils.escapeHtml(note) + '</span>' : '') +
                     '</td>' +
                     '<td style="width:56px;text-align:right;vertical-align:middle;padding:2px 0 6px 4px;">' + button + '</td>' +
                 '</tr></tbody></table>';
@@ -1858,7 +4171,7 @@ const CombatAssistant = (() => {
                     ? Html.span(' &#9650; ', 'color:rgb(90,220,120);font-size:10px;font-weight:900;')
                     : (mode === 'disadvantage' ? Html.span(' &#9660; ', 'color:rgb(230,80,80);font-size:10px;font-weight:900;') : '');
                 const reasonHtml = reasonText
-                    ? Html.span(' (' + reasonMarker + Utils.escapeHtml(reasonText) + ')', 'color:rgb(145,145,145);font-size:10px;font-weight:700;')
+                    ? '<div style="color:rgb(145,145,145);font-size:10px;line-height:11px;font-weight:700;padding-top:1px;white-space:normal;">' + reasonMarker + Utils.escapeHtml(reasonText) + '</div>'
                     : '';
                 const rolls = (Array.isArray(result.rolls) && result.rolls.length ? result.rolls : [result.natural || 0]).map((roll) => Utils.toInt(roll, 0));
                 const chosenValue = mode === 'advantage'
@@ -1878,7 +4191,9 @@ const CombatAssistant = (() => {
                     }, marker, { size: 34, fontSize: '18px' });
                 }).reverse().join('');
                 return '<tr>' +
-                    '<td style="text-align:left;vertical-align:middle;padding:3px 4px;font-size:14px;line-height:16px;">' + tokenName + bonusHtml + reasonHtml + '</td>' +
+                    '<td style="text-align:left;vertical-align:middle;padding:3px 4px;font-size:14px;line-height:16px;">' +
+                        '<div>' + tokenName + bonusHtml + '</div>' + reasonHtml +
+                    '</td>' +
                     '<td style="width:86px;text-align:right;vertical-align:middle;padding:3px 0;white-space:nowrap;overflow:visible;">' +
                         '<div style="display:inline-block;text-align:right;white-space:nowrap;">' + badges + '</div>' +
                     '</td>' +
@@ -1897,6 +4212,10 @@ const CombatAssistant = (() => {
                 const tokenName = Html.span(Utils.escapeHtml(String(result.tokenName || 'Token')), 'color:' + CONFIG.DEFAULT_TEXT_CHARACTER_COLOR + ';font-weight:900;');
                 const bonusHtml = Html.span(' (' + Utils.escapeHtml(Utils.formatSigned(modifier)) + ')', 'color:rgb(145,145,145);font-size:11px;font-weight:700;');
                 const mode = String(result.mode || 'normal');
+                const reasonText = String(result.rollModeReason || '').trim();
+                const reasonHtml = reasonText
+                    ? Html.span(' (' + Utils.escapeHtml(reasonText) + ')', 'color:rgb(145,145,145);font-size:10px;font-weight:700;')
+                    : '';
                 const rolls = (Array.isArray(result.rolls) && result.rolls.length ? result.rolls : [result.natural || 0]).map((roll) => Utils.toInt(roll, 0));
                 const chosenValue = mode === 'advantage'
                     ? Math.max.apply(null, rolls)
@@ -1915,7 +4234,7 @@ const CombatAssistant = (() => {
                     }, marker, { size: 34, fontSize: '18px' });
                 }).reverse().join('');
                 return '<tr>' +
-                    '<td style="text-align:left;vertical-align:middle;padding:3px 4px;font-size:14px;line-height:16px;">' + tokenName + bonusHtml + '</td>' +
+                    '<td style="text-align:left;vertical-align:middle;padding:3px 4px;font-size:14px;line-height:16px;">' + tokenName + bonusHtml + reasonHtml + '</td>' +
                     '<td style="width:86px;text-align:right;vertical-align:middle;padding:3px 0;white-space:nowrap;overflow:visible;">' +
                         '<div style="display:inline-block;text-align:right;white-space:nowrap;">' + badges + '</div>' +
                     '</td>' +
@@ -2031,7 +4350,9 @@ const CombatAssistant = (() => {
             const source = String(expression || '').replace(/\s+/g, '');
             if (!source || /[^0-9+\-*/().]/.test(source)) return null;
             const tokens = source.match(/\d+(?:\.\d+)?|[+\-*/()]/g) || [];
+            if (tokens.join('') !== source) return null;
             let index = 0;
+            let invalid = false;
             const parseExpression = () => {
                 let value = parseTerm();
                 while (index < tokens.length && (tokens[index] === '+' || tokens[index] === '-')) {
@@ -2046,7 +4367,11 @@ const CombatAssistant = (() => {
                 while (index < tokens.length && (tokens[index] === '*' || tokens[index] === '/')) {
                     const op = tokens[index++];
                     const rhs = parseFactor();
-                    value = op === '*' ? value * rhs : (rhs === 0 ? value : value / rhs);
+                    if (op === '/' && rhs === 0) {
+                        invalid = true;
+                        return NaN;
+                    }
+                    value = op === '*' ? value * rhs : value / rhs;
                 }
                 return value;
             };
@@ -2063,6 +4388,7 @@ const CombatAssistant = (() => {
             };
             if (!tokens.length) return null;
             const result = parseExpression();
+            if (invalid || index !== tokens.length) return null;
             return Number.isFinite(result) ? result : null;
         },
 
@@ -2150,7 +4476,7 @@ const CombatAssistant = (() => {
         },
 
         getRollTemplateFields(content) {
-            const fields = {};
+            const fields = Object.create(null);
             const source = String(content || '');
             const pattern = /\{\{([^=}{]+)=([\s\S]*?)\}\}/g;
             let match;
@@ -2182,6 +4508,7 @@ const CombatAssistant = (() => {
             const isHealing = isTemporaryHitPoints || /data-rollSubcategory="(?:Healing|Heal)"/i.test(source) || /\b(healing|heal)\b/i.test(rawTitle) || /\b(healing|heal)\s+breakdown\b/i.test(textSource);
             const isTempHealing = isTemporaryHitPoints;
             const isDamage = !isHealing && (/header__title[^"]*--damage/i.test(titleMatch[0]) || /data-rollSubcategory="Damage"/i.test(source));
+            const isSpellDetailsCard = !isDamage && !isHealing && (/\bSpell\s+Details\b/i.test(textSource) || (/\bCasting\s+Time\s*:/i.test(textSource) && /\b(?:Components?|Duration)\s*:/i.test(textSource)));
             const attackName = Utils.cleanRoll20Label(rawTitle.replace(/\s+(Damage|Healing|Heal)\s*$/i, '').trim());
             const resultMatch = source.match(/data-result="([+-]?\d+(?:\.\d+)?)"/i);
             const firstResult = resultMatch ? Utils.toNumber(resultMatch[1], 0) : null;
@@ -2193,12 +4520,32 @@ const CombatAssistant = (() => {
             while ((formulaMatch = formulaPattern.exec(source)) !== null) {
                 formulas.push({ formula: htmlText(formulaMatch[1]), total: Utils.toInt(formulaMatch[2], 0) });
             }
+            const formulaText = formulas.map((entry) => String(entry.formula || '')).join(' ');
+            const rollModeText = [formulaText, textSource].join(' ');
+            const hasD20Formula = /\bd20\b/i.test(formulaText) || /\bd20\b/i.test(source);
+            const hasAttackResult = firstResult !== null && (hasD20Formula || /\b(?:Attack|To\s+Hit|Hit)\b/i.test(textSource));
+            const rollMode = /\badvantage\b|2d20k?h(?:1)?|kh1/i.test(rollModeText)
+                ? 'advantage'
+                : (/\bdisadvantage\b|2d20k?l(?:1)?|kl1/i.test(rollModeText) ? 'disadvantage' : 'normal');
+            const hasSecondRoll = hasD20Formula && (rollMode !== 'normal' || /\b2d20\b/i.test(formulaText));
             let damageMatch = null;
             while ((damageMatch = damagePattern.exec(source)) !== null) {
                 const index = damageRolls.length;
                 const type = isHealing ? 'healing' : (htmlText(damageMatch[1]) || 'normal');
                 const total = Utils.toInt(damageMatch[2], 0);
                 damageRolls.push({ total, damageType: type, formula: (formulas[index] && formulas[index].formula) || 'Roll20' });
+            }
+            if (!damageRolls.length && isDamage) {
+                const damageTypeMatch = textSource.match(/\b(acid|bludgeoning|cold|fire|force|lightning|necrotic|piercing|poison|psychic|radiant|slashing|thunder)\s+damage\b/i) ||
+                    textSource.match(/\bDamage\s+Type\s*:?\s*(acid|bludgeoning|cold|fire|force|lightning|necrotic|piercing|poison|psychic|radiant|slashing|thunder)\b/i);
+                const damageType = damageTypeMatch ? CombatService.normalizeDamageType(damageTypeMatch[1]) : 'normal';
+                const damageFormula = formulas.length
+                    ? formulas.map((entry) => entry.formula || '').filter(Boolean).join(' + ')
+                    : 'Roll20';
+                const formulaTotal = formulas.length
+                    ? formulas.reduce((sum, entry) => sum + Math.max(0, Utils.toInt(entry.total, 0)), 0)
+                    : Math.max(0, Utils.toInt(firstResult, 0));
+                if (formulaTotal > 0) damageRolls.push({ total: formulaTotal, damageType, formula: damageFormula || 'Roll20' });
             }
             if (!damageRolls.length && isHealing && firstResult !== null) {
                 damageRolls.push({
@@ -2213,22 +4560,31 @@ const CombatAssistant = (() => {
             const saveDc = saveDcMatch ? Utils.toInt(saveDcMatch[1], 0) : 0;
             const saveAbility = saveAbilityMatch ? saveAbilityMatch[1] : '';
             const halfOnSuccess = /\bOn\s+Successful\s+Save\s*:\s*(?:Half|Half\s+as\s+much)\s+damage\b/i.test(textSource) || /\bhalf\s+(?:as\s+much\s+)?damage\b/i.test(textSource);
+            const readInlineDetail = (label) => {
+                const pattern = new RegExp('\\b' + label + '\\s*:\\s*([^.;]+?)(?=\\s+\\b(?:Area|Duration|Casting\\s+Time|Attack|Save|Heal|Range|Components?|School|Cantrip|Level|Material)\\b|$)', 'i');
+                const detail = textSource.match(pattern);
+                return detail ? Utils.cleanRoll20Label(detail[1]) : '';
+            };
             return {
                 characterName,
                 attackName,
-                isAttack: !isDamage && !isHealing,
+                isAttack: !isDamage && !isHealing && (!isSpellDetailsCard || hasAttackResult),
                 isDamage,
                 isHealing,
                 isTempHealing,
-                attackTotal: !isDamage && !isHealing ? firstResult : null,
+                attackTotal: !isDamage && !isHealing && (!isSpellDetailsCard || hasAttackResult) ? firstResult : null,
                 damageTotal,
                 damageType: damageRolls.length ? damageRolls[0].damageType : 'normal',
                 damageRolls,
                 formula: damageRolls.length ? damageRolls.map((entry) => entry.formula || 'Roll20').join(' + ') : 'Roll20',
+                rollMode,
+                hasSecondRoll,
                 saveDc,
                 saveAbility,
                 halfOnSuccess,
-                halfOnSuccessKnown: saveDc > 0
+                halfOnSuccessKnown: saveDc > 0,
+                rangeText: readInlineDetail('Range'),
+                areaText: readInlineDetail('Area')
             };
         },
 
@@ -2250,14 +4606,93 @@ const CombatAssistant = (() => {
             };
         },
 
+        extractNarrativeDamageRolls(text) {
+            const source = Utils.stripHtml(String(text || '')).replace(/\s+/g, ' ').trim();
+            if (!source) return [];
+            const rolls = [];
+            const seen = Object.create(null);
+            const knownType = '(acid|bludgeoning|cold|fire|force|lightning|necrotic|piercing|poison|psychic|radiant|slashing|thunder)';
+            const addRoll = (totalValue, typeValue, formulaValue) => {
+                const total = Math.max(0, Utils.toInt(totalValue, 0));
+                const damageType = CombatService.normalizeDamageType(typeValue || 'normal');
+                if (total <= 0 || !damageType) return;
+                const formula = Utils.cleanRoll20Label(formulaValue || '') || 'Roll20';
+                const key = String(total) + ':' + damageType + ':' + formula;
+                if (seen[key]) return;
+                seen[key] = true;
+                rolls.push({ total, damageType, formula });
+            };
+            const scan = (regex, callback) => {
+                regex.lastIndex = 0;
+                let match = null;
+                while ((match = regex.exec(source)) !== null) {
+                    callback(match);
+                    if (match.index === regex.lastIndex) regex.lastIndex += 1;
+                }
+            };
+            scan(new RegExp(
+                '\\b(?:Failure|Failed\\s+Save|On\\s+Failed\\s+Save|Hit|takes?|taking|deals?|suffers?)\\b\\s*:?[^.;]{0,90}?' +
+                '(?:\\b\\d+\\s*\\(\\s*or\\s*)?(\\d+)\\s*\\(\\s*([^()]*\\d+d\\d+[^()]*)\\s*\\)\\s*\\)?\\s*' +
+                knownType + '\\s+damage\\b',
+                'gi'
+            ), (match) => addRoll(match[1], match[3], match[2]));
+            scan(new RegExp(
+                '\\b(?:Failure|Failed\\s+Save|On\\s+Failed\\s+Save|Hit|takes?|taking|deals?|suffers?)\\b\\s*:?[^.;]{0,90}?' +
+                '(\\d+)\\s+' + knownType + '\\s+damage\\b',
+                'gi'
+            ), (match) => addRoll(match[1], match[2], 'Roll20'));
+            return rolls;
+        },
+
+        shouldSkipNarrativeDamageFallback(fields, advanced, content) {
+            if (advanced && (advanced.isDamage || advanced.isHealing)) return false;
+            const text = Utils.stripHtml([
+                fields && fields.description,
+                fields && fields.desc,
+                content
+            ].filter(Boolean).join(' ')).replace(/\s+/g, ' ').trim();
+            if (!text) return false;
+            return /\bSpell\s+Details\b/i.test(text) || (/\bCasting\s+Time\s*:/i.test(text) && /\b(?:Components?|Duration)\s*:/i.test(text));
+        },
+
+        splitSecondarySaveDamageRolls(damageRolls, text, saveDc, saveAbility) {
+            const rolls = Array.isArray(damageRolls) ? damageRolls : [];
+            const source = Utils.stripHtml(String(text || '')).replace(/\s+/g, ' ').trim();
+            if (rolls.length < 2 || !source || !saveDc || !CombatService.normalizeAbilityName(saveAbility || '')) {
+                return { hasSplit: false, attackDamageRolls: rolls, saveDamageRolls: rolls };
+            }
+            const mentionedIndexes = [];
+            rolls.forEach((roll, index) => {
+                const type = CombatService.normalizeDamageType(roll && roll.damageType || '');
+                if (!type || type === 'normal' || type === 'healing' || type === 'temp healing') return;
+                const escaped = type.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                const typeDamage = new RegExp('\\b' + escaped + '\\s+damage\\b', 'i');
+                const damageType = new RegExp('\\bdamage\\s+(?:type\\s+)?' + escaped + '\\b', 'i');
+                const takingType = new RegExp('\\btak(?:e|ing|es)\\b[\\s\\S]{0,80}\\b' + escaped + '\\b[\\s\\S]{0,40}\\bdamage\\b', 'i');
+                if (typeDamage.test(source) || damageType.test(source) || takingType.test(source)) mentionedIndexes.push(index);
+            });
+            if (mentionedIndexes.length !== 1) {
+                return { hasSplit: false, attackDamageRolls: rolls, saveDamageRolls: rolls };
+            }
+            const saveIndex = mentionedIndexes[0];
+            const saveDamageRolls = [rolls[saveIndex]];
+            const attackDamageRolls = rolls.filter((_, index) => index !== saveIndex);
+            if (!attackDamageRolls.length || !saveDamageRolls.length) {
+                return { hasSplit: false, attackDamageRolls: rolls, saveDamageRolls: rolls };
+            }
+            return { hasSplit: true, attackDamageRolls, saveDamageRolls };
+        },
+
         parseAttackRoll(msg, fields, advanced) {
             const content = String(msg.content || '');
             if (advanced && advanced.isAttack && advanced.attackTotal !== null) {
                 return {
                     total: Math.max(0, Utils.toInt(advanced.attackTotal, 0)),
                     hasAttackRoll: true,
-                    mode: 'normal',
-                    rolls: [],
+                    mode: advanced.rollMode || 'normal',
+                    rolls: advanced.attackTotal !== null && advanced.attackTotal !== undefined ? [Math.max(0, Utils.toInt(advanced.attackTotal, 0))] : [],
+                    naturalRolls: [],
+                    hasSecondRoll: !!advanced.hasSecondRoll,
                     saveDc: advanced.saveDc || 0,
                     saveAbility: advanced.saveAbility || '',
                     halfOnSuccess: !!advanced.halfOnSuccess,
@@ -2358,7 +4793,326 @@ const CombatAssistant = (() => {
                     critTotal
                 });
             });
+            if (!damageRolls.length && !this.shouldSkipNarrativeDamageFallback(fields, advanced, content)) {
+                const narrativeDamageRolls = this.extractNarrativeDamageRolls([
+                    fields.description,
+                    fields.desc,
+                    fields.savedesc,
+                    fields.save_success,
+                    msg && msg.content
+                ].filter(Boolean).join(' '));
+                if (narrativeDamageRolls.length) return narrativeDamageRolls;
+            }
             return damageRolls;
+        },
+
+        extractRangeText(fields, advanced, content) {
+            const direct = Utils.cleanRoll20Label(fields.range || fields.spellrange || fields.attackrange || fields.reach || (advanced && advanced.rangeText) || '');
+            if (direct) return direct;
+            const candidates = [
+                fields.properties,
+                fields.props,
+                fields.description,
+                fields.desc,
+                content
+            ].filter(Boolean);
+            const readWeaponRange = (value) => {
+                const text = Utils.cleanRoll20Label(value).replace(/\s+/g, ' ').trim();
+                if (!text) return '';
+                const slashMatch =
+                    text.match(/\bRange\s*:?\s*\(?\s*(\d+(?:\.\d+)?\s*\/\s*\d+(?:\.\d+)?(?:\s*(?:ft\.?|feet|foot))?)/i) ||
+                    text.match(/\b(?:Ammunition|Thrown)\b[^\d]{0,40}\b(\d+(?:\.\d+)?\s*\/\s*\d+(?:\.\d+)?(?:\s*(?:ft\.?|feet|foot))?)/i);
+                if (slashMatch) return Utils.cleanRoll20Label(slashMatch[1]);
+                const labeledMatch = text.match(/\bRange\s*:?\s*([^.;]+?)(?=\s+\b(?:Area|Duration|Casting\s+Time|Attack|Save|Heal|Components?|School|Cantrip|Level|Properties?|Mastery|Ammunition|Loading|Heavy|Light|Finesse|Thrown|Two-Handed|Versatile|Reach)\b|$)/i);
+                if (labeledMatch) return Utils.cleanRoll20Label(labeledMatch[1]);
+                const singleTargetWithin =
+                    text.match(/\b(?:one|a|the)\s+(?:creature|target|object|enemy)[^.;]{0,140}?\bwithin\s+(\d+(?:\.\d+)?)\s*(feet|foot|ft\.?)\b/i) ||
+                    text.match(/\b(?:target|creature|object|enemy)[^.;]{0,140}?\bwithin\s+(\d+(?:\.\d+)?)\s*(feet|foot|ft\.?)\b/i);
+                return singleTargetWithin ? (String(singleTargetWithin[1]) + ' feet') : '';
+            };
+            for (let i = 0; i < candidates.length; i += 1) {
+                const range = readWeaponRange(candidates[i]);
+                if (range) return range;
+            }
+            return '';
+        },
+
+        parseLightInfo(fields, advanced, content) {
+            const candidates = [
+                fields.description,
+                fields.desc,
+                fields.range,
+                fields.spellrange,
+                advanced && advanced.rangeText,
+                advanced && advanced.areaText,
+                content
+            ].filter(Boolean).map((entry) => Utils.cleanRoll20Label(entry).replace(/\s+/g, ' ').trim());
+            const text = candidates.join(' ');
+            if (!text) return { hasLight: false };
+            const unit = '(?:foot|feet|ft\\.?)';
+            const number = '(\\d+(?:\\.\\d+)?)';
+            const lightVerb = '(?:(?:sheds?|emits?|casts?|gives\\s+off)\\s+)?';
+            const brightDim = new RegExp('\\b' + lightVerb + 'bright\\s+light\\s+(?:in\\s+a\\s+|for\\s+)?' +
+                number + '\\s*(?:-\\s*)?' + unit + '\\s*(?:radius)?\\b[^.;]{0,80}?\\bdim\\s+light\\s+(?:for\\s+)?(?:an\\s+additional\\s+)?' +
+                number + '\\s*(?:-\\s*)?' + unit + '\\b', 'i');
+            const brightOnly = new RegExp('\\b' + lightVerb + 'bright\\s+light\\s+(?:in\\s+a\\s+|for\\s+)?' +
+                number + '\\s*(?:-\\s*)?' + unit + '\\s*(?:radius)?\\b', 'i');
+            let match = text.match(brightDim);
+            if (match) {
+                const brightFeet = Math.max(0, Utils.toNumber(match[1], 0));
+                const dimFeet = Math.max(0, Utils.toNumber(match[2], 0));
+                return {
+                    hasLight: brightFeet > 0 || dimFeet > 0,
+                    brightFeet,
+                    dimFeet,
+                    label: String(brightFeet).replace(/\.0+$/, '') + ' ft bright' + (dimFeet > 0 ? (' + ' + String(dimFeet).replace(/\.0+$/, '') + ' ft dim') : '')
+                };
+            }
+            match = text.match(brightOnly);
+            if (match) {
+                const brightFeet = Math.max(0, Utils.toNumber(match[1], 0));
+                return {
+                    hasLight: brightFeet > 0,
+                    brightFeet,
+                    dimFeet: 0,
+                    label: String(brightFeet).replace(/\.0+$/, '') + ' ft bright'
+                };
+            }
+            return { hasLight: false };
+        },
+
+        stripLightDescriptions(text) {
+            const source = String(text || '');
+            if (!source) return '';
+            const unit = '(?:foot|feet|ft\\.?)';
+            const number = '\\d+(?:\\.\\d+)?';
+            return source
+                .replace(new RegExp('\\b(?:and\\s+)?(?:it\\s+)?(?:(?:sheds?|emits?|casts?|gives\\s+off)\\s+)?bright\\s+light\\s+(?:in\\s+a\\s+|for\\s+)?' +
+                    number + '\\s*(?:-\\s*)?' + unit + '\\s*(?:radius)?\\b[^.;]{0,100}?\\bdim\\s+light\\s+(?:for\\s+)?(?:an\\s+additional\\s+)?' +
+                    number + '\\s*(?:-\\s*)?' + unit + '\\b', 'gi'), ' ')
+                .replace(new RegExp('\\b(?:and\\s+)?(?:it\\s+)?(?:(?:sheds?|emits?|casts?|gives\\s+off)\\s+)?bright\\s+light\\s+(?:in\\s+a\\s+|for\\s+)?' +
+                    number + '\\s*(?:-\\s*)?' + unit + '\\s*(?:radius)?\\b', 'gi'), ' ')
+                .replace(/\s+/g, ' ')
+                .trim();
+        },
+
+        parseAreaInfo(fields, advanced, content) {
+            const candidates = [
+                fields.area,
+                fields.aoe,
+                fields.range,
+                fields.spellrange,
+                fields.attackrange,
+                fields.description,
+                fields.desc,
+                advanced && advanced.rangeText,
+                advanced && advanced.areaText,
+                content
+            ].filter(Boolean).map((entry) => Utils.cleanRoll20Label(entry));
+            const texts = [];
+            const textSeen = Object.create(null);
+            candidates.forEach((entry) => {
+                const normalized = String(entry || '')
+                    .replace(/[\u2010\u2011\u2012\u2013\u2014\u2212]/g, '-')
+                    .replace(/\s+/g, ' ')
+                    .trim();
+                const areaText = this.stripLightDescriptions(normalized);
+                const key = areaText.toLowerCase();
+                if (!areaText || textSeen[key]) return;
+                textSeen[key] = true;
+                texts.push(areaText);
+            });
+            if (!texts.length) return { isArea: false, options: [] };
+
+            const areas = [];
+            const areaSeen = Object.create(null);
+            const titleShape = (shape) => {
+                const raw = String(shape || '').trim().toLowerCase();
+                return raw ? (raw.charAt(0).toUpperCase() + raw.slice(1)) : 'Area';
+            };
+            const addArea = (lengthValue, shapeValue, widthValue, options) => {
+                const areaOptions = options || {};
+                const sizeFeet = Math.max(0, Utils.toNumber(lengthValue, 0));
+                const rawShape = String(shapeValue || '').trim().toLowerCase();
+                if (sizeFeet <= 0 || !rawShape) return;
+                const shape = titleShape(rawShape);
+                const widthFeet = rawShape === 'line' ? Math.max(1, Utils.toNumber(widthValue, 5)) : 0;
+                if (rawShape === 'line' && (widthValue === undefined || widthValue === null || String(widthValue).trim() === '')) {
+                    const specificLineExists = areas.some((entry) => String(entry.shape || '').toLowerCase() === 'line' && Utils.toNumber(entry.sizeFeet, 0) === sizeFeet);
+                    if (specificLineExists) return;
+                }
+                const key = rawShape + ':' + String(sizeFeet) + ':' + String(widthFeet);
+                if (areaSeen[key]) return;
+                areaSeen[key] = true;
+                const info = {
+                    isArea: true,
+                    sizeFeet,
+                    shape,
+                    label: areaOptions.label || (rawShape === 'line'
+                        ? (String(sizeFeet).replace(/\.0+$/, '') + '-Foot x ' + String(widthFeet).replace(/\.0+$/, '') + '-Foot Line')
+                        : (String(sizeFeet).replace(/\.0+$/, '') + '-Foot ' + shape)),
+                    priority: Utils.toInt(areaOptions.priority, 0)
+                };
+                if (areaOptions.damagePointArea) info.damagePointArea = true;
+                if (areaOptions.wallArea) info.wallArea = true;
+                if (rawShape === 'line') {
+                    info.lengthFeet = sizeFeet;
+                    info.widthFeet = widthFeet;
+                }
+                areas.push(info);
+            };
+            const wordNumber = (value) => {
+                const raw = String(value || '').trim().toLowerCase();
+                const words = {
+                    one: 1,
+                    two: 2,
+                    three: 3,
+                    four: 4,
+                    five: 5,
+                    six: 6,
+                    seven: 7,
+                    eight: 8,
+                    nine: 9,
+                    ten: 10,
+                    twelve: 12
+                };
+                return words[raw] || Utils.toNumber(raw, 0);
+            };
+            const scan = (text, regex, callback) => {
+                regex.lastIndex = 0;
+                let match = null;
+                while ((match = regex.exec(text)) !== null) {
+                    callback(match);
+                    if (match.index === regex.lastIndex) regex.lastIndex += 1;
+                }
+            };
+            const unit = '(?:foot|feet|ft\\.?)';
+            const number = '(\\d+(?:\\.\\d+)?)';
+
+            texts.forEach((text) => {
+                scan(text, new RegExp(
+                    '\\b(?:each|every|any)\\s+(?:creature|target|object|creature\\s+or\\s+object)s?[^.;]{0,160}?\\bwithin\\s+' +
+                    number + '\\s*(?:-\\s*)?' + unit + '\\s+of\\s+(?:that|the|a)\\s+point\\b',
+                    'gi'
+                ), (match) => addArea(match[1], 'radius', 0, {
+                    priority: 20,
+                    damagePointArea: true,
+                    label: String(Utils.toNumber(match[1], 0)).replace(/\.0+$/, '') + '-Foot Damage Radius'
+                }));
+
+                scan(text, new RegExp(
+                    '\\b(?:each|every|any|a|the)?\\s*(?:creature|target|object|creature\\s+or\\s+object)s?[^.;]{0,180}?\\bwithin\\s+' +
+                    number + '\\s*(?:-\\s*)?' + unit + '\\s+of\\s+(?:that|the|a|this)\\s+(?:sphere|orb|flame|object|effect)\\b[^.;]{0,180}?\\b(?:saving\\s+throw|save|damage)\\b',
+                    'gi'
+                ), (match) => addArea(match[1], 'radius', 0, {
+                    priority: 20,
+                    damagePointArea: true,
+                    label: String(Utils.toNumber(match[1], 0)).replace(/\.0+$/, '') + '-Foot Damage Radius'
+                }));
+
+                scan(text, new RegExp(
+                    number + '\\s*(?:-\\s*)?' + unit + '\\s*(?:-\\s*)?long\\s*,?\\s*(?:and\\s*)?' +
+                    number + '\\s*(?:-\\s*)?' + unit + '\\s*(?:-\\s*)?wide\\s+line\\b',
+                    'gi'
+                ), (match) => addArea(match[1], 'line', match[2]));
+
+                scan(text, new RegExp(
+                    number + '\\s*(?:-\\s*)?' + unit + '\\s*(?:-\\s*)?wide\\s*,?\\s*(?:and\\s*)?' +
+                    number + '\\s*(?:-\\s*)?' + unit + '\\s*(?:-\\s*)?long\\s+line\\b',
+                    'gi'
+                ), (match) => addArea(match[2], 'line', match[1]));
+
+                scan(text, new RegExp(
+                    '\\bline\\b[^.;]{0,100}?' + number + '\\s*(?:-\\s*)?' + unit + '\\s*(?:-\\s*)?long[^.;]{0,50}?' +
+                    number + '\\s*(?:-\\s*)?' + unit + '\\s*(?:-\\s*)?wide',
+                    'gi'
+                ), (match) => addArea(match[1], 'line', match[2]));
+
+                scan(text, new RegExp(
+                    number + '\\s*(?:-\\s*)?' + unit + '\\s*(?:-\\s*)?(?:long\\s+)?line\\b(?:\\s+that\\s+is|\\s*,|\\s+and)?[^.;]{0,40}?' +
+                    number + '\\s*(?:-\\s*)?' + unit + '\\s*(?:-\\s*)?wide',
+                    'gi'
+                ), (match) => addArea(match[1], 'line', match[2]));
+
+                scan(text, new RegExp(
+                    number + '\\s*(?:' + unit + '\\s*)?(?:by|x|&times;|\\u00d7)\\s*' + number + '\\s*' + unit + '\\s*(?:-\\s*)?line\\b',
+                    'gi'
+                ), (match) => {
+                    const first = Utils.toNumber(match[1], 0);
+                    const second = Utils.toNumber(match[2], 0);
+                    addArea(Math.max(first, second), 'line', Math.min(first, second));
+                });
+
+                scan(text, new RegExp(
+                    '\\bwall\\b[^.;]{0,120}?\\b(?:up\\s+to\\s+)?' + number + '\\s*(?:-\\s*)?' + unit + '\\s*(?:-\\s*)?long\\b[^.;]{0,120}?(?:(?:and|,)\\s*)?' +
+                    '(?:(\\d+(?:\\.\\d+)?)\\s*(?:-\\s*)?' + unit + '\\s*(?:-\\s*)?(?:thick|wide))?',
+                    'gi'
+                ), (match) => addArea(match[1], 'line', Math.max(5, Utils.toNumber(match[2], 5)), {
+                    priority: 5,
+                    wallArea: true,
+                    label: String(Utils.toNumber(match[1], 0)).replace(/\.0+$/, '') + '-Foot Wall'
+                }));
+
+                scan(text, new RegExp(
+                    '\\b(?:hemispherical\\s+dome|dome|globe)\\b[^.;]{0,100}?\\bradius\\b[^.;]{0,40}?\\b(?:up\\s+to\\s+)?' +
+                    number + '\\s*(?:-\\s*)?' + unit + '\\b',
+                    'gi'
+                ), (match) => addArea(match[1], 'radius', 0, {
+                    priority: 5,
+                    wallArea: true,
+                    label: String(Utils.toNumber(match[1], 0)).replace(/\.0+$/, '') + '-Foot Wall Radius'
+                }));
+
+                scan(text, new RegExp(
+                    '\\b(?:made\\s+up\\s+of\\s+|up\\s+to\\s+)?(\\d+|one|two|three|four|five|six|seven|eight|nine|ten|twelve)\\s+' +
+                    number + '\\s*(?:-\\s*)?' + unit + '\\s*(?:-\\s*)?square\\s+panels?\\b',
+                    'gi'
+                ), (match) => {
+                    const count = Math.max(1, wordNumber(match[1]));
+                    const panelSize = Math.max(1, Utils.toNumber(match[2], 10));
+                    addArea(count * panelSize, 'line', 5, {
+                        priority: 5,
+                        wallArea: true,
+                        label: String(count * panelSize).replace(/\.0+$/, '') + '-Foot Wall'
+                    });
+                });
+
+                scan(text, new RegExp(
+                    '\\b(?:made\\s+up\\s+of\\s+|up\\s+to\\s+)?(\\d+|one|two|three|four|five|six|seven|eight|nine|ten|twelve)\\s+' +
+                    number + '\\s*(?:-\\s*)?' + unit + '\\s*(?:-\\s*)?(?:by|x|&times;|\\u00d7)\\s*(?:-\\s*)?' +
+                    number + '\\s*(?:-\\s*)?' + unit + '\\s*(?:square\\s+)?panels?\\b',
+                    'gi'
+                ), (match) => {
+                    const count = Math.max(1, wordNumber(match[1]));
+                    const panelSize = Math.max(1, Utils.toNumber(match[2], 10));
+                    addArea(count * panelSize, 'line', 5, {
+                        priority: 5,
+                        wallArea: true,
+                        label: String(count * panelSize).replace(/\.0+$/, '') + '-Foot Wall'
+                    });
+                });
+            });
+
+            const shapePattern = '(cube|cone|sphere|line|cylinder|radius|emanation)';
+            texts.forEach((text) => {
+                scan(text, new RegExp(
+                    '\\b(?:Area\\s*:?\\s*|Self\\s*\\(\\s*)?' +
+                    number + '\\s*(?:-\\s*)?' + unit + '\\s*(?:-\\s*)?' + shapePattern + '\\b',
+                    'gi'
+                ), (match) => {
+                    const shape = String(match[2] || '').toLowerCase();
+                    const sizeFeet = Math.max(0, Utils.toNumber(match[1], 0));
+                    if (shape === 'line' && areas.some((entry) => String(entry.shape || '').toLowerCase() === 'line' && Utils.toNumber(entry.sizeFeet, 0) === sizeFeet)) return;
+                    addArea(match[1], match[2], shape === 'line' ? 5 : 0);
+                });
+            });
+
+            if (!areas.length) return { isArea: false, options: [] };
+            const maxPriority = areas.reduce((max, area) => Math.max(max, Utils.toInt(area && area.priority, 0)), 0);
+            const selectedAreas = maxPriority > 0
+                ? areas.filter((area) => Utils.toInt(area && area.priority, 0) === maxPriority)
+                : areas;
+            return Object.assign({}, selectedAreas[0], { options: selectedAreas });
         },
 
         parseMessage(msg) {
@@ -2375,6 +5129,7 @@ const CombatAssistant = (() => {
             const lower = content.toLowerCase();
             const attack = this.parseAttackRoll(msg, fields, advanced);
             const damageRolls = this.parseDamageRolls(msg, fields, advanced, attack);
+            const rangeText = this.extractRangeText(fields, advanced, content);
             const damageTotal = damageRolls.length
                 ? damageRolls.reduce((sum, entry) => sum + Math.max(0, Utils.toInt(entry.total, 0)), 0)
                 : Math.max(0, Utils.toInt(advanced && advanced.damageTotal, 0));
@@ -2396,6 +5151,10 @@ const CombatAssistant = (() => {
                 !/^[01]$/.test(attackFieldValue) &&
                 (/\$\[\[\d+\]\]/.test(attackFieldValue) || /\bd20\b/i.test(attackFieldValue) || /^[+-]?\d+(?:\.\d+)?$/.test(attackFieldValue));
             const templateName = String(msg.rolltemplate || '').trim().toLowerCase();
+            const isSpellAction = !!(String(fields.spelllevel || fields.spell_level || fields.spell || '').trim() || /\bspell\s+details\b/i.test(content) || /\bspell-item\b/i.test(content));
+            const isConcentration = /\bConcentration\b/i.test(content) || /\bDuration\s*:\s*Concentration\b/i.test(content);
+            const lightInfo = this.parseLightInfo(fields, advanced, content);
+            const areaInfo = this.parseAreaInfo(fields, advanced, content);
             const attackTemplateSignal = /(?:^|[^a-z])(?:atk|attack|npcatk|npcfullatk)(?:[^a-z]|$)/i.test(templateName) && templateName !== 'dmg' && templateName !== 'npcdmg';
             const hasAttackSignal = !!(
                 fields.r1 ||
@@ -2411,8 +5170,16 @@ const CombatAssistant = (() => {
             const looksLikeDamage = hasDamage || /dmg\d*=|\{\{dmg=|\{\{globaldamage=|\{\{hldmg=|\{\{healing=|\{\{heal=/.test(lower);
             const saveAbility = CombatService.normalizeAbilityName((advanced && advanced.saveAbility) || attack.saveAbility || fields.saveability || fields.saveattr || '');
             const saveDc = Math.max(0, Utils.toInt((advanced && advanced.saveDc) || attack.saveDc || 0, 0));
+            const hasSpellContext = !!(isSpellAction && !hasDamage && !explicitHealing && (saveDc > 0 || saveAbility || (areaInfo && areaInfo.isArea)));
+            const splitSaveDamage = this.splitSecondarySaveDamageRolls(damageRolls, [
+                fields.savedesc,
+                fields.save_success,
+                fields.description,
+                fields.desc,
+                content
+            ].filter(Boolean).join(' '), saveDc, saveAbility);
 
-            if (!looksLikeAttack && !looksLikeDamage && !explicitHealing) return null;
+            if (!looksLikeAttack && !looksLikeDamage && !explicitHealing && !hasSpellContext) return null;
 
             return {
                 characterName,
@@ -2421,13 +5188,16 @@ const CombatAssistant = (() => {
                 tokenImgsrc: R20.getTokenImageByCharacterName(characterName),
                 attackName,
                 hasExplicitAttackName: !!String(explicitAttackNameSource || '').trim(),
-                isAttack: !!looksLikeAttack,
+                isAttack: !!(looksLikeAttack || hasSpellContext),
                 isDamage: !!looksLikeDamage && !explicitHealing,
                 isHealing: !!explicitHealing,
                 isTempHealing: !!(advanced && advanced.isTempHealing) || temporaryHitPointsSignal,
                 attackTotal: Math.max(0, Utils.toInt(attack.total, 0)),
                 hasAttackRoll: !!attack.hasAttackRoll,
                 attackNatural: attack.natural,
+                attackRolls: attack.rolls || [],
+                attackNaturalRolls: attack.naturalRolls || [],
+                attackHasSecondRoll: !!attack.hasSecondRoll,
                 isCritical: !!attack.isCritical,
                 rollMode: attack.mode || 'normal',
                 saveDc,
@@ -2435,11 +5205,20 @@ const CombatAssistant = (() => {
                 isSaveAttack: saveDc > 0,
                 halfOnSuccess: !!((advanced && advanced.halfOnSuccess) || attack.halfOnSuccess),
                 halfOnSuccessKnown: !!((advanced && advanced.halfOnSuccessKnown) || attack.halfOnSuccessKnown),
+                rangeText,
+                isSpellAction,
+                isConcentration,
+                hasSpellContext,
+                lightInfo,
+                areaInfo,
                 damageType: damageRolls.length ? damageRolls[0].damageType : ((advanced && advanced.damageType) || 'normal'),
                 damageTotal,
                 healTotal: damageTotal,
                 damageFormula: damageRolls.map((entry) => entry.formula || 'Roll20').join(' + ') || 'Roll20',
-                damageRolls
+                damageRolls,
+                hasSecondarySaveDamageSplit: !!splitSaveDamage.hasSplit,
+                attackDamageRolls: splitSaveDamage.attackDamageRolls,
+                saveDamageRolls: splitSaveDamage.saveDamageRolls
             };
         },
 
@@ -2521,16 +5300,28 @@ const CombatAssistant = (() => {
             this.prunePendingNativeSaves();
             const root = State.get();
             root.pendingNativeSaves = root.pendingNativeSaves || {};
+            const tokenId = String(entry && entry.tokenId || '').trim();
+            const rollName = String(entry && entry.rollName || '').trim();
+            const normalizedRollName = Utils.normalizeName(rollName);
+            Object.keys(root.pendingNativeSaves).forEach((key) => {
+                const existing = root.pendingNativeSaves[key] || {};
+                if (!tokenId || String(existing.tokenId || '').trim() !== tokenId) return;
+                if (normalizedRollName && Utils.normalizeName(existing.rollName || '') !== normalizedRollName) return;
+                delete root.pendingNativeSaves[key];
+            });
             const requestId = this.makePendingNativeSaveId();
             root.pendingNativeSaves[requestId] = Object.assign({}, entry || {}, {
                 id: requestId,
                 kind: 'saving',
                 characterName: String(entry && entry.characterName || '').trim(),
                 normalizedCharacter: Utils.normalizeName(entry && entry.characterName || ''),
-                rollName: String(entry && entry.rollName || '').trim(),
-                normalizedRollName: Utils.normalizeName(entry && entry.rollName || ''),
-                tokenId: String(entry && entry.tokenId || '').trim(),
+                rollName,
+                normalizedRollName,
+                tokenId,
                 characterId: String(entry && entry.characterId || '').trim(),
+                captureNative: !entry || !Object.prototype.hasOwnProperty.call(entry, 'captureNative') ? true : Utils.toBoolean(entry.captureNative, true),
+                forcedRollMode: String(entry && entry.forcedRollMode || '').trim(),
+                forcedRollReason: String(entry && entry.forcedRollReason || '').trim(),
                 createdAt: Date.now()
             });
             return requestId;
@@ -2545,6 +5336,14 @@ const CombatAssistant = (() => {
             const entry = root.pendingNativeSaves[safeRequestId];
             delete root.pendingNativeSaves[safeRequestId];
             return entry || null;
+        },
+
+        getPendingNativeSaveById(requestId) {
+            this.prunePendingNativeSaves();
+            const root = State.get();
+            root.pendingNativeSaves = root.pendingNativeSaves || {};
+            const safeRequestId = String(requestId || '').trim();
+            return safeRequestId && root.pendingNativeSaves[safeRequestId] ? root.pendingNativeSaves[safeRequestId] : null;
         },
 
         prunePendingNativeInitiatives(maxAgeMs) {
@@ -2602,7 +5401,7 @@ const CombatAssistant = (() => {
             return safeBatchId ? (root.pendingNativeInitiativeBatches[safeBatchId] || null) : null;
         },
 
-        setNativeInitiativeAutoQueue(batchId, rolls) {
+        setNativeInitiativeAutoQueue(batchId, rolls, onComplete) {
             const batch = this.getPendingNativeInitiativeBatch(batchId);
             if (!batch) return false;
             batch.autoQueue = (Array.isArray(rolls) ? rolls : [])
@@ -2615,20 +5414,57 @@ const CombatAssistant = (() => {
                 }))
                 .filter((roll) => roll.requestId && roll.nativeCommand);
             batch.activeAutoRequestId = '';
+            if (Utils.isFunction(onComplete)) INITIATIVE_AUTO_COMPLETIONS[String(batchId || '').trim()] = onComplete;
             return batch.autoQueue.length > 0;
+        },
+
+        finishNativeInitiativeAutoQueue(batchId) {
+            const safeBatchId = String(batchId || '').trim();
+            const onComplete = safeBatchId ? INITIATIVE_AUTO_COMPLETIONS[safeBatchId] : null;
+            if (!Utils.isFunction(onComplete)) return false;
+            delete INITIATIVE_AUTO_COMPLETIONS[safeBatchId];
+            try {
+                onComplete();
+            } catch (error) {
+                Logger.error('[initiative-auto-complete]', error && error.message ? error.message : String(error));
+            }
+            return true;
         },
 
         advanceNativeInitiativeAutoQueue(batchId) {
             const batch = this.getPendingNativeInitiativeBatch(batchId);
-            if (!batch || !Array.isArray(batch.autoQueue)) return false;
+            if (!batch || !Array.isArray(batch.autoQueue)) {
+                this.finishNativeInitiativeAutoQueue(batchId);
+                return false;
+            }
             if (String(batch.activeAutoRequestId || '').trim()) return false;
             const next = batch.autoQueue.find((entry) => entry && entry.status === 'pending');
-            if (!next) return false;
+            if (!next) {
+                this.finishNativeInitiativeAutoQueue(batchId);
+                return false;
+            }
             next.status = 'waiting';
             batch.activeAutoRequestId = next.requestId;
             setTimeout(() => {
                 try {
+                    // Sheet abilities must use normal chat dispatch so Roll20 emits
+                    // the rendered roll to chat:message for initiative capture.
                     R20.send(next.nativeCommand);
+                    const watchdogKey = String(batchId) + ':' + String(next.requestId);
+                    if (INITIATIVE_AUTO_WATCHDOGS[watchdogKey]) clearTimeout(INITIATIVE_AUTO_WATCHDOGS[watchdogKey]);
+                    INITIATIVE_AUTO_WATCHDOGS[watchdogKey] = setTimeout(() => {
+                        delete INITIATIVE_AUTO_WATCHDOGS[watchdogKey];
+                        const currentBatch = this.getPendingNativeInitiativeBatch(batchId);
+                        if (!currentBatch || String(currentBatch.activeAutoRequestId || '') !== String(next.requestId)) return;
+                        next.status = 'failed';
+                        currentBatch.activeAutoRequestId = '';
+                        this.removePendingNativeInitiativeById(next.requestId);
+                        R20.whisper('GM', Html.card({
+                            title: 'Initiative Roll Timeout',
+                            body: '<div style="font-size:12px;line-height:15px;">No initiative result was captured for <strong>' + Utils.escapeHtml(next.tokenName || 'Token') + '</strong>. The remaining rolls will continue.</div>'
+                        }));
+                        this.advanceNativeInitiativeAutoQueue(batchId);
+                    }, 5000);
                 } catch (error) {
                     Logger.error('[initiative-auto-roll]', error && error.message ? error.message : String(error));
                     next.status = 'failed';
@@ -2667,33 +5503,22 @@ const CombatAssistant = (() => {
             return entry;
         },
 
-        updateTurnOrderWithInitiativeResults(results, options) {
-            options = options || {};
+        updateTurnOrderWithInitiativeResults(results) {
             const safeResults = (Array.isArray(results) ? results : [])
                 .filter((result) => result && result.tokenId && result.total !== undefined && result.total !== null);
             if (!safeResults.length || typeof Campaign !== 'function') return false;
 
             let turnOrder = this.getCurrentTurnOrder();
             const activeTurnId = String(turnOrder[0] && turnOrder[0].id || '').trim();
-            const rolledIds = {};
-            const resultPr = {};
-            const baselineIds = {};
-            (Array.isArray(options.baselineTurnOrder) ? options.baselineTurnOrder : []).forEach((entry) => {
-                const id = String(entry && entry.id || '').trim();
-                if (id) baselineIds[id] = true;
-            });
+            const rolledIds = Object.create(null);
             safeResults.forEach((result) => {
                 const id = String(result.tokenId || '').trim();
                 if (id) rolledIds[id] = true;
-                resultPr[this.formatInitiativeValue(result.total)] = true;
             });
 
             turnOrder = turnOrder.filter((entry) => {
                 const id = String(entry && entry.id || '').trim();
-                if (!id) return true;
-                if (rolledIds[id]) return false;
-                if (options.cleanupNativePr && !baselineIds[id] && resultPr[String(entry && entry.pr || '')]) return false;
-                return true;
+                return !id || !rolledIds[id];
             });
             safeResults.forEach((result) => {
                 turnOrder.push(this.makeTurnOrderEntry(result.tokenId, result.total));
@@ -2765,6 +5590,7 @@ const CombatAssistant = (() => {
             const entries = Object.keys(root.pendingNativeSaves)
                 .map((key) => root.pendingNativeSaves[key])
                 .filter(Boolean)
+                .filter((entry) => entry.captureNative !== false)
                 .sort((a, b) => Utils.toInt(a.createdAt, 0) - Utils.toInt(b.createdAt, 0));
             if (!entries.length) return null;
 
@@ -2774,10 +5600,18 @@ const CombatAssistant = (() => {
                 return normalizedRoll.indexOf(entry.normalizedRollName) >= 0 || entry.normalizedRollName.indexOf(normalizedRoll) >= 0;
             });
             let entry = matches[0] || null;
+            if (!entry && normalizedCharacter) {
+                const characterMatches = entries.filter((candidate) => {
+                    if (!candidate.normalizedCharacter) return false;
+                    return candidate.normalizedCharacter === normalizedCharacter;
+                });
+                if (characterMatches.length === 1) entry = characterMatches[0];
+            }
             if (!entry && entries.length === 1 && !normalizedRoll) {
                 const only = entries[0];
                 if (!normalizedCharacter || !only.normalizedCharacter || only.normalizedCharacter === normalizedCharacter) entry = only;
             }
+            if (!entry && !normalizedCharacter) entry = entries[0] || null;
             if (!entry) return null;
             delete root.pendingNativeSaves[entry.id];
             return entry;
@@ -2801,6 +5635,13 @@ const CombatAssistant = (() => {
                 if (!candidate.normalizedCharacter) return false;
                 return candidate.normalizedCharacter === normalizedCharacter;
             }) || null;
+            if (!entry) {
+                const activeEntries = entries.filter((candidate) => {
+                    const batch = this.getPendingNativeInitiativeBatch(candidate.batchId);
+                    return batch && String(batch.activeAutoRequestId || '').trim() === String(candidate.id || '').trim();
+                });
+                if (activeEntries.length === 1) entry = activeEntries[0];
+            }
             if (!entry && !normalizedCharacter) entry = entries[0];
             if (!entry) return null;
             delete root.pendingNativeInitiatives[entry.id];
@@ -2823,12 +5664,14 @@ const CombatAssistant = (() => {
                     total: batch.results[knownTokenId]
                 });
             });
-            this.updateTurnOrderWithInitiativeResults(knownResults, {
-                baselineTurnOrder: batch.turnorderSnapshot,
-                cleanupNativePr: true
-            });
+            this.updateTurnOrderWithInitiativeResults(knownResults);
             const safeRequestId = String(requestId || '').trim();
             if (safeRequestId && String(batch.activeAutoRequestId || '').trim() === safeRequestId) {
+                const watchdogKey = String(batchId) + ':' + safeRequestId;
+                if (INITIATIVE_AUTO_WATCHDOGS[watchdogKey]) {
+                    clearTimeout(INITIATIVE_AUTO_WATCHDOGS[watchdogKey]);
+                    delete INITIATIVE_AUTO_WATCHDOGS[watchdogKey];
+                }
                 const active = (Array.isArray(batch.autoQueue) ? batch.autoQueue : [])
                     .find((entry) => entry && String(entry.requestId || '').trim() === safeRequestId);
                 if (active) active.status = 'done';
@@ -2862,7 +5705,9 @@ const CombatAssistant = (() => {
             if (!batch) return false;
             const root = State.get();
             root.pendingNativeInitiativeBatches = root.pendingNativeInitiativeBatches || {};
-            delete root.pendingNativeInitiativeBatches[String(batchId || '').trim()];
+            const safeBatchId = String(batchId || '').trim();
+            delete INITIATIVE_AUTO_COMPLETIONS[safeBatchId];
+            delete root.pendingNativeInitiativeBatches[safeBatchId];
             return true;
         },
 
@@ -2980,33 +5825,296 @@ const CombatAssistant = (() => {
             return null;
         },
 
-        async handlePendingNativeSaveCapture(parsed, msg) {
-            const root = State.get();
-            if (!root.pendingNativeSaves || !Object.keys(root.pendingNativeSaves).length) return false;
-            if (!msg || msg.type === 'api') return false;
-            const total = this.extractCapturedRollTotal(msg, parsed);
+        normalizeTemplateRollName(value) {
+            return Utils.cleanRoll20Label(String(value || '')
+                .replace(/\^\{([^}]+)\}/g, '$1')
+                .replace(/[-_]+u\b/gi, '')
+                .replace(/[-_]+/g, ' ')
+                .replace(/\s+/g, ' ')
+                .trim());
+        },
+
+        extractSimpleNativeSaveBlocks(content) {
+            const source = String(content || '');
+            const starts = [];
+            const pattern = /\{\{rname=/gi;
+            let match = null;
+            while ((match = pattern.exec(source)) !== null) {
+                starts.push(match.index);
+            }
+            if (starts.length <= 1) return [source];
+            return starts.map((start, index) => source.slice(start, index + 1 < starts.length ? starts[index + 1] : source.length).trim()).filter(Boolean);
+        },
+
+        extractSimpleNativeSaveRoll(msg, content) {
+            const source = String(content || '');
+            const templateName = String(msg && msg.rolltemplate || '').trim().toLowerCase();
+            if (templateName && templateName !== 'simple') return null;
+            if (!/\{\{r1=/.test(source) && !/\br1=\$\[\[\d+\]\]/i.test(source)) return null;
+            const fields = this.getRollTemplateFields(source);
+            const rawRollName = fields.rname || fields.rollname || fields.name || '';
+            const rollName = this.normalizeTemplateRollName(rawRollName);
+            const label = [templateName, rawRollName, rollName, source].join(' ');
+            if (Utils.normalizeName(label).indexOf('initiative') >= 0) return null;
+            if (!/\bsave\b|\bsaving\b|\bsalvaci/i.test(label)) return null;
+            const resolved = this.resolve2014TemplateD20Roll(msg, fields, source, fields.r1 || fields.roll || '', fields.r2 || '');
+            let total = resolved.total;
+            if (total === null || total === undefined || Number.isNaN(Number(total))) total = this.getInlineRollTotal(msg, 0);
+            if (total === null || total === undefined || Number.isNaN(Number(total))) return null;
+            const characterName = Utils.cleanRoll20Label(
+                fields.charname ||
+                fields.character_name ||
+                fields.character ||
+                ''
+            );
+            return {
+                characterName,
+                rollName,
+                total,
+                mode: resolved.mode || 'normal',
+                rolls: Array.isArray(resolved.rolls) ? resolved.rolls : [],
+                hasSecondRoll: !!resolved.hasSecondRoll
+            };
+        },
+
+        extractSimpleNativeSaveRolls(msg, content) {
+            const templateName = String(msg && msg.rolltemplate || '').trim().toLowerCase();
+            if (templateName && templateName !== 'simple') return [];
+            const blocks = this.extractSimpleNativeSaveBlocks(content);
+            return blocks
+                .map((block) => this.extractSimpleNativeSaveRoll(msg, block))
+                .filter(Boolean);
+        },
+
+        hasNativeRollEvidence(msg, content) {
+            const source = String(content || '');
+            const inlineRolls = Array.isArray(msg && msg.inlinerolls) ? msg.inlinerolls : [];
+            if (inlineRolls.length) return true;
+            if (/\{\{r1=|\br1=\$\[\[\d+\]\]/i.test(source)) return true;
+            if (/<rolltemplate\b/i.test(source) && /data-result=|\$\[\[\d+\]\]|\{\{(?:r1|attack|roll|atk)=/i.test(source)) return true;
+            return false;
+        },
+
+        extractNativeSaveRolls(msg) {
+            const content = String(msg && msg.content || '');
+            if (!this.hasNativeRollEvidence(msg, content)) return [];
+            const blocks = this.getRollTemplateBlocks(content);
+            const rolls = [];
+            const isInitiativeLabel = (value) => Utils.normalizeName(value || '').indexOf('initiative') >= 0;
+            const simpleRolls = this.extractSimpleNativeSaveRolls(msg, content);
+            simpleRolls.forEach((roll) => rolls.push(roll));
+            blocks.forEach((block) => {
+                if (simpleRolls.length && block === content) return;
+                const fields = this.getRollTemplateFields(block);
+                const advanced = this.parseAdvancedHtml(block);
+                const label = [
+                    msg && msg.rolltemplate,
+                    advanced && advanced.attackName,
+                    fields.rname,
+                    fields.rollname,
+                    fields.name
+                ].join(' ');
+                if (isInitiativeLabel(label) || /\binitiative\b/i.test(Utils.stripHtml(block || ''))) return;
+                const attack = this.parseAttackRoll(Object.assign({}, msg || {}, { content: block }), fields, advanced);
+                const resultMatch = String(block || '').match(/data-result="([+-]?\d+(?:\.\d+)?)"/i);
+                const total = attack && attack.total !== null && attack.total !== undefined
+                    ? Utils.toNumber(attack.total, 0)
+                    : (advanced && advanced.attackTotal !== null && advanced.attackTotal !== undefined
+                        ? Utils.toNumber(advanced.attackTotal, 0)
+                        : (resultMatch ? Utils.toNumber(resultMatch[1], 0) : null));
+                if (total === null || total === undefined || Number.isNaN(Number(total))) return;
+                const characterName = Utils.cleanRoll20Label(
+                    (advanced && advanced.characterName) ||
+                    fields.charname ||
+                    fields.character_name ||
+                    fields.character ||
+                    ''
+                );
+                const rollName = Utils.cleanRoll20Label(
+                    (advanced && advanced.attackName) ||
+                    fields.rname ||
+                    fields.rollname ||
+                    fields.name ||
+                    ''
+                );
+                rolls.push({
+                    characterName,
+                    rollName,
+                    total,
+                    mode: attack && attack.mode || (advanced && advanced.rollMode) || 'normal',
+                    rolls: attack && Array.isArray(attack.rolls) ? attack.rolls : [],
+                    hasSecondRoll: !!(attack && attack.hasSecondRoll) || !!(advanced && advanced.hasSecondRoll)
+                });
+            });
+            return rolls;
+        },
+
+        async applyPendingNativeSaveResult(pending, rollInfo) {
+            const total = Utils.toNumber(rollInfo && rollInfo.total, null);
             if (total === null || total === undefined || Number.isNaN(Number(total))) return false;
-            const characterName = parsed && parsed.characterName ? parsed.characterName : String(msg.who || '').replace(/\s+\(GM\)$/i, '').trim();
-            const rollName = parsed && parsed.attackName ? parsed.attackName : '';
-            const pending = this.resolvePendingNativeSave(characterName, rollName);
-            if (!pending) return false;
             const token = R20.getTokenById(pending.tokenId);
             if (!token) {
+                CombatService.completePersistentAreaMarkerTarget(pending.payload || {}, pending.tokenId);
                 Render.sendWhisperMessage(pending.requestedBy || 'GM', 'Damage Blocked', 'The pending saving throw target token was not found.', 'failure');
                 return true;
             }
+            const capturedMode = CombatService.normalizeRollMode(rollInfo && rollInfo.mode || 'normal');
+            const capturedRolls = Array.isArray(rollInfo && rollInfo.rolls) ? rollInfo.rolls.map((value) => Utils.toInt(value, 0)).filter((value) => value > 0) : [];
+            const capturedHasSecondRoll = !!(rollInfo && rollInfo.hasSecondRoll) || capturedRolls.length > 1 || capturedMode === 'advantage' || capturedMode === 'disadvantage';
+            if (pending.magicResistanceReroll && pending.magicResistanceRerollStage !== 'second' && capturedMode === 'normal' && !capturedHasSecondRoll) {
+                this.requestMagicResistanceSecondNativeSave(pending, total);
+                return true;
+            }
+            const firstMagicResistanceTotal = pending.magicResistanceReroll && pending.magicResistanceRerollStage === 'second'
+                ? Utils.toNumber(pending.magicResistanceFirstTotal, null)
+                : null;
+            const finalTotal = firstMagicResistanceTotal !== null && firstMagicResistanceTotal !== undefined
+                ? Math.max(firstMagicResistanceTotal, Utils.toNumber(total, 0))
+                : total;
+            const nativeSaveRolls = firstMagicResistanceTotal !== null && firstMagicResistanceTotal !== undefined
+                ? [firstMagicResistanceTotal, Utils.toNumber(total, 0)]
+                : capturedRolls;
             const payload = Object.assign({}, pending.payload || {}, {
-                nativeSaveTotal: total,
-                nativeSaveRollName: rollName,
-                nativeSaveCharacterName: characterName
+                nativeSaveTotal: finalTotal,
+                nativeSaveRollName: String(rollInfo && rollInfo.rollName || ''),
+                nativeSaveCharacterName: String(rollInfo && rollInfo.characterName || pending.characterName || ''),
+                nativeSaveMode: firstMagicResistanceTotal !== null && firstMagicResistanceTotal !== undefined ? 'advantage' : capturedMode,
+                nativeSaveRolls,
+                nativeSaveRollModeReason: firstMagicResistanceTotal !== null && firstMagicResistanceTotal !== undefined ? 'Magic Resistance' : ''
             });
+            if (pending.concentrationCheck || payload.concentrationCheck) {
+                CombatService.resolveConcentrationSave(token, {
+                    total: finalTotal,
+                    ability: 'constitution',
+                    mode: payload.nativeSaveMode,
+                    rolls: nativeSaveRolls,
+                    rollModeReason: payload.nativeSaveRollModeReason
+                }, pending);
+                return true;
+            }
             const result = await CombatService.applyDamageToToken(token, payload);
             if (!result.ok) {
+                CombatService.completePersistentAreaMarkerTarget(payload, token);
                 Render.sendWhisperMessage(pending.requestedBy || 'GM', 'Damage Blocked', result.message || 'Could not apply damage after the saving throw.', 'failure');
                 return true;
             }
             Render.sendDamageResult(result);
+            CombatService.completePersistentAreaMarkerTarget(payload, token);
             return true;
+        },
+
+        async flushPendingNativeSaveCaptureBuffer() {
+            NATIVE_SAVE_CAPTURE_BUFFER.timer = null;
+            const allRolls = NATIVE_SAVE_CAPTURE_BUFFER.rolls.splice(0);
+            if (!allRolls.length) return false;
+            const resolved = [];
+            for (let i = 0; i < allRolls.length; i += 1) {
+                const roll = allRolls[i] || {};
+                const pending = this.resolvePendingNativeSave(roll.characterName || '', roll.rollName || '');
+                if (!pending) continue;
+                resolved.push({ pending, roll });
+            }
+            let applied = 0;
+            for (let i = 0; i < resolved.length; i += 1) {
+                if (await this.applyPendingNativeSaveResult(resolved[i].pending, resolved[i].roll)) applied += 1;
+            }
+            return applied > 0;
+        },
+
+        queuePendingNativeSaveCapture(rolls) {
+            (Array.isArray(rolls) ? rolls : []).forEach((roll) => {
+                if (roll) NATIVE_SAVE_CAPTURE_BUFFER.rolls.push(roll);
+            });
+            if (NATIVE_SAVE_CAPTURE_BUFFER.timer) clearTimeout(NATIVE_SAVE_CAPTURE_BUFFER.timer);
+            NATIVE_SAVE_CAPTURE_BUFFER.timer = setTimeout(() => {
+                Promise.resolve(this.flushPendingNativeSaveCaptureBuffer()).catch((error) => {
+                    Logger.error('[native-save-buffer]', error && error.message ? error.message : String(error));
+                });
+            }, 100);
+        },
+
+        async handlePendingNativeSaveCapture(msg) {
+            const root = State.get();
+            if (!root.pendingNativeSaves || !Object.keys(root.pendingNativeSaves).length) return false;
+            if (!msg || msg.type === 'api') return false;
+            const content = String(msg && msg.content || '');
+            if (!this.hasNativeRollEvidence(msg, content)) return false;
+            if (/\binitiative\b/i.test(Utils.stripHtml(content || ''))) return false;
+            const rolls = this.extractNativeSaveRolls(msg);
+            if (!rolls.length) return false;
+            this.queuePendingNativeSaveCapture(rolls);
+            return true;
+        },
+
+        requestMagicResistanceSecondNativeSave(pending, firstTotal) {
+            const command = String(pending && (pending.nativeCommand || pending.batchCommand || pending.buttonCommand) || '').trim();
+            const buttonCommand = String(pending && (pending.buttonCommand || pending.nativeCommand || pending.batchCommand) || '').trim();
+            if (!command && !buttonCommand) {
+                Render.sendWhisperMessage(pending && pending.requestedBy || 'GM', 'Saving Throw', 'Magic Resistance needs one more save roll, but the native command was not found.', 'warning');
+                return false;
+            }
+            const requestId = this.createPendingNativeSave(Object.assign({}, pending || {}, {
+                magicResistanceRerollStage: 'second',
+                magicResistanceFirstTotal: Utils.toNumber(firstTotal, 0),
+                captureNative: true
+            }));
+            const saveAbility = CombatService.normalizeAbilityName(pending && (pending.rollName || pending.payload && pending.payload.saveAbility) || '');
+            const challenge = Math.max(0, Utils.toInt(pending && pending.payload && pending.payload.challenge, 0));
+            const damageRolls = Array.isArray(pending && pending.payload && pending.payload.damageRolls) ? pending.payload.damageRolls : [];
+            const fallbackDamage = Math.max(0, Utils.toInt(pending && pending.payload && (pending.payload.damageTotal || pending.payload.amount || pending.payload.damage), 0));
+            const damage = damageRolls.length
+                ? damageRolls.reduce((sum, roll) => sum + Math.max(0, Utils.toInt(roll && (roll.total || roll.amount || roll.damage), 0)), 0)
+                : fallbackDamage;
+            const damageType = damageRolls.length ? damageRolls[0].damageType : (pending && pending.payload && pending.payload.damageType || 'normal');
+            if (pending && pending.playerPrompt) {
+                const recipients = Array.isArray(pending.recipients) && pending.recipients.length ? pending.recipients : ['GM'];
+                const card = Render.showNativeSaveRollRequest({
+                    tokenName: pending.tokenName || pending.characterName || 'Token',
+                    saveAbility,
+                    challenge,
+                    damage,
+                    damageType,
+                    command: buttonCommand || command,
+                    note: 'Magic Resistance: roll one more time. Combat Assistant will use the higher result.'
+                });
+                recipients.forEach((recipient) => R20.whisper(recipient, card));
+            } else {
+                setTimeout(() => {
+                    try {
+                        R20.send(command || buttonCommand);
+                    } catch (error) {
+                        Logger.error('[magic-resistance-save-reroll]', error && error.message ? error.message : String(error));
+                    }
+                }, 100);
+            }
+            return !!requestId;
+        },
+
+        getNpcSetSourceInfo(result) {
+            const token = R20.resolveRollSourceToken(result || {}, result && result.playerId || '');
+            const character = token
+                ? R20.getCharacterFromToken(token)
+                : R20.getCharacterByName(result && (result.characterName || result.tokenName) || '');
+            if (token && R20.isPlayerControlledToken(token, character)) return null;
+            if (!token && character && R20.isPlayerControlledCharacter(character)) return null;
+            if (!token && !character && !RuntimeConfig.get('COMBAT_VISUAL_EFFECTS')) return null;
+            return {
+                npcSetEligible: true,
+                npcSetSourceTokenId: token ? R20.getTokenId(token) : '',
+                npcSetSourceCharacterId: character ? String(character.id || (token && token.get('represents')) || '').trim() : '',
+                npcSetSourcePageId: token ? R20.getTokenPageId(token) : ''
+            };
+        },
+
+        withNpcSetInfo(result) {
+            const info = this.getNpcSetSourceInfo(result);
+            if (!info) return Object.assign({}, result || {}, { npcSetEligible: false });
+            return Object.assign({}, result || {}, info, {
+                sourceTokenId: info.npcSetSourceTokenId,
+                casterTokenId: info.npcSetSourceTokenId,
+                casterCharacterId: info.npcSetSourceCharacterId,
+                casterPageId: info.npcSetSourcePageId
+            });
         },
 
         sendPlayerPrompt(result) {
@@ -3015,12 +6123,18 @@ const CombatAssistant = (() => {
             if (!isHealing && !RuntimeConfig.get('PLAYER_ATTACK_BUTTON')) return false;
             const token = R20.resolveRollSourceToken(result, result.playerId || '');
             const character = token ? R20.getCharacterFromToken(token) : null;
-            const recipients = R20.getCharacterControllerDisplayNames(character);
-            if (!recipients.length) return false;
+            const playerRecipients = R20.getCharacterControllerDisplayNames(character);
+            if (!playerRecipients.length) return false;
+            const recipients = isHealing ? playerRecipients : Utils.uniqueNames(['GM'].concat(playerRecipients));
             const casterTokenId = R20.getTokenId(token);
             const casterCharacterId = character ? String(character.id || token.get('represents') || '').trim() : '';
             const casterPageId = R20.getTokenPageId(token);
             const saveAbility = CombatService.normalizeAbilityName(result.saveAbility || '');
+            const areaInfo = result && result.areaInfo && result.areaInfo.isArea ? result.areaInfo : { isArea: false, options: [] };
+            const areaOptions = R20.getAreaInfoOptions(areaInfo);
+            const useAreaMarkerRequested = !isHealing && areaInfo.isArea && RuntimeConfig.get('PLAYER_TOKEN_AREA_MARK');
+            let areaTargets = [];
+            let useCount = 1;
             const payloadObject = isHealing ? {
                 type: 'heal',
                 mode: result.isTempHealing ? 'temp' : 'hp',
@@ -3028,6 +6142,12 @@ const CombatAssistant = (() => {
                 sourceName: String(result.tokenName || result.characterName || 'Caster'),
                 sourceAction: String(result.attackName || 'Healing'),
                 sourceImgsrc: String((token && token.get('imgsrc')) || result.tokenImgsrc || ''),
+                rangeText: String(result.rangeText || result.range || ''),
+                isSpellAction: !!result.isSpellAction,
+                isConcentration: !!result.isConcentration,
+                lightInfo: result.lightInfo && result.lightInfo.hasLight ? result.lightInfo : { hasLight: false },
+                areaInfo,
+                areaOptions,
                 casterTokenId,
                 casterCharacterId,
                 casterPageId
@@ -3035,6 +6155,8 @@ const CombatAssistant = (() => {
                 type: 'damage',
                 mode: result.isSaveAttack || saveAbility ? 'save' : 'attack',
                 challenge: Math.max(0, Utils.toInt(result.saveDc || result.attackTotal, 0)),
+                attackNatural: Math.max(0, Utils.toInt(result.attackNatural, 0)),
+                isCritical: !!result.isCritical,
                 saveAbility,
                 halfOnSuccess: !!result.halfOnSuccess,
                 halfOnSuccessKnown: !!result.halfOnSuccessKnown,
@@ -3044,6 +6166,12 @@ const CombatAssistant = (() => {
                 sourceName: String(result.tokenName || result.characterName || ''),
                 sourceAction: String(result.attackName || ''),
                 sourceImgsrc: String((token && token.get('imgsrc')) || result.tokenImgsrc || ''),
+                rangeText: String(result.rangeText || result.range || ''),
+                isSpellAction: !!result.isSpellAction,
+                isConcentration: !!result.isConcentration,
+                lightInfo: result.lightInfo && result.lightInfo.hasLight ? result.lightInfo : { hasLight: false },
+                areaInfo,
+                areaOptions,
                 casterTokenId,
                 casterCharacterId,
                 casterPageId
@@ -3056,16 +6184,49 @@ const CombatAssistant = (() => {
                 sourcePageId: casterPageId,
                 characterId: casterCharacterId,
                 characterName: character ? String(character.get('name') || '') : '',
-                attackName: String(result.attackName || (isHealing ? 'Healing' : 'Attack'))
+                attackName: String(result.attackName || (isHealing ? 'Healing' : 'Attack')),
+                uses: useCount,
+                areaTargetIds: areaTargets.map((target) => R20.getTokenId(target)).filter(Boolean)
             });
-            const command = '!combatAssistant use ' + actionId + ' &#64;{target|token_id}';
-            const button = isHealing
-                ? Render.iconButtonHtml({ iconHtml: result.isTempHealing ? '&#128151;' : '&#128154;', label: result.isTempHealing ? 'Temp' : 'Heal', command, backgroundColor: 'rgba(20,115,55,0.95)', tooltip: 'Choose a target token and apply this healing once' })
-                : Render.iconButtonHtml({ iconHtml: '&#9876;&#65039;', label: result.isSaveAttack || saveAbility ? (CombatService.abilityNameToShortLabel(saveAbility) || 'SAVE') : 'ATK', command, backgroundColor: 'rgba(120,40,40,0.95)', tooltip: 'Choose a target token and apply this attack once' });
-            const body = Render.iconButtonTableHtml([button], {
-                columns: 1,
-                footer: 'Single Use Button Press the button, then choose a target when Roll20 asks.'
-            });
+            const request = State.getPlayerActionRequest(actionId);
+            let useAreaMarker = false;
+            let markerError = '';
+            if (useAreaMarkerRequested && request) {
+                const markerResult = R20.createPlayerAreaMarkers(request, token, result.playerId || '');
+                if (markerResult.ok && markerResult.alternatives.length) {
+                    request.areaMarkerAlternatives = markerResult.alternatives;
+                    request.markerTokenIds = markerResult.markerIds.slice();
+                    const firstAlternative = markerResult.alternatives[0];
+                    request.markerTokenId = firstAlternative.markerTokenId;
+                    request.markerName = firstAlternative.markerName;
+                    request.areaMarkerGroup = firstAlternative.markerGroup || null;
+                    useAreaMarker = true;
+                    if (markerResult.message) markerError = markerResult.message;
+                } else {
+                    markerError = markerResult.message || 'Area marker could not be created.';
+                    Logger.debug('[player-area-marker]', markerError);
+                    areaTargets = [];
+                    useCount = 1;
+                    request.uses = useCount;
+                    request.remainingUses = useCount;
+                    request.areaTargetIds = [];
+                }
+            }
+            const command = useAreaMarker
+                ? ('!combatAssistant usearea ' + actionId)
+                : ('!combatAssistant use ' + actionId + ' &#64;{target|token_id}');
+            const buttons = useAreaMarker
+                ? Render.areaRollControlButtons({ actionId, casterTokenId, isConcentration: payloadObject.isConcentration && RuntimeConfig.get('CONCENTRATION_TRACKING') })
+                : [isHealing
+                    ? Render.iconButtonHtml({ iconHtml: result.isTempHealing ? '&#128151;' : '&#128154;', label: result.isTempHealing ? 'Temp' : 'Heal', command, backgroundColor: 'rgba(20,115,55,0.95)', tooltip: 'Choose a target token and apply this healing once' })
+                    : Render.iconButtonHtml({ iconHtml: '&#9876;&#65039;', label: result.isSaveAttack || saveAbility ? (CombatService.abilityNameToShortLabel(saveAbility) || 'SAVE') : 'ATK', command, backgroundColor: 'rgba(120,40,40,0.95)', tooltip: 'Choose a target token and apply this attack once' })];
+            const body = Render.iconButtonTableHtml(buttons, {
+                columns: buttons.length,
+                footerHtml: useAreaMarker
+                    ? Render.playerAreaMarkerFooterHtml(areaInfo, payloadObject)
+                    : Render.playerSingleTargetFooterHtml(payloadObject),
+                footer: ''
+            }) + (markerError ? '<div style="padding-top:4px;color:rgb(235,160,90);font-size:10px;text-align:center;">' + Utils.escapeHtml(markerError) + '</div>' : '');
             const titleResult = Object.assign({}, result, {
                 damageType: isHealing ? (result.isTempHealing ? 'temp healing' : 'healing') : result.damageType,
                 damageTotal: isHealing ? (result.healTotal || result.damageTotal || 0) : result.damageTotal
@@ -3089,30 +6250,51 @@ const CombatAssistant = (() => {
         },
 
         attackPromptVariant(result) {
-            return Object.assign({}, result || {}, {
+            const source = result || {};
+            const rolls = source.hasSecondarySaveDamageSplit && Array.isArray(source.attackDamageRolls) && source.attackDamageRolls.length
+                ? source.attackDamageRolls
+                : (Array.isArray(source.damageRolls) ? source.damageRolls : []);
+            const total = rolls.reduce((sum, entry) => sum + Math.max(0, Utils.toInt(entry && entry.total, 0)), 0);
+            return Object.assign({}, source, {
                 isSaveAttack: false,
                 saveDc: 0,
                 saveAbility: '',
                 halfOnSuccess: false,
-                halfOnSuccessKnown: false
+                halfOnSuccessKnown: false,
+                damageRolls: rolls,
+                damageTotal: total,
+                damageType: rolls.length ? rolls[0].damageType : source.damageType,
+                damageFormula: rolls.map((entry) => entry.formula || 'Roll20').join(' + ') || source.damageFormula || 'Roll20',
+                areaInfo: { isArea: false }
             });
         },
 
         savePromptVariant(result) {
-            return Object.assign({}, result || {}, {
+            const source = result || {};
+            const rolls = source.hasSecondarySaveDamageSplit && Array.isArray(source.saveDamageRolls) && source.saveDamageRolls.length
+                ? source.saveDamageRolls
+                : (Array.isArray(source.damageRolls) ? source.damageRolls : []);
+            const total = rolls.reduce((sum, entry) => sum + Math.max(0, Utils.toInt(entry && entry.total, 0)), 0);
+            return Object.assign({}, source, {
                 isSaveAttack: true,
                 saveAbility: CombatService.normalizeAbilityName(result && result.saveAbility || ''),
-                saveDc: Math.max(0, Utils.toInt(result && result.saveDc, 0))
+                saveDc: Math.max(0, Utils.toInt(result && result.saveDc, 0)),
+                damageRolls: rolls,
+                damageTotal: total,
+                damageType: rolls.length ? rolls[0].damageType : source.damageType,
+                damageFormula: rolls.map((entry) => entry.formula || 'Roll20').join(' + ') || source.damageFormula || 'Roll20',
+                attackTotal: 0,
+                hasAttackRoll: false
             });
         },
 
         sendAttackDamagePrompts(result) {
             if (this.shouldOfferAttackAndSavePrompts(result)) {
-                R20.whisper('GM', Render.showAttackDamagePrompt(this.attackPromptVariant(result)));
-                R20.whisper('GM', Render.showAttackDamagePrompt(this.savePromptVariant(result)));
+                R20.whisper('GM', Render.showAttackDamagePrompt(this.withNpcSetInfo(this.attackPromptVariant(result))));
+                R20.whisper('GM', Render.showAttackDamagePrompt(this.withNpcSetInfo(this.savePromptVariant(result))));
                 return;
             }
-            R20.whisper('GM', Render.showAttackDamagePrompt(result));
+            R20.whisper('GM', Render.showAttackDamagePrompt(this.withNpcSetInfo(result)));
             this.sendPlayerPrompt(result);
         },
 
@@ -3121,7 +6303,7 @@ const CombatAssistant = (() => {
             const parsed = this.parseMessage(msg);
             if (parsed) parsed.playerId = String(msg && msg.playerid || '').trim();
             if (await this.handlePendingNativeInitiativeCapture(parsed, msg)) return;
-            if (await this.handlePendingNativeSaveCapture(parsed, msg)) return;
+            if (await this.handlePendingNativeSaveCapture(msg)) return;
             if (!parsed) return;
             Logger.debug('[Roll capture]', JSON.stringify({ name: parsed.attackName, char: parsed.characterName, attack: parsed.isAttack, damage: parsed.isDamage, healing: parsed.isHealing, total: parsed.attackTotal, damage: parsed.damageTotal }));
 
@@ -3137,14 +6319,14 @@ const CombatAssistant = (() => {
                 return;
             }
 
-            if (parsed.isAttack && !parsed.isDamage) {
+            if (parsed.isAttack && !parsed.isDamage && (parsed.hasAttackRoll || parsed.hasSpellContext)) {
                 this.rememberAttack(parsed);
                 return;
             }
 
             if (parsed.isAttack && parsed.isDamage) {
                 this.sendAttackDamagePrompts(parsed);
-                this.rememberAttack(parsed);
+                if (parsed.hasAttackRoll) this.rememberAttack(parsed);
                 return;
             }
 
@@ -3153,7 +6335,9 @@ const CombatAssistant = (() => {
                     parsed.hasExplicitCharacterName ? parsed.characterName : '',
                     parsed.hasExplicitAttackName ? parsed.attackName : ''
                 );
-                if (!prior && !parsed.isSaveAttack) return;
+                if (!prior && !parsed.isSaveAttack && !(parsed.areaInfo && parsed.areaInfo.isArea)) return;
+                const priorHasAttackRoll = !!(prior && prior.hasAttackRoll);
+                const clearSaveFromPriorAttack = priorHasAttackRoll && !parsed.hasSecondarySaveDamageSplit;
                 const result = Object.assign({}, parsed, {
                     tokenName: (prior && prior.tokenName) || parsed.tokenName,
                     tokenImgsrc: (prior && prior.tokenImgsrc) || parsed.tokenImgsrc,
@@ -3161,11 +6345,19 @@ const CombatAssistant = (() => {
                     attackTotal: Math.max(0, Utils.toInt(prior && prior.attackTotal, parsed.attackTotal || 0)),
                     hasAttackRoll: !!((prior && prior.hasAttackRoll) || parsed.hasAttackRoll),
                     rollMode: (prior && prior.rollMode) || parsed.rollMode,
-                    saveDc: Math.max(0, Utils.toInt(parsed.saveDc || (prior && prior.saveDc), 0)),
-                    saveAbility: parsed.saveAbility || (prior && prior.saveAbility) || '',
-                    isSaveAttack: !!(parsed.saveDc || (prior && prior.saveDc)),
-                    halfOnSuccess: !!(parsed.halfOnSuccess || (prior && prior.halfOnSuccess)),
-                    halfOnSuccessKnown: !!(parsed.halfOnSuccessKnown || (prior && prior.halfOnSuccessKnown))
+                    saveDc: clearSaveFromPriorAttack ? 0 : Math.max(0, Utils.toInt(parsed.saveDc || (prior && prior.saveDc), 0)),
+                    saveAbility: clearSaveFromPriorAttack ? '' : (parsed.saveAbility || (prior && prior.saveAbility) || ''),
+                    isSaveAttack: clearSaveFromPriorAttack ? false : !!(parsed.saveDc || (prior && prior.saveDc)),
+                    halfOnSuccess: clearSaveFromPriorAttack ? false : !!(parsed.halfOnSuccess || (prior && prior.halfOnSuccess)),
+                    halfOnSuccessKnown: clearSaveFromPriorAttack ? false : !!(parsed.halfOnSuccessKnown || (prior && prior.halfOnSuccessKnown)),
+                    rangeText: parsed.rangeText || (prior && prior.rangeText) || '',
+                    isSpellAction: !!(parsed.isSpellAction || (prior && prior.isSpellAction)),
+                    isConcentration: !!(parsed.isConcentration || (prior && prior.isConcentration)),
+                    lightInfo: (parsed.lightInfo && parsed.lightInfo.hasLight ? parsed.lightInfo : null) || (prior && prior.lightInfo) || { hasLight: false },
+                    areaInfo: clearSaveFromPriorAttack ? { isArea: false } : ((parsed.areaInfo && parsed.areaInfo.isArea ? parsed.areaInfo : null) || (prior && prior.areaInfo) || { isArea: false }),
+                    hasSecondarySaveDamageSplit: !!parsed.hasSecondarySaveDamageSplit,
+                    attackDamageRolls: parsed.attackDamageRolls,
+                    saveDamageRolls: parsed.saveDamageRolls
                 });
                 this.sendAttackDamagePrompts(result);
                 if (prior) this.clearRecentAttack(prior);
@@ -3199,8 +6391,141 @@ const CombatAssistant = (() => {
             return ABILITIES[ability] || '';
         },
 
+        parseActionRangeFeet(value) {
+            const text = Utils.stripHtml(String(value || '')).replace(/\s+/g, ' ').trim().toLowerCase();
+            if (!text) return { ok: false, limited: false, rangeFeet: null, text: '' };
+            if (/\btouch\b/.test(text)) return { ok: true, limited: true, rangeFeet: 5, text };
+            if (/^self\b/.test(text)) return { ok: true, limited: false, rangeFeet: null, text };
+            const slash = text.match(/\b(\d+(?:\.\d+)?)\s*\/\s*(\d+(?:\.\d+)?)\b/);
+            if (slash) {
+                return { ok: true, limited: true, rangeFeet: Math.max(Utils.toNumber(slash[1], 0), Utils.toNumber(slash[2], 0)), text };
+            }
+            const matches = [];
+            const rangePattern = /(\d+(?:\.\d+)?)\s*(?:ft\.?|feet|foot)\b/ig;
+            let match = null;
+            while ((match = rangePattern.exec(text)) !== null) {
+                matches.push(Math.max(0, Utils.toNumber(match[1], 0)));
+            }
+            if (!matches.length) return { ok: false, limited: false, rangeFeet: null, text };
+            return { ok: true, limited: true, rangeFeet: Math.max.apply(null, matches), text };
+        },
+
+        getActionRangeInfo(payload) {
+            const data = payload || {};
+            const range = this.parseActionRangeFeet(data.rangeText || data.range || '');
+            if (range.ok && range.limited) return range;
+            if (range.ok && /^self\b/i.test(String(range.text || ''))) return range;
+            if (String(data.type || '').toLowerCase() === 'damage') {
+                return { ok: true, limited: true, rangeFeet: 10, text: 'default attack range' };
+            }
+            return range;
+        },
+
+        getAreaMarkerRangeInfo(payload) {
+            const data = payload || {};
+            const range = this.parseActionRangeFeet(data.rangeText || data.range || '');
+            if (range.ok && /^self\b/i.test(String(range.text || ''))) {
+                const areaInfo = data.areaInfo && data.areaInfo.isArea ? data.areaInfo : null;
+                const directional = !!(areaInfo && (R20.isConeAreaShape(areaInfo.shape) || R20.isLineAreaShape(areaInfo.shape)));
+                return { ok: true, limited: true, rangeFeet: directional ? 5 : 2.5, text: range.text || 'self' };
+            }
+            return this.getActionRangeInfo(data);
+        },
+
+        getRangeTextForFooter(payload) {
+            if (!RuntimeConfig.get('PLAYER_ACTION_RANGE_CHECK')) return '';
+            const range = this.getActionRangeInfo(payload || {});
+            return range.ok && range.limited ? (String(range.rangeFeet) + ' ft') : '';
+        },
+
+        validatePlayerActionRange(request, targetToken) {
+            if (!RuntimeConfig.get('PLAYER_ACTION_RANGE_CHECK')) return { ok: true, skipped: true };
+            const payload = request && request.payload ? request.payload : {};
+            if (payload.ignoreRangeCheck || payload.npcSet || request && request.npcSet) return { ok: true, skipped: true };
+            if (String(payload.type || '').toLowerCase() !== 'damage' && !payload.isSpellAction) return { ok: true, skipped: true };
+            const areaInfo = payload.areaInfo && payload.areaInfo.isArea ? payload.areaInfo : null;
+            const useAreaMarker = !!(request && request.markerTokenId);
+            const range = areaInfo && useAreaMarker
+                ? { ok: true, limited: true, rangeFeet: Math.max(0, Utils.toNumber(areaInfo.sizeFeet, 0)), text: areaInfo.label || 'Area' }
+                : this.getActionRangeInfo(payload);
+            if (!range.ok || !range.limited) return { ok: true, skipped: true };
+            const sourceToken = CommandHandlers.resolvePlayerActionSourceOnTargetPage(request, targetToken);
+            if (!sourceToken) {
+                return { ok: false, message: 'Caster token was not found on the target page.' };
+            }
+            const measured = R20.measureTokenCenterToTargetEdgeFeet(sourceToken, targetToken);
+            if (!measured.ok) return measured;
+            const effectiveRangeFeet = Math.max(0, Utils.toNumber(range.rangeFeet, 0) - 0.1);
+            if (measured.feet > effectiveRangeFeet) {
+                const targetName = this.getTokenName(targetToken);
+                return {
+                    ok: false,
+                    message: targetName + ' is out of range for this action. Range: ' + range.rangeFeet + ' ft, distance: ' + Math.ceil(measured.feet) + ' ft.'
+                };
+            }
+            return { ok: true, rangeFeet: range.rangeFeet, distanceFeet: measured.feet };
+        },
+
+        validatePlayerAreaMarkerRange(request, markerToken) {
+            if (!RuntimeConfig.get('PLAYER_ACTION_RANGE_CHECK')) return { ok: true, skipped: true };
+            const payload = request && request.payload ? request.payload : {};
+            if (payload.ignoreRangeCheck || payload.npcSet || request && request.npcSet) return { ok: true, skipped: true };
+            const range = this.getAreaMarkerRangeInfo(payload);
+            if (!range.ok || !range.limited) return { ok: true, skipped: true };
+            const sourceToken = CommandHandlers.resolvePlayerActionSourceOnTargetPage(request, markerToken);
+            if (!sourceToken) return { ok: false, message: 'Caster token was not found on the area marker page.' };
+            const areaInfo = payload.areaInfo && payload.areaInfo.isArea ? payload.areaInfo : null;
+            let measured = null;
+            if (areaInfo && R20.isLineAreaShape(areaInfo.shape)) {
+                const sourcePageId = R20.getTokenPageId(sourceToken);
+                const markerPageId = R20.getTokenPageId(markerToken);
+                const sourceRect = R20.getTokenRect(sourceToken);
+                const endpoints = R20.getLineMarkerStartEnd(markerToken, sourceToken);
+                if (!sourcePageId || !markerPageId || sourcePageId !== markerPageId) {
+                    return { ok: false, message: 'Caster and line marker must be on the same page.' };
+                }
+                if (!sourceRect || !endpoints) return { ok: false, message: 'Line marker geometry could not be read.' };
+                const dx = endpoints.start.x - sourceRect.left;
+                const dy = endpoints.start.y - sourceRect.top;
+                const pixels = Math.sqrt((dx * dx) + (dy * dy));
+                measured = { ok: true, feet: R20.pixelsToPageFeet(sourcePageId, pixels), pixels, sourcePageId };
+            } else if (areaInfo && R20.isConeAreaShape(areaInfo.shape) && request && request.areaMarkerGroup) {
+                const sourcePageId = R20.getTokenPageId(sourceToken);
+                const markerPageId = R20.getTokenPageId(markerToken);
+                const sourceRect = R20.getTokenRect(sourceToken);
+                if (!sourcePageId || !markerPageId || sourcePageId !== markerPageId) {
+                    return { ok: false, message: 'Caster and area marker must be on the same page.' };
+                }
+                if (!sourceRect) return { ok: false, message: 'Caster token geometry could not be read.' };
+                const pieces = Array.isArray(request.areaMarkerGroup.pieces) ? request.areaMarkerGroup.pieces : [];
+                const firstPiece = pieces.slice().sort((a, b) => Utils.toInt(a && a.index, 0) - Utils.toInt(b && b.index, 0))[0];
+                const firstMarker = firstPiece && firstPiece.id ? R20.getTokenById(firstPiece.id) : markerToken;
+                const firstRect = R20.getTokenRect(firstMarker);
+                if (!firstRect) return { ok: false, message: 'Cone marker geometry could not be read.' };
+                const dx = firstRect.left - sourceRect.left;
+                const dy = firstRect.top - sourceRect.top;
+                const pixels = Math.sqrt((dx * dx) + (dy * dy));
+                measured = { ok: true, feet: R20.pixelsToPageFeet(sourcePageId, pixels), pixels, sourcePageId };
+            } else {
+                measured = R20.measureTokenCenterDistanceFeet(sourceToken, markerToken);
+            }
+            if (!measured.ok) return measured;
+            const isDirectionalSelfRange = !!(areaInfo &&
+                (R20.isConeAreaShape(areaInfo.shape) || R20.isLineAreaShape(areaInfo.shape)) &&
+                /^self\b/i.test(String(range.text || '')));
+            const allowedRangeFeet = isDirectionalSelfRange ? 5 : Utils.toNumber(range.rangeFeet, 0);
+            const effectiveRangeFeet = Math.max(0, isDirectionalSelfRange ? (allowedRangeFeet + 0.1) : (allowedRangeFeet - 0.1));
+            if (measured.feet > effectiveRangeFeet) {
+                return {
+                    ok: false,
+                    message: 'The area marker is out of range. Range: ' + String(allowedRangeFeet) + ' ft, distance: ' + String(Math.ceil(measured.feet)) + ' ft.'
+                };
+            }
+            return { ok: true, rangeFeet: allowedRangeFeet, distanceFeet: measured.feet };
+        },
+
         getBarNumber(key) {
-            return Utils.clamp(Utils.toInt(RuntimeConfig.get(key), key === 'TEMP_HP_BAR' ? 0 : 1), key === 'TEMP_HP_BAR' ? 0 : 1, 3);
+            return Utils.clamp(Utils.toInt(RuntimeConfig.get(key), key === 'TEMP_HP_BAR' ? 0 : 1), key === 'TEMP_HP_BAR' ? 0 : 1, 4);
         },
 
         getTokenName(token) {
@@ -3210,7 +6535,7 @@ const CombatAssistant = (() => {
 
         getBar(token, barNumber) {
             const bar = Utils.toInt(barNumber, 0);
-            if (!token || bar < 1 || bar > 3) return { ok: false, message: 'Invalid token bar.' };
+            if (!token || bar < 1 || bar > 4) return { ok: false, message: 'Invalid token bar. Use bar 1, 2, 3, or 4.' };
             const prefix = 'bar' + String(bar) + '_';
             const valueRaw = token.get(prefix + 'value');
             const maxRaw = token.get(prefix + 'max');
@@ -3233,7 +6558,7 @@ const CombatAssistant = (() => {
 
         getBarNumberForAttribute(token, attrName, configKey) {
             const wanted = String(attrName || '').trim().toLowerCase();
-            for (let i = 1; i <= 3; i += 1) {
+            for (let i = 1; i <= 4; i += 1) {
                 if (this.linkedBarMatches(token, i, wanted)) return i;
             }
             return this.getBarNumber(configKey);
@@ -3268,7 +6593,7 @@ const CombatAssistant = (() => {
 
         setBarValue(token, barNumber, value) {
             const bar = Utils.toInt(barNumber, 0);
-            if (!token || bar < 1 || bar > 3) return false;
+            if (!token || bar < 1 || bar > 4) return false;
             const props = {};
             props['bar' + String(bar) + '_value'] = value;
             token.set(props);
@@ -3280,55 +6605,27 @@ const CombatAssistant = (() => {
             return this.linkedBarMatches(token, barNumber, safeAttr);
         },
 
-        setAttributeObjectCurrent(attr, value) {
-            if (!attr || !Utils.isFunction(attr.get)) return { ok: false, message: 'Attribute was not found.' };
-            const safeValue = String(Math.max(0, Utils.toInt(value, 0)));
-            try {
-                if (Utils.isFunction(attr.setWithWorker)) {
-                    attr.setWithWorker({ current: safeValue });
-                    return { ok: true, source: 'attribute.setWithWorker' };
-                }
-                if (Utils.isFunction(attr.set)) {
-                    attr.set({ current: safeValue });
-                    return { ok: true, source: 'attribute.set' };
-                }
-            } catch (error) {
-                return { ok: false, message: error && error.message ? error.message : String(error) };
-            }
-            return { ok: false, message: 'Attribute is not writable.' };
-        },
-
-        async setCharacterSheetAttributeValue(characterId, attrName, value, options) {
+        async setCharacterSheetAttributeValue(characterId, attrName, value) {
             const safeCharacterId = String(characterId || '').trim();
             const safeAttrName = String(attrName || '').trim();
             const safeValue = String(Math.max(0, Utils.toInt(value, 0)));
             if (!safeCharacterId || !safeAttrName) return { ok: false, message: 'Character or attribute was not found.' };
-            const opts = options || {};
-            const linkedAttr = opts.token ? this.findLinkedOrNamedAttribute(opts.token, opts.barNumber, safeAttrName) : this.findCharacterAttribute(safeCharacterId, safeAttrName);
-            if (linkedAttr) {
-                const attrWrite = this.setAttributeObjectCurrent(linkedAttr, safeValue);
-                if (attrWrite.ok) {
-                    Logger.debug('[sheet-attr:set:ok]', 'characterId=' + safeCharacterId, 'attr=' + safeAttrName, 'value=' + safeValue, 'source=' + attrWrite.source);
-                    return attrWrite;
-                }
-                Logger.debug('[sheet-attr:set:attribute-failed]', safeAttrName, attrWrite.message || 'failed');
+            if (typeof setSheetItem !== 'function') {
+                return { ok: false, message: 'Beacon setSheetItem() is not available. The character sheet was not modified.' };
             }
-            let beaconError = '';
-            Logger.debug('[sheet-attr:set:start]', 'characterId=' + safeCharacterId, 'attr=' + safeAttrName, 'value=' + safeValue, 'setSheetItem=' + String(typeof setSheetItem));
-            if (typeof setSheetItem === 'function') {
-                try {
-                    await setSheetItem(safeCharacterId, safeAttrName, safeValue);
-                    Logger.debug('[sheet-attr:set:ok]', 'characterId=' + safeCharacterId, 'attr=' + safeAttrName, 'value=' + safeValue);
-                    return { ok: true, source: 'setSheetItem' };
-                } catch (error) {
-                    beaconError = error && error.message ? error.message : String(error);
-                    Logger.debug('[setSheetItem:' + safeAttrName + ']', beaconError);
-                }
+            Logger.debug('[sheet-attr:set:start]', 'characterId=' + safeCharacterId, 'attr=' + safeAttrName, 'value=' + safeValue, 'source=setSheetItem');
+            try {
+                await setSheetItem(safeCharacterId, safeAttrName, safeValue);
+                Logger.debug('[sheet-attr:set:ok]', 'characterId=' + safeCharacterId, 'attr=' + safeAttrName, 'value=' + safeValue, 'source=setSheetItem');
+                return { ok: true, source: 'setSheetItem' };
+            } catch (error) {
+                const beaconError = error && error.message ? error.message : String(error);
+                Logger.debug('[setSheetItem:' + safeAttrName + ']', beaconError);
+                return {
+                    ok: false,
+                    message: 'Could not set sheet attribute ' + safeAttrName + ' with Beacon: ' + beaconError
+                };
             }
-            return {
-                ok: false,
-                message: 'Could not set sheet attribute ' + safeAttrName + ' with Beacon' + (beaconError ? (': ' + beaconError) : '.')
-            };
         },
 
         async setBarOrLinkedAttributeValue(token, barNumber, attrName, value, options) {
@@ -3339,10 +6636,21 @@ const CombatAssistant = (() => {
             if (this.shouldWriteSheetAttributeForBar(token, barNumber, attrName)) {
                 const character = R20.getCharacterFromToken(token);
                 const characterId = character ? String(character.id || token.get('represents') || '').trim() : '';
-                const sheetWrite = await this.setCharacterSheetAttributeValue(characterId, attrName, safeValue, { token, barNumber });
+                const sheetWrite = await this.setCharacterSheetAttributeValue(characterId, attrName, safeValue);
                 if (sheetWrite.ok) {
-                    this.setBarValue(token, barNumber, safeValue);
-                    return { ok: true, linked: true, source: sheetWrite.source };
+                    const linkedAttr = this.findLinkedOrNamedAttribute(token, barNumber, attrName);
+                    const linkedValueRaw = linkedAttr && Utils.isFunction(linkedAttr.get) ? linkedAttr.get('current') : '';
+                    const linkedValue = linkedValueRaw !== undefined && linkedValueRaw !== null && String(linkedValueRaw).trim() !== ''
+                        ? Math.max(0, Utils.toInt(linkedValueRaw, safeValue))
+                        : safeValue;
+                    this.setBarValue(token, barNumber, linkedValue);
+                    return {
+                        ok: true,
+                        linked: true,
+                        source: sheetWrite.source,
+                        tokenSynced: true,
+                        tokenValue: linkedValue
+                    };
                 }
                 if (opts.fallbackToBarIfLinkedAttrMissing) {
                     this.setBarValue(token, barNumber, safeValue);
@@ -3429,6 +6737,215 @@ const CombatAssistant = (() => {
             return true;
         },
 
+        tokenHasStatusMarker(token, marker) {
+            if (!token || !Utils.isFunction(token.get)) return false;
+            const safeMarker = String(marker || '').trim();
+            if (!safeMarker) return false;
+            return String(token.get('statusmarkers') || '')
+                .split(',')
+                .map((entry) => String(entry || '').trim().split('@')[0])
+                .indexOf(safeMarker) >= 0;
+        },
+
+        stripConcentrationTooltip(text) {
+            return String(text || '').replace(/\n?\s*CA Concentration:[\s\S]*$/i, '').trim();
+        },
+
+        startConcentrationForRequest(request, casterToken) {
+            if (!RuntimeConfig.get('CONCENTRATION_TRACKING')) return false;
+            if (!request || !request.payload || !request.payload.isConcentration || !casterToken || !Utils.isFunction(casterToken.get) || !Utils.isFunction(casterToken.set)) return false;
+            const casterTokenId = R20.getTokenId(casterToken);
+            if (!casterTokenId) return false;
+            const actionId = String(request.id || '').trim();
+            const spellName = String(request.attackName || request.payload.sourceAction || 'Concentration').trim();
+            const previous = State.removeConcentrationByTokenId(casterTokenId);
+            if (previous && previous.actionId && previous.actionId !== actionId) {
+                const previousRequest = State.getPlayerActionRequest(previous.actionId);
+                if (previousRequest) {
+                    previousRequest.concentrationAreaActive = false;
+                    State.removePlayerActionMarkers(previousRequest);
+                }
+            }
+            const priorTooltip = String(casterToken.get('tooltip') || '');
+            const priorShowTooltip = Utils.toBoolean(casterToken.get('show_tooltip'), false);
+            const baseTooltip = this.stripConcentrationTooltip(priorTooltip);
+            const concentrationTooltip = 'CA Concentration: ' + spellName + '\nToken: ' + casterTokenId + '\nAction: ' + actionId;
+            try {
+                casterToken.set({
+                    show_tooltip: true,
+                    gm_only_tooltip: false,
+                    tooltip: (baseTooltip ? (baseTooltip + '\n') : '') + concentrationTooltip
+                });
+            } catch (ignored) {}
+            this.setTokenStatusMarker(casterToken, 'stopwatch', true);
+            request.payload.casterTokenId = casterTokenId;
+            request.concentrationAreaActive = true;
+            request.concentrationCasterTokenId = casterTokenId;
+            State.setConcentration({
+                actionId,
+                casterTokenId,
+                spellName,
+                priorTooltip,
+                priorShowTooltip,
+                markerTokenIds: State.getPlayerActionMarkerIds(request)
+            });
+            return true;
+        },
+
+        endConcentrationByTokenId(tokenId, reason, options) {
+            const opts = options || {};
+            const entry = State.removeConcentrationByTokenId(tokenId);
+            if (!entry) return false;
+            const token = R20.getTokenById(entry.casterTokenId);
+            if (token && Utils.isFunction(token.set)) {
+                try {
+                    token.set({
+                        show_tooltip: !!entry.priorShowTooltip,
+                        tooltip: String(entry.priorTooltip || '')
+                    });
+                } catch (ignored) {}
+                this.setTokenStatusMarker(token, 'stopwatch', false);
+            }
+            const request = State.getPlayerActionRequest(entry.actionId);
+            if (request) {
+                request.concentrationAreaActive = false;
+                State.removePlayerActionMarkers(request);
+                const root = State.get();
+                if (root.playerActionRequests) delete root.playerActionRequests[String(entry.actionId || '').trim()];
+            }
+            if (!opts.silent) {
+                Render.sendWhisperMessage('GM', 'Concentration Ended', '<strong>' + Utils.escapeHtml(entry.spellName || 'Concentration') + '</strong>' + (reason ? (': ' + Utils.escapeHtml(reason)) : ''), 'normal');
+            }
+            return true;
+        },
+
+        concentrationDamageDc(damageAmount) {
+            return Math.max(10, Math.floor(Math.max(0, Utils.toNumber(damageAmount, 0)) / 2));
+        },
+
+        concentrationDamageTypeFromResult(result) {
+            const parts = Array.isArray(result && result.parts) ? result.parts : [];
+            const damagingPart = parts.find((part) => Math.max(0, Utils.toInt(part && part.finalDamage, 0)) > 0);
+            return this.normalizeDamageType(damagingPart && damagingPart.damageType || (parts[0] && parts[0].damageType) || 'normal');
+        },
+
+        resolveConcentrationSave(token, roll, pending) {
+            const tokenId = R20.getTokenId(token);
+            const entry = State.getConcentrationByTokenId(tokenId);
+            const safePending = pending || {};
+            const payload = safePending.payload || {};
+            if (!entry) {
+                Render.sendWhisperMessage('GM', 'Concentration Check', Utils.escapeHtml(this.getTokenName(token) || 'Token') + ' is no longer concentrating.', 'warning');
+                return { ok: false, success: false };
+            }
+            const dc = Math.max(10, Utils.toInt(safePending.concentrationDc || payload.challenge || payload.concentrationDc, 10));
+            const total = Utils.toNumber(roll && roll.total, 0);
+            const tokenName = this.getTokenName(token);
+            const spellName = (entry && entry.spellName) || safePending.concentrationSpellName || payload.concentrationSpellName || 'Concentration';
+            const success = total >= dc;
+            if (success) {
+                const totalHtml = Html.span(Utils.escapeHtml(String(total)), 'color:rgb(52,203,116);font-weight:900;');
+                const tokenHtml = Html.span(Utils.escapeHtml(tokenName || 'Token'), 'color:' + CONFIG.DEFAULT_TEXT_CHARACTER_COLOR + ';font-weight:900;');
+                const spellHtml = Html.span(Utils.escapeHtml(spellName), 'color:rgb(245,220,80);font-weight:900;');
+                const body = tokenHtml + ' maintains ' + spellHtml + ' concentration with a CON save of ' + totalHtml + ' vs DC ' + Utils.escapeHtml(String(dc)) + '.';
+                Render.sendPublicMessage('Concentration Check', body, 'success');
+            } else {
+                Render.sendConcentrationLost({
+                    casterName: tokenName,
+                    casterImgsrc: token && Utils.isFunction(token.get) ? String(token.get('imgsrc') || '') : '',
+                    spellName,
+                    dc,
+                    roll
+                });
+                this.endConcentrationByTokenId(tokenId, 'failed concentration save DC ' + dc, { silent: true });
+            }
+            return { ok: true, success, dc, total };
+        },
+
+        queueConcentrationSaveForDamage(token, result) {
+            if (!RuntimeConfig.get('CONCENTRATION_TRACKING')) return false;
+            const tokenId = R20.getTokenId(token);
+            const entry = State.getConcentrationByTokenId(tokenId);
+            const damageTaken = Math.max(0, Utils.toInt(result && result.totalDamage, 0));
+            if (!entry || damageTaken <= 0) return false;
+            if (!this.tokenHasStatusMarker(token, 'stopwatch')) return false;
+            const dc = this.concentrationDamageDc(damageTaken);
+            const damageType = this.concentrationDamageTypeFromResult(result);
+            const payload = {
+                type: 'concentration',
+                mode: 'save',
+                challenge: dc,
+                saveAbility: 'constitution',
+                halfOnSuccess: false,
+                damageTotal: damageTaken,
+                damageType,
+                damageRolls: [{ total: damageTaken, damageType, formula: 'Concentration' }],
+                sourceName: result && result.sourceName || '',
+                sourceAction: 'Concentration Check',
+                concentrationCheck: true,
+                concentrationDc: dc,
+                concentrationTokenId: tokenId,
+                concentrationActionId: entry.actionId,
+                concentrationSpellName: entry.spellName || 'Concentration'
+            };
+            const queued = this.startNativeSavingDamageRoll(token, payload, 'GM', { deferPlayerPrompt: true });
+            if (!queued.ok) {
+                const roll = this.rollSavingThrowForToken(token, 'constitution', 'normal');
+                if (!roll.ok) {
+                    Render.sendWhisperMessage('GM', 'Concentration Check', queued.message || roll.message || 'Concentration saving throw could not be rolled.', 'warning');
+                    return false;
+                }
+                R20.direct(Render.showSavingThrowResults([roll], 'CON'));
+                this.resolveConcentrationSave(token, roll, { payload, concentrationDc: dc, concentrationSpellName: entry.spellName });
+                return true;
+            }
+            if (queued.playerPrompt) {
+                const recipients = Array.isArray(queued.recipients) && queued.recipients.length ? queued.recipients : ['GM'];
+                recipients.forEach((recipient) => R20.whisper(recipient, queued.card || Render.showNativeSaveRollRequest({
+                    tokenName: queued.tokenName || this.getTokenName(token),
+                    saveAbility: 'constitution',
+                    challenge: dc,
+                    damage: damageTaken,
+                    damageType,
+                    command: queued.command || '',
+                    concentrationSpellName: entry.spellName || 'Concentration'
+                })));
+                return true;
+            }
+            if (queued.sheetVersion === '2014') {
+                if (RuntimeConfig.get('SHEET_2014_CA_ROLLS')) {
+                    R20.whisper('GM', Render.showNativeBatchRollRequest({
+                        title: '2014 Concentration Check',
+                        intro: 'Roll a <strong>CON</strong> saving throw DC ' + Utils.escapeHtml(String(dc)) + ' to maintain concentration:',
+                        names: [queued.tokenName || this.getTokenName(token)],
+                        label: 'CON',
+                        iconHtml: '&#127922;',
+                        command: '!combatAssistant roll2014save &#63;{Roll Mode|Normal,normal|Advantage,advantage|Disadvantage,disadvantage} ' +
+                            Utils.encodeJsonPayload({ ids: [queued.requestId].filter(Boolean) }),
+                        tooltip: 'Roll the concentration saving throw with Combat Assistant'
+                    }));
+                    return true;
+                }
+                const batch = R20.createNativeRollBatchAbility([queued.batchCommand || queued.nativeCommand || '']);
+                if (batch.ok) {
+                    R20.whisper('GM', Render.showNativeBatchRollRequest({
+                        title: 'Concentration Check',
+                        intro: 'Roll a <strong>CON</strong> saving throw DC ' + Utils.escapeHtml(String(dc)) + ' to maintain concentration:',
+                        names: [queued.tokenName || this.getTokenName(token)],
+                        label: 'CON',
+                        iconHtml: '&#127922;',
+                        command: batch.command,
+                        tooltip: 'Roll the concentration saving throw'
+                    }));
+                    return true;
+                }
+                Render.sendWhisperMessage('GM', 'Concentration Check', batch.message || 'Could not create the 2014 concentration roll button.', 'warning');
+                return false;
+            }
+            R20.sendNativeCommandsSequentially([queued.nativeCommand || queued.batchCommand || ''], 100);
+            return true;
+        },
+
         normalizeTraitList(value, removePattern) {
             const raw = String(value || '').trim().toLowerCase();
             if (!raw || raw === '-' || raw === 'none') return [];
@@ -3480,7 +6997,7 @@ const CombatAssistant = (() => {
                 return;
             }
             if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return;
-            const fields = {};
+            const fields = Object.create(null);
             Object.keys(parsed).forEach((key) => {
                 fields[String(key || '').trim().toLowerCase()] = parsed[key];
             });
@@ -3640,11 +7157,154 @@ const CombatAssistant = (() => {
             return abilityMod + proficiency + globalSaveBonus;
         },
 
+        getAbilityScoreFromStore(characterId, ability) {
+            const safeAbility = this.normalizeAbilityName(ability);
+            if (!safeAbility) return null;
+            const scores = [];
+            this.walkCharacterStoreIntegrants(characterId, (node, inheritedCascades) => {
+                const type = String(node.type || '').trim().toLowerCase();
+                const abilityName = String(node.ability || node.name || '').trim().toLowerCase();
+                const enabled = !Object.prototype.hasOwnProperty.call(node, '_enabled') || Utils.toBoolean(node._enabled, true);
+                if (type !== 'ability score' || inheritedCascades || !enabled || abilityName !== safeAbility) return;
+                const flatValue = this.readFlatValue(node);
+                if (flatValue !== null && flatValue !== undefined) scores.push(flatValue);
+            });
+            const usableScores = scores.filter((score) => score >= 3);
+            if (usableScores.length) return Math.max.apply(null, usableScores);
+            return scores.length ? Math.max.apply(null, scores) : null;
+        },
+
+        getSavingThrowStoreBonus(characterId, ability) {
+            const safeAbility = this.normalizeAbilityName(ability);
+            if (!safeAbility) return 0;
+            const shortAbility = String(this.abilityNameToShortLabel(safeAbility) || '').trim().toLowerCase();
+            let bonus = 0;
+            const seen = Object.create(null);
+            this.walkCharacterStoreIntegrants(characterId, (node, inheritedCascades) => {
+                const type = String(node.type || '').trim().toLowerCase();
+                const enabled = !Object.prototype.hasOwnProperty.call(node, '_enabled') || Utils.toBoolean(node._enabled, true);
+                if (inheritedCascades || !enabled) return;
+                const abilityText = String(node.ability || node.name || node.recordName || node.label || '').trim().toLowerCase();
+                const bonusNames = this.parseStoreList(node.bonusName).map((entry) => String(entry || '').trim().toLowerCase()).filter(Boolean);
+                const categories = this.parseStoreList(node.bonusCategory).map((entry) => entry.toLowerCase());
+                const isSavingThrowNode = type === 'saving throw' || categories.indexOf('saving throws') >= 0 || categories.indexOf('saving throw') >= 0;
+                if (!isSavingThrowNode) return;
+                if (bonusNames.length && bonusNames.indexOf(safeAbility) < 0 && bonusNames.indexOf(shortAbility) < 0) return;
+                if (abilityText && abilityText !== safeAbility && abilityText.indexOf(safeAbility) < 0) return;
+                const key = String(node.shortID || node.id || node.name || JSON.stringify(node)).slice(0, 80);
+                if (seen[key]) return;
+                seen[key] = true;
+                const flatValue = this.readFlatValue(node);
+                if (flatValue) bonus += flatValue;
+                const formula = node.valueFormula && typeof node.valueFormula === 'object' ? node.valueFormula : {};
+                if (formula.proficiency && Utils.toBoolean(formula.proficiency.add, false)) bonus += this.getProficiencyBonus(characterId);
+            });
+            return bonus;
+        },
+
+        readSavingThrowModifier(characterId, ability) {
+            const safeAbility = this.normalizeAbilityName(ability);
+            if (!safeAbility) return 0;
+            const sheetVersion = R20.detectSheetVersion(characterId);
+            if (sheetVersion === '2024') {
+                const score = this.getAbilityScoreFromStore(characterId, safeAbility);
+                const abilityMod = score === null || score === undefined
+                    ? this.readAttributeNumber(characterId, [safeAbility + '_mod', (this.abilityNameToShortLabel(safeAbility) || '').toLowerCase() + '_mod'], 0)
+                    : this.abilityScoreToModifier(score);
+                return abilityMod + this.getSavingThrowStoreBonus(characterId, safeAbility);
+            }
+            return this.read2014SavingThrowModifier(characterId, safeAbility);
+        },
+
+        characterHasMagicResistance(characterId) {
+            const safeCharacterId = String(characterId || '').trim();
+            if (!safeCharacterId) return false;
+            const character = getObj('character', safeCharacterId);
+            const haystack = [];
+            if (character && Utils.isFunction(character.get)) {
+                // Character bio and gmnotes are asynchronous Roll20 properties.
+                // Reading them synchronously causes a sandbox console error, so
+                // magic resistance detection relies on sheet attributes/store data.
+                haystack.push(character.get('name'));
+            }
+            const attrs = findObjs({ _type: 'attribute', _characterid: safeCharacterId }) || [];
+            attrs.forEach((attr) => {
+                if (!attr || !Utils.isFunction(attr.get)) return;
+                const name = String(attr.get('name') || '');
+                const current = attr.get('current');
+                if (/magic[_\s-]*resistance/i.test(name) || /trait/i.test(name) || /npc/i.test(name) || /data-traits/i.test(name)) {
+                    haystack.push(name);
+                    haystack.push(current);
+                }
+            });
+            this.walkCharacterStoreIntegrants(safeCharacterId, (node) => {
+                if (!node || typeof node !== 'object') return;
+                haystack.push(node.name);
+                haystack.push(node.recordName);
+                haystack.push(node.title);
+                haystack.push(node.description);
+                haystack.push(node.label);
+                haystack.push(node.text);
+                haystack.push(node.content);
+            });
+            return haystack.some((entry) => /magic\s+resistance|resistencia\s+m[a\u00e1]gica/i.test(Utils.stripHtml(String(entry || ''))));
+        },
+
+        isMagicalSavePayload(payload) {
+            const data = payload || {};
+            if (Utils.toBoolean(data.isSpellAction, false)) return true;
+            const sourceText = [
+                data.sourceAction,
+                data.attackName,
+                data.actionName,
+                data.description,
+                data.rangeText
+            ].map((entry) => String(entry || '')).join(' ');
+            return /\bspell\b|\bmagic(?:al)?\b/i.test(sourceText);
+        },
+
+        getForcedSaveRollMode(token, payload) {
+            const character = R20.getCharacterFromToken(token);
+            const characterId = character ? String(character.id || (Utils.isFunction(token.get) ? token.get('represents') : '') || '').trim() : '';
+            if (characterId && this.isMagicalSavePayload(payload) && this.characterHasMagicResistance(characterId)) {
+                if (payload && payload.concentrationCheck) return { mode: '', reason: '' };
+                const requestedMode = this.normalizeRollMode(payload && payload.rollMode || 'normal');
+                if (requestedMode === 'disadvantage') return { mode: 'normal', reason: 'Magic Resistance cancels disadvantage' };
+                return { mode: 'advantage', reason: 'Magic Resistance' };
+            }
+            return { mode: '', reason: '' };
+        },
+
+        getMagicResistanceSaveInfo(token, payload) {
+            const character = R20.getCharacterFromToken(token);
+            const characterId = character ? String(character.id || (Utils.isFunction(token.get) ? token.get('represents') : '') || '').trim() : '';
+            if (payload && payload.concentrationCheck) return { applies: false, reason: '' };
+            if (characterId && this.isMagicalSavePayload(payload) && this.characterHasMagicResistance(characterId)) {
+                return { applies: true, reason: 'Magic Resistance' };
+            }
+            return { applies: false, reason: '' };
+        },
+
+        completePersistentAreaMarkerTarget(payload, tokenOrId) {
+            const actionId = String(payload && payload.playerAreaActionId || '').trim();
+            const targetId = typeof tokenOrId === 'string'
+                ? String(tokenOrId || '').trim()
+                : R20.getTokenId(tokenOrId);
+            if (!actionId || !targetId) return false;
+            return State.completePersistentAreaMarkerTarget(actionId, targetId);
+        },
+
         normalizeRollMode(mode) {
             const value = String(mode || '').trim().toLowerCase();
             if (value === 'adv' || value === 'advantage') return 'advantage';
             if (value === 'dis' || value === 'disadvantage') return 'disadvantage';
             return 'normal';
+        },
+
+        normalizeInitiativeRollMode(mode) {
+            const value = String(mode || '').trim().toLowerCase();
+            if (value === 'auto' || value === 'sheet') return 'auto';
+            return this.normalizeRollMode(value);
         },
 
         rollSavingThrowForToken(token, ability, mode) {
@@ -3654,7 +7314,7 @@ const CombatAssistant = (() => {
             const characterId = String(character.id || token.get('represents') || '').trim();
             const safeAbility = this.normalizeAbilityName(ability);
             if (!characterId || !safeAbility) return { ok: false, message: 'Saving throw could not be resolved.' };
-            const modifier = this.read2014SavingThrowModifier(characterId, safeAbility);
+            const modifier = this.readSavingThrowModifier(characterId, safeAbility);
             const rollMode = this.normalizeRollMode(mode);
             const roll1 = this.rollD20();
             const roll2 = rollMode === 'normal' ? null : this.rollD20();
@@ -3799,7 +7459,7 @@ const CombatAssistant = (() => {
         getInitiativeExtraBonus(characterId) {
             let bonus = 0;
             const reasons = [];
-            const seenReasons = {};
+            const seenReasons = Object.create(null);
             this.walkCharacterStoreIntegrants(characterId, (node, inheritedCascades) => {
                 const type = String(node.type || '').trim().toLowerCase();
                 const enabled = !Object.prototype.hasOwnProperty.call(node, '_enabled') || Utils.toBoolean(node._enabled, true);
@@ -3860,9 +7520,79 @@ const CombatAssistant = (() => {
             return { mode: 'normal', reason: '' };
         },
 
+        get2014InitiativeStyleRollInfo(characterId) {
+            const style = String(this.readAttributeRaw(characterId, ['initiative_style'], '') || '').trim();
+            if (!style) return { mode: 'normal', reason: '' };
+            const normalized = style.toLowerCase().replace(/\s+/g, '');
+            if (/\bdisadvantage\b|\blowest\b|kl1|k1l|2d20kl1|\}\}kl1|\}kl1/.test(normalized)) {
+                return { mode: 'disadvantage', reason: 'Sheet initiative disadvantage' };
+            }
+            if (/\badvantage\b|\bhighest\b|kh1|k1h|2d20kh1|\}\}kh1|\}kh1/.test(normalized)) {
+                return { mode: 'advantage', reason: 'Sheet initiative advantage' };
+            }
+            return { mode: 'normal', reason: '' };
+        },
+
         rollD20() {
             if (typeof randomInteger === 'function') return randomInteger(20);
             return Math.floor(Math.random() * 20) + 1;
+        },
+
+        getPrimaryDamageFormula(payload) {
+            const rolls = Array.isArray(payload && payload.damageRolls) ? payload.damageRolls : [];
+            const formulas = rolls
+                .map((roll) => Utils.cleanRoll20Label(roll && roll.formula || ''))
+                .filter((formula) => formula && formula !== 'Roll20' && formula !== 'Manual' && formula !== 'Concentration');
+            const formula = formulas[0] || Utils.cleanRoll20Label(payload && payload.damageFormula || '');
+            if (!formula || formula === 'Roll20' || formula === 'Manual' || formula === 'Concentration') return '';
+            return formula.replace(/\s+/g, '');
+        },
+
+        rollDamageFormula(formula) {
+            const raw = Utils.cleanRoll20Label(formula || '').replace(/\s+/g, '');
+            if (!raw || !/^\d*d\d+(?:[+-]\d*d?\d+)*$/i.test(raw)) {
+                return { ok: false, message: 'Damage formula is not supported for reroll: ' + raw };
+            }
+            const terms = raw.match(/[+-]?[^+-]+/g) || [];
+            const detail = [];
+            const diceValues = [];
+            let modifier = 0;
+            let total = 0;
+            for (let i = 0; i < terms.length; i += 1) {
+                const term = terms[i];
+                const sign = term.charAt(0) === '-' ? -1 : 1;
+                const body = term.replace(/^[+-]/, '');
+                const diceMatch = body.match(/^(\d*)d(\d+)$/i);
+                if (diceMatch) {
+                    const count = Math.max(1, Utils.toInt(diceMatch[1] || 1, 1));
+                    const sides = Math.max(1, Utils.toInt(diceMatch[2], 0));
+                    const values = [];
+                    for (let d = 0; d < count; d += 1) values.push(this.rollDie(sides));
+                    values.forEach((value) => diceValues.push(value * sign));
+                    const subtotal = values.reduce((sum, value) => sum + value, 0) * sign;
+                    total += subtotal;
+                    detail.push((sign < 0 ? '-' : '+') + count + 'd' + sides + '[' + values.join(',') + ']');
+                } else {
+                    const value = Utils.toInt(body, 0) * sign;
+                    modifier += value;
+                    total += value;
+                    detail.push((value < 0 ? '' : '+') + String(value));
+                }
+            }
+            return {
+                ok: true,
+                formula: raw,
+                total: Math.max(0, total),
+                detail: detail.join(' ').replace(/^\+/, ''),
+                diceValues,
+                modifier
+            };
+        },
+
+        rollDie(sides) {
+            const safeSides = Math.max(1, Utils.toInt(sides, 1));
+            if (typeof randomInteger === 'function') return randomInteger(safeSides);
+            return Math.floor(Math.random() * safeSides) + 1;
         },
 
         rollInitiativeForToken(token, forcedMode) {
@@ -3873,8 +7603,11 @@ const CombatAssistant = (() => {
             const tokenId = String((Utils.isFunction(token.get) ? token.get('_id') : '') || token.id || '').trim();
             const modifier = this.getInitiativeModifier(characterId);
             const forcedModeText = String(forcedMode || '').trim();
+            const forcedModeNormalized = this.normalizeInitiativeRollMode(forcedModeText);
             const rollInfo = forcedModeText
-                ? { mode: this.normalizeRollMode(forcedModeText), reason: 'Manual 2014 roll mode' }
+                ? (forcedModeNormalized === 'auto'
+                    ? this.get2014InitiativeStyleRollInfo(characterId)
+                    : { mode: forcedModeNormalized, reason: 'Manual 2014 roll mode' })
                 : this.getInitiativeRollInfo(characterId);
             const mode = rollInfo.mode;
             const roll1 = this.rollD20();
@@ -3921,9 +7654,7 @@ const CombatAssistant = (() => {
             const sheetAttributeCommand = requiresButton ? R20.sheetAttributeCommand(characterId, macroName, false) : '';
             return {
                 macroName,
-                buttonCommand: sheetVersion === '2014'
-                    ? R20.createNativeRollButtonCommand(sheetAttributeCommand)
-                    : R20.buttonAbilityCommand(characterId, macroName),
+                buttonCommand: requiresButton ? '' : R20.buttonAbilityCommand(characterId, macroName),
                 nativeCommand: requiresButton ? '' : R20.chatAbilityCommand(characterId, macroName),
                 batchCommand: requiresButton ? sheetAttributeCommand : R20.chatAbilityCommand(characterId, macroName),
                 sheetVersion,
@@ -3931,7 +7662,8 @@ const CombatAssistant = (() => {
             };
         },
 
-        startNativeSavingDamageRoll(token, payload, who) {
+        startNativeSavingDamageRoll(token, payload, who, options) {
+            const opts = options || {};
             if (!RuntimeConfig.get('CHAT_TRACKING')) {
                 return { ok: false, message: 'Chat Tracking must be enabled to read Roll20 saving throws.' };
             }
@@ -3941,21 +7673,14 @@ const CombatAssistant = (() => {
             const characterId = String(character.id || token.get('represents') || '').trim();
             const saveAbility = this.normalizeAbilityName(payload && payload.saveAbility || '');
             const commandSet = this.getNativeSaveCommandSet(characterId, saveAbility);
-            if (!characterId || !commandSet.macroName || !commandSet.buttonCommand || (!commandSet.requiresButton && !commandSet.nativeCommand)) return { ok: false, message: 'Native saving throw macro could not be resolved.' };
+            if (!characterId || !commandSet.macroName || !commandSet.batchCommand || (!commandSet.requiresButton && !commandSet.nativeCommand)) return { ok: false, message: 'Native saving throw macro could not be resolved.' };
             const tokenName = this.getTokenName(token);
             const characterName = String(character.get('name') || tokenName || 'Token').trim();
-            const requestId = RollParser.createPendingNativeSave({
-                tokenId: String(token.id || token.get('_id') || '').trim(),
-                characterId,
-                characterName,
-                tokenName,
-                rollName: saveAbility,
-                payload: Object.assign({}, payload || {}),
-                requestedBy: String(who || 'GM')
-            });
-            if (!requestId) return { ok: false, message: 'Native saving throw request could not be queued.' };
             const damageRolls = Array.isArray(payload && payload.damageRolls) ? payload.damageRolls : [];
-            const damage = damageRolls.reduce((sum, roll) => sum + Math.max(0, Utils.toInt(roll && (roll.total || roll.amount || roll.damage), 0)), 0);
+            const fallbackDamage = Math.max(0, Utils.toInt(payload && (payload.damageTotal || payload.amount || payload.damage), 0));
+            const damage = damageRolls.length
+                ? damageRolls.reduce((sum, roll) => sum + Math.max(0, Utils.toInt(roll && (roll.total || roll.amount || roll.damage), 0)), 0)
+                : fallbackDamage;
             const damageType = damageRolls.length ? damageRolls[0].damageType : (payload && payload.damageType || 'normal');
             const playerCommand = commandSet.buttonCommand;
             const nativeCommand = commandSet.nativeCommand;
@@ -3964,7 +7689,36 @@ const CombatAssistant = (() => {
             const characterControlledBy = character && Utils.isFunction(character.get) ? String(character.get('controlledby') || '') : '';
             const hasPlayerController = R20.isPlayerControlledToken(token, character);
             const playerRecipients = hasPlayerController ? R20.getTokenControllerDisplayNames(token, character) : [];
-            const shouldAskPlayer = hasPlayerController;
+            const shouldAskPlayer = hasPlayerController &&
+                RuntimeConfig.get('PLAYER_MANUAL_ROLL');
+            const recipients = shouldAskPlayer ? Utils.uniqueNames(['GM'].concat(playerRecipients)) : ['GM'];
+            const magicResistance = commandSet.sheetVersion === '2024' ? this.getMagicResistanceSaveInfo(token, payload) : { applies: false, reason: '' };
+            const forcedRoll = commandSet.sheetVersion === '2014' ? this.getForcedSaveRollMode(token, payload) : { mode: '', reason: '' };
+            const requestId = RollParser.createPendingNativeSave({
+                tokenId: String(token.id || token.get('_id') || '').trim(),
+                characterId,
+                characterName,
+                tokenName,
+                rollName: saveAbility,
+                payload: Object.assign({}, payload || {}),
+                requestedBy: String(who || 'GM'),
+                captureNative: true,
+                buttonCommand: playerCommand,
+                nativeCommand,
+                batchCommand,
+                sheetVersion: commandSet.sheetVersion,
+                recipients,
+                playerPrompt: shouldAskPlayer,
+                magicResistanceReroll: !!magicResistance.applies,
+                magicResistanceRerollStage: '',
+                magicResistanceReason: magicResistance.reason,
+                forcedRollMode: forcedRoll.mode,
+                forcedRollReason: forcedRoll.reason,
+                concentrationCheck: !!(payload && payload.concentrationCheck),
+                concentrationDc: Math.max(0, Utils.toInt(payload && (payload.concentrationDc || payload.challenge), 0)),
+                concentrationSpellName: String(payload && payload.concentrationSpellName || '').trim()
+            });
+            if (!requestId) return { ok: false, message: 'Native saving throw request could not be queued.' };
             if (!shouldAskPlayer) {
                 if (!batchCommand) return { ok: false, message: 'Native saving throw batch command could not be resolved.' };
                 return {
@@ -3984,150 +7738,319 @@ const CombatAssistant = (() => {
                     batchRoll: true,
                     tokenControlledBy,
                     characterControlledBy,
-                    recipients: ['GM']
+                    recipients,
+                    forcedRollMode: forcedRoll.mode,
+                    forcedRollReason: forcedRoll.reason
                 };
             }
-            const recipients = shouldAskPlayer ? Utils.uniqueNames(['GM'].concat(playerRecipients)) : ['GM'];
+            const promptCommand = forcedRoll.mode
+                ? ('!combatAssistant rollsave ' + requestId + ' ' + forcedRoll.mode)
+                : (playerCommand || (commandSet.requiresButton ? R20.createNativeRollButtonCommand(batchCommand) : ''));
             const card = Render.showNativeSaveRollRequest({
                 tokenName,
                 saveAbility,
                 challenge: Math.max(0, Utils.toInt(payload && payload.challenge, 0)),
                 damage,
                 damageType,
-                command: playerCommand
+                command: promptCommand,
+                concentrationSpellName: payload && payload.concentrationCheck ? String(payload.concentrationSpellName || 'Concentration').trim() : '',
+                note: magicResistance.applies ? 'Magic Resistance' : (forcedRoll.reason || '')
             });
+            if (opts.deferPlayerPrompt) {
+                return { ok: true, pending: true, requestId, tokenName, recipients, sheetVersion: commandSet.sheetVersion, card, playerPrompt: true, damage, damageType, command: promptCommand, forcedRollMode: forcedRoll.mode, forcedRollReason: forcedRoll.reason };
+            }
             recipients.forEach((recipient) => R20.whisper(recipient, card));
-            return { ok: true, pending: true, requestId, tokenName, recipients, sheetVersion: commandSet.sheetVersion };
+            return { ok: true, pending: true, requestId, tokenName, recipients, sheetVersion: commandSet.sheetVersion, forcedRollMode: forcedRoll.mode, forcedRollReason: forcedRoll.reason };
         },
 
-        async applyDamageToToken(token, payload) {
-            if (!token) return { ok: false, message: 'Target token was not found.' };
-            payload = payload || {};
-            const tokenName = this.getTokenName(token);
-            const tokenImgsrc = String(token.get('imgsrc') || '').trim();
+        getTokenMutationKey(token) {
+            if (!token || !Utils.isFunction(token.get)) return '';
             const character = R20.getCharacterFromToken(token);
-            const characterId = character ? String(character.id || '').trim() : '';
+            const characterId = character ? String(character.id || token.get('represents') || '').trim() : String(token.get('represents') || '').trim();
+            if (characterId) return 'character:' + characterId;
+            const tokenId = String(token.get('_id') || token.id || '').trim();
+            return tokenId ? ('token:' + tokenId) : '';
+        },
+
+        runTokenMutation(token, operation) {
+            if (!Utils.isFunction(operation)) return Promise.resolve({ ok: false, message: 'Token operation was not provided.' });
+            const key = this.getTokenMutationKey(token);
+            if (!key) return Promise.resolve().then(operation);
+            const previous = TOKEN_MUTATION_QUEUES[key] || Promise.resolve();
+            const queued = previous
+                .catch((error) => {
+                    Logger.debug('[token-mutation:previous]', key, error && error.message ? error.message : String(error));
+                })
+                .then(operation);
+            let tracked = null;
+            const release = () => {
+                if (TOKEN_MUTATION_QUEUES[key] === tracked) delete TOKEN_MUTATION_QUEUES[key];
+            };
+            tracked = queued.then(
+                (result) => {
+                    release();
+                    return result;
+                },
+                (error) => {
+                    release();
+                    throw error;
+                }
+            );
+            TOKEN_MUTATION_QUEUES[key] = tracked;
+            return tracked;
+        },
+
+        applyDamageToToken(token, payload) {
+            return this.runTokenMutation(token, () => this.applyDamageToTokenUnlocked(token, payload));
+        },
+
+        buildMissDamageResult(context, extra) {
+            return Object.assign({
+                ok: true,
+                tokenName: context.tokenName,
+                tokenImgsrc: context.tokenImgsrc,
+                sourceImgsrc: context.payload.sourceImgsrc || '',
+                missed: true,
+                sourceName: context.payload.sourceName || '',
+                sourceAction: context.payload.sourceAction || '',
+                totalDamage: 0,
+                parts: [],
+                previousHp: context.hpBar.value,
+                currentHp: context.hpBar.value
+            }, extra || {});
+        },
+
+        resolveAttackDamageGate(token, context) {
+            const payload = context.payload;
+            if (payload.forceMiss || payload.mode === 'miss') {
+                return { complete: true, result: this.buildMissDamageResult(context) };
+            }
+            if (context.mode !== 'attack' || context.challenge <= 0) return { complete: false };
+
+            const ac = this.readAc(token);
+            const attackNatural = Math.max(0, Utils.toInt(payload.attackNatural, 0));
+            if (attackNatural === 1) {
+                return {
+                    complete: true,
+                    result: this.buildMissDamageResult(context, {
+                        naturalOne: true,
+                        ac,
+                        attackTotal: context.challenge
+                    })
+                };
+            }
+            if (ac <= 0 && RuntimeConfig.get('REQUIRE_AC_FOR_ATTACK')) {
+                return {
+                    complete: true,
+                    result: {
+                        ok: false,
+                        message: context.tokenName + ' has no valid AC in the configured AC bar. Use Hit for direct damage or configure the AC bar.'
+                    }
+                };
+            }
+            if (attackNatural !== 20 && ac > 0 && context.challenge < ac) {
+                return {
+                    complete: true,
+                    result: this.buildMissDamageResult(context, {
+                        ac,
+                        attackTotal: context.challenge
+                    })
+                };
+            }
+            return { complete: false };
+        },
+
+        resolveDamageSaveOutcome(context) {
+            if (context.mode !== 'save' || context.challenge <= 0) {
+                return { ok: true, save: { used: false }, noDamage: false, halfDamage: false };
+            }
+            if (!context.characterId) {
+                return { ok: false, message: 'Target token needs an assigned character to roll a saving throw.' };
+            }
+            const payload = context.payload;
+            if (payload.nativeSaveTotal === undefined || payload.nativeSaveTotal === null || String(payload.nativeSaveTotal).trim() === '') {
+                return { ok: false, message: 'Roll20 saving throw result was not captured yet.' };
+            }
+
+            const total = Utils.toNumber(payload.nativeSaveTotal, 0);
+            const modifier = payload.nativeSaveModifier !== undefined && payload.nativeSaveModifier !== null
+                ? Utils.toInt(payload.nativeSaveModifier, 0)
+                : 0;
+            const natural = payload.nativeSaveNatural !== undefined && payload.nativeSaveNatural !== null
+                ? Utils.toInt(payload.nativeSaveNatural, total - modifier)
+                : total;
+            const suppliedRolls = Array.isArray(payload.nativeSaveRolls)
+                ? payload.nativeSaveRolls.map((roll) => Utils.toInt(roll, null)).filter((roll) => roll !== null && roll !== undefined)
+                : [natural];
+            const save = {
+                used: true,
+                ability: this.normalizeAbilityName(payload.saveAbility || ''),
+                dc: context.challenge,
+                raw: String(payload.nativeSaveRollName || 'Roll20'),
+                modifier,
+                natural,
+                total,
+                rolls: suppliedRolls.length ? suppliedRolls : [natural],
+                mode: this.normalizeRollMode(payload.nativeSaveMode || 'normal'),
+                rollModeReason: String(payload.nativeSaveRollModeReason || '').trim(),
+                native: true,
+                success: total >= context.challenge
+            };
+            return {
+                ok: true,
+                save,
+                noDamage: save.success && !payload.halfOnSuccess,
+                halfDamage: save.success && !!payload.halfOnSuccess
+            };
+        },
+
+        calculateDamageBreakdown(context, saveOutcome) {
+            const payload = context.payload;
+            const damageRolls = Array.isArray(payload.damageRolls) && payload.damageRolls.length
+                ? payload.damageRolls
+                : [{ total: payload.damageTotal || payload.amount || payload.damage || 0, damageType: payload.damageType || 'normal' }];
+            const traits = this.readStoreDamageTraits(context.characterId);
+            const parts = damageRolls.map((roll) => {
+                const source = roll || {};
+                const baseDamage = Math.max(0, Utils.toInt(source.total || source.amount || source.damage, 0));
+                const damageType = this.normalizeDamageType(source.damageType || payload.damageType || 'normal');
+                let adjustedBase = baseDamage;
+                if (saveOutcome.noDamage) adjustedBase = 0;
+                else if (saveOutcome.halfDamage) {
+                    adjustedBase = RuntimeConfig.get('DAMAGE_ROUND_UP')
+                        ? Math.ceil(adjustedBase / 2)
+                        : Math.floor(adjustedBase / 2);
+                }
+                return Object.assign(
+                    { baseDamage, adjustedBase, damageType },
+                    this.applyTraits(adjustedBase, damageType, traits)
+                );
+            });
+            return {
+                parts,
+                totalDamage: parts.reduce((sum, part) => sum + Math.max(0, Utils.toInt(part.finalDamage, 0)), 0)
+            };
+        },
+
+        calculateDamageResourceChanges(context, totalDamage) {
+            const previousHp = Math.max(0, Utils.toInt(context.hpBar.value, 0));
+            const previousTemp = context.tempBar ? Math.max(0, Utils.toInt(context.tempBar.value, 0)) : 0;
+            const tempAbsorbed = context.tempBar ? Math.min(previousTemp, Math.max(0, totalDamage)) : 0;
+            const currentTemp = previousTemp - tempAbsorbed;
+            const hpDamage = Math.max(0, totalDamage - tempAbsorbed);
+            return {
+                previousHp,
+                currentHp: Math.max(0, previousHp - hpDamage),
+                previousTemp,
+                currentTemp,
+                tempAbsorbed,
+                hpDamage
+            };
+        },
+
+        async persistDamageResourceChanges(token, context, changes) {
+            let hpWrite = { ok: true, skipped: true };
+            let tempWrite = { ok: true, skipped: true };
+            if (changes.currentHp !== changes.previousHp) {
+                hpWrite = await this.setBarOrLinkedAttributeValue(token, context.hpBarNumber, 'hp', changes.currentHp);
+                if (!hpWrite.ok) return hpWrite;
+            }
+            if (context.tempBar && changes.currentTemp !== changes.previousTemp) {
+                tempWrite = await this.setBarOrLinkedAttributeValue(token, context.tempBarNumber, 'hp_temp', changes.currentTemp);
+                if (!tempWrite.ok) {
+                    const rollback = changes.currentHp !== changes.previousHp
+                        ? await this.setBarOrLinkedAttributeValue(token, context.hpBarNumber, 'hp', changes.previousHp)
+                        : { ok: true, skipped: true };
+                    if (!rollback.ok) {
+                        Logger.error('[damage-rollback]', 'HP rollback failed after temp HP write failure:', rollback.message || 'unknown error');
+                        return {
+                            ok: false,
+                            message: (tempWrite.message || 'Temporary HP could not be updated.') +
+                                ' HP rollback also failed; verify the token and sheet values manually.'
+                        };
+                    }
+                    return tempWrite;
+                }
+            }
+            return { ok: true, hpWrite, tempWrite };
+        },
+
+        async applyDamageToTokenUnlocked(token, payload) {
+            if (!token) return { ok: false, message: 'Target token was not found.' };
+            const safePayload = payload || {};
+            const character = R20.getCharacterFromToken(token);
             const hpBarNumber = this.getBarNumberForAttribute(token, 'hp', 'HP_BAR');
             const tempBarNumber = this.getBarNumberForAttribute(token, 'hp_temp', 'TEMP_HP_BAR');
             const hpBar = this.getBar(token, hpBarNumber);
             if (!hpBar.ok) return hpBar;
-            const hpLinked = this.shouldWriteSheetAttributeForBar(token, hpBarNumber, 'hp');
-            let tempBar = null;
-            if (tempBarNumber > 0) {
-                tempBar = this.getBar(token, tempBarNumber);
-                if (!tempBar.ok) return tempBar;
-            }
+            const tempBar = tempBarNumber > 0 ? this.getBar(token, tempBarNumber) : null;
+            if (tempBar && !tempBar.ok) return tempBar;
 
-            if (payload.forceMiss || payload.mode === 'miss') {
-                return { ok: true, tokenName, tokenImgsrc, sourceImgsrc: payload.sourceImgsrc || '', missed: true, sourceName: payload.sourceName || '', sourceAction: payload.sourceAction || '', totalDamage: 0, parts: [], previousHp: hpBar.value, currentHp: hpBar.value };
-            }
+            const context = {
+                payload: safePayload,
+                tokenName: this.getTokenName(token),
+                tokenImgsrc: String(token.get('imgsrc') || '').trim(),
+                characterId: character ? String(character.id || '').trim() : '',
+                hpBarNumber,
+                tempBarNumber,
+                hpBar,
+                tempBar,
+                hpLinked: this.shouldWriteSheetAttributeForBar(token, hpBarNumber, 'hp'),
+                mode: String(safePayload.mode || 'direct').toLowerCase(),
+                challenge: Math.max(0, Utils.toInt(safePayload.challenge, 0))
+            };
 
-            const mode = String(payload.mode || 'direct').toLowerCase();
-            const challenge = Math.max(0, Utils.toInt(payload.challenge, 0));
-            if (mode === 'attack' && challenge > 0) {
-                const ac = this.readAc(token);
-                if (ac > 0 && challenge < ac) {
-                    return { ok: true, tokenName, tokenImgsrc, sourceImgsrc: payload.sourceImgsrc || '', missed: true, ac, attackTotal: challenge, sourceName: payload.sourceName || '', sourceAction: payload.sourceAction || '', totalDamage: 0, parts: [], previousHp: hpBar.value, currentHp: hpBar.value };
-                }
-            }
+            const attackGate = this.resolveAttackDamageGate(token, context);
+            if (attackGate.complete) return attackGate.result;
 
-            let save = { used: false };
-            let saveSuccessNoDamage = false;
-            let saveSuccessHalf = false;
-            if (mode === 'save' && challenge > 0) {
-                if (!characterId) return { ok: false, message: 'Target token needs an assigned character to roll a saving throw.' };
-                if (payload.nativeSaveTotal === undefined || payload.nativeSaveTotal === null || String(payload.nativeSaveTotal).trim() === '') {
-                    return { ok: false, message: 'Roll20 saving throw result was not captured yet.' };
-                }
-                const nativeTotal = Utils.toNumber(payload.nativeSaveTotal, 0);
-                const nativeModifier = payload.nativeSaveModifier !== undefined && payload.nativeSaveModifier !== null ? Utils.toInt(payload.nativeSaveModifier, 0) : 0;
-                const nativeNatural = payload.nativeSaveNatural !== undefined && payload.nativeSaveNatural !== null ? Utils.toInt(payload.nativeSaveNatural, nativeTotal - nativeModifier) : nativeTotal;
-                const nativeRolls = Array.isArray(payload.nativeSaveRolls)
-                    ? payload.nativeSaveRolls.map((roll) => Utils.toInt(roll, null)).filter((roll) => roll !== null && roll !== undefined)
-                    : [nativeNatural];
-                const nativeMode = this.normalizeRollMode(payload.nativeSaveMode || 'normal');
-                save = {
-                    used: true,
-                    ability: this.normalizeAbilityName(payload.saveAbility || ''),
-                    dc: challenge,
-                    raw: String(payload.nativeSaveRollName || 'Roll20'),
-                    modifier: nativeModifier,
-                    natural: nativeNatural,
-                    total: nativeTotal,
-                    rolls: nativeRolls.length ? nativeRolls : [nativeNatural],
-                    mode: nativeMode,
-                    native: true,
-                    success: nativeTotal >= challenge
-                };
-                if (save.success) {
-                    if (payload.halfOnSuccess) saveSuccessHalf = true;
-                    else saveSuccessNoDamage = true;
-                }
-            }
+            const saveOutcome = this.resolveDamageSaveOutcome(context);
+            if (!saveOutcome.ok) return saveOutcome;
 
-            const damageRolls = Array.isArray(payload.damageRolls) && payload.damageRolls.length ? payload.damageRolls : [{ total: payload.amount || payload.damage || 0, damageType: payload.damageType || 'normal' }];
-            const traits = this.readStoreDamageTraits(characterId);
-            const parts = [];
-            let totalDamage = 0;
-            for (let i = 0; i < damageRolls.length; i += 1) {
-                const roll = damageRolls[i] || {};
-                const base = Math.max(0, Utils.toInt(roll.total || roll.amount || roll.damage, 0));
-                const damageType = this.normalizeDamageType(roll.damageType || payload.damageType || 'normal');
-                let adjustedBase = base;
-                if (saveSuccessNoDamage) adjustedBase = 0;
-                else if (saveSuccessHalf) adjustedBase = RuntimeConfig.get('DAMAGE_ROUND_UP') ? Math.ceil(adjustedBase / 2) : Math.floor(adjustedBase / 2);
-                const traitResult = this.applyTraits(adjustedBase, damageType, traits);
-                totalDamage += traitResult.finalDamage;
-                parts.push(Object.assign({ baseDamage: base, adjustedBase, damageType }, traitResult));
-            }
+            const breakdown = this.calculateDamageBreakdown(context, saveOutcome);
+            const changes = this.calculateDamageResourceChanges(context, breakdown.totalDamage);
+            const writes = await this.persistDamageResourceChanges(token, context, changes);
+            if (!writes.ok) return writes;
 
-            const previousHp = Math.max(0, Utils.toInt(hpBar.value, 0));
-            const previousTemp = tempBar ? Math.max(0, Utils.toInt(tempBar.value, 0)) : 0;
-            let remainingDamage = totalDamage;
-            let tempAbsorbed = 0;
-            let currentTemp = previousTemp;
-            if (tempBar && currentTemp > 0 && remainingDamage > 0) {
-                tempAbsorbed = Math.min(currentTemp, remainingDamage);
-                currentTemp -= tempAbsorbed;
-                remainingDamage -= tempAbsorbed;
-                const tempWrite = await this.setBarOrLinkedAttributeValue(token, tempBarNumber, 'hp_temp', currentTemp, {
-                    fallbackToBarIfLinkedAttrMissing: true
-                });
-                if (!tempWrite.ok) return tempWrite;
-            }
-            const currentHp = Math.max(0, previousHp - remainingDamage);
-            const hpWrite = await this.setBarOrLinkedAttributeValue(token, hpBarNumber, 'hp', currentHp);
-            if (!hpWrite.ok) return hpWrite;
             let deathMarked = false;
-            if (!hpLinked && previousHp > 0 && currentHp <= 0) {
+            if (!context.hpLinked && changes.previousHp > 0 && changes.currentHp <= 0) {
                 deathMarked = this.setTokenStatusMarker(token, 'dead', true);
             }
 
-            return {
+            const result = {
                 ok: true,
-                tokenName,
-                tokenImgsrc,
-                sourceImgsrc: payload.sourceImgsrc || '',
-                sourceName: payload.sourceName || '',
-                sourceAction: payload.sourceAction || '',
-                save,
-                parts,
-                totalDamage,
-                hpDamage: remainingDamage,
-                tempAbsorbed,
-                previousTemp,
-                currentTemp,
-                previousHp,
-                currentHp,
+                tokenName: context.tokenName,
+                tokenImgsrc: context.tokenImgsrc,
+                sourceImgsrc: safePayload.sourceImgsrc || '',
+                sourceName: safePayload.sourceName || '',
+                sourceAction: safePayload.sourceAction || '',
+                critical: context.mode === 'attack' &&
+                    (Utils.toInt(safePayload.attackNatural, 0) === 20 || Utils.toBoolean(safePayload.isCritical, false)),
+                save: saveOutcome.save,
+                parts: breakdown.parts,
+                totalDamage: breakdown.totalDamage,
+                hpDamage: changes.hpDamage,
+                tempAbsorbed: changes.tempAbsorbed,
+                previousTemp: changes.previousTemp,
+                currentTemp: changes.currentTemp,
+                previousHp: changes.previousHp,
+                currentHp: changes.currentHp,
                 maxHp: hpBar.max,
-                fainted: previousHp > 0 && currentHp <= 0,
+                fainted: changes.previousHp > 0 && changes.currentHp <= 0,
                 deathMarked,
-                sheetWrite: { ok: true, skipped: true },
-                noDamage: totalDamage <= 0
+                sheetWrite: writes.hpWrite,
+                tempSheetWrite: writes.tempWrite,
+                noDamage: breakdown.totalDamage <= 0
             };
+            CombatEffects.playDamageReceived(token, result);
+            this.queueConcentrationSaveForDamage(token, result);
+            return result;
         },
 
-        async applyHealToToken(token, payload) {
+        applyHealToToken(token, payload) {
+            return this.runTokenMutation(token, () => this.applyHealToTokenUnlocked(token, payload));
+        },
+
+        async applyHealToTokenUnlocked(token, payload) {
             if (!token) return { ok: false, message: 'Target token was not found.' };
             payload = payload || {};
             const tokenName = this.getTokenName(token);
@@ -4143,16 +8066,17 @@ const CombatAssistant = (() => {
 
             if (mode === 'temp') {
                 const tempBarNumber = this.getBarNumberForAttribute(token, 'hp_temp', 'TEMP_HP_BAR');
-                if (tempBarNumber <= 0) return { ok: false, message: 'Temp HP bar is disabled. Set TEMP_HP_BAR to 1, 2, or 3.' };
+                if (tempBarNumber <= 0) return { ok: false, message: 'Temp HP bar is disabled. Set TEMP_HP_BAR to 1, 2, 3, or 4.' };
                 const tempBar = this.getBar(token, tempBarNumber);
                 if (!tempBar.ok) return tempBar;
                 const previousTemp = Math.max(0, Utils.toInt(tempBar.value, 0));
                 const currentTemp = Math.max(previousTemp, amount);
-                const tempWrite = await this.setBarOrLinkedAttributeValue(token, tempBarNumber, 'hp_temp', currentTemp, {
-                    fallbackToBarIfLinkedAttrMissing: true
-                });
+                const tempWrite = await this.setBarOrLinkedAttributeValue(token, tempBarNumber, 'hp_temp', currentTemp);
                 if (!tempWrite.ok) return tempWrite;
-                return { ok: true, mode, tokenName, tokenImgsrc, amount, previousTemp, currentTemp, sourceName, sourceAction, sourceImgsrc };
+                const effectiveAmount = Math.max(0, currentTemp - previousTemp);
+                const result = { ok: true, mode, tokenName, tokenImgsrc, amount, rolledAmount: amount, effectiveAmount, previousTemp, currentTemp, sourceName, sourceAction, sourceImgsrc };
+                CombatEffects.playHealingReceived(token, mode, effectiveAmount);
+                return result;
             }
 
             const hpBarNumber = this.getBarNumberForAttribute(token, 'hp', 'HP_BAR');
@@ -4160,18 +8084,25 @@ const CombatAssistant = (() => {
             if (!hpBar.ok) return hpBar;
             const hpLinked = this.shouldWriteSheetAttributeForBar(token, hpBarNumber, 'hp');
             const previousHp = Math.max(0, Utils.toInt(hpBar.value, 0));
-            const deathSaves = previousHp <= 0 && characterId ? this.getDeathSavesState(characterId) : { ok: true, open: false };
-            if (previousHp <= 0 && deathSaves.open) {
+            const deathSaves = previousHp <= 0 && hpLinked && characterId
+                ? this.getDeathSavesState(characterId)
+                : { ok: true, open: false };
+            if (hpLinked && previousHp <= 0 && deathSaves.open) {
                 return {
                     ok: false,
-                    message: tokenName + ' is at 0 HP and has active death saves. Stabilize the character before applying healing.'
+                    message: tokenName + ' has active death saving throws. Stabilize the character sheet before applying healing.'
                 };
             }
             const maxHp = hpBar.max !== null && hpBar.max !== undefined && !Number.isNaN(Number(hpBar.max)) && Number(hpBar.max) > 0 ? Number(hpBar.max) : null;
             const currentHp = maxHp ? Math.min(maxHp, previousHp + amount) : (previousHp + amount);
             const hpWrite = await this.setBarOrLinkedAttributeValue(token, hpBarNumber, 'hp', currentHp);
             if (!hpWrite.ok) return hpWrite;
-            return { ok: true, mode, tokenName, tokenImgsrc, amount, previousHp, currentHp, maxHp, sourceName, sourceAction, sourceImgsrc, stabilized: false, sheetWrite: { ok: true, skipped: true } };
+            const effectiveAmount = Math.max(0, currentHp - previousHp);
+            const revived = previousHp <= 0 && currentHp > 0;
+            if (revived || (!hpLinked && currentHp > 0)) this.setTokenStatusMarker(token, 'dead', false);
+            const result = { ok: true, mode, tokenName, tokenImgsrc, amount, rolledAmount: amount, effectiveAmount, overhealing: Math.max(0, amount - effectiveAmount), previousHp, currentHp, maxHp, sourceName, sourceAction, sourceImgsrc, revived, deathSavesWereOpen: !!deathSaves.open, sheetWrite: hpLinked ? { ok: true, source: 'setSheetItem' } : { ok: true, skipped: true } };
+            CombatEffects.playHealingReceived(token, mode, effectiveAmount);
+            return result;
         }
     };
 
@@ -4237,9 +8168,24 @@ const CombatAssistant = (() => {
             const payload = request && request.payload ? request.payload : {};
             const characterId = String(payload.casterCharacterId || request.sourceCharacterId || request.characterId || '').trim();
             const targetPageId = R20.getTokenPageId(targetToken);
+            const explicitSourceId = String(payload.casterTokenId || request.sourceTokenId || '').trim();
+            const explicitSource = R20.getTokenById(explicitSourceId);
+            if (explicitSource && (!targetPageId || R20.getTokenPageId(explicitSource) === targetPageId)) {
+                const explicitCharacter = R20.getCharacterFromToken(explicitSource);
+                const explicitCharacterId = String((explicitCharacter && explicitCharacter.id) || explicitSource.get('represents') || characterId || '').trim();
+                payload.casterTokenId = R20.getTokenId(explicitSource);
+                payload.casterCharacterId = explicitCharacterId;
+                payload.casterPageId = R20.getTokenPageId(explicitSource);
+                payload.sourceImgsrc = String(explicitSource.get('imgsrc') || payload.sourceImgsrc || '');
+                request.sourceTokenId = payload.casterTokenId;
+                request.sourceCharacterId = explicitCharacterId;
+                request.sourcePageId = payload.casterPageId;
+                return explicitSource;
+            }
+            if (explicitSourceId) return null;
             if (!characterId || !targetPageId) return null;
             const samePageToken = R20.findTokenByCharacterIdOnPage(characterId, targetPageId);
-            const sourceToken = samePageToken || R20.getTokenById(payload.casterTokenId || request.sourceTokenId || '');
+            const sourceToken = samePageToken || explicitSource;
             if (!sourceToken) return null;
             payload.casterTokenId = R20.getTokenId(sourceToken);
             payload.casterCharacterId = characterId;
@@ -4251,210 +8197,280 @@ const CombatAssistant = (() => {
             return sourceToken;
         },
 
-        sendNativeRollBatchForTokens(tokens, macroName, options) {
-            options = options || {};
+        createNativeRollPlan(tokens, macroName, options) {
+            const safeOptions = options || {};
             const safeMacroName = String(macroName || '').trim();
-            if (!safeMacroName) return { sent: 0, failed: ['Native Roll20 macro could not be resolved.'] };
-            const autoRolls = [];
-            const batchRolls = [];
-            const ca2014PlainRolls = [];
-            const ca2014InitiativeRolls = [];
-            const failed = [];
-            let individual = 0;
-            const trackInitiative = Utils.toBoolean(options.trackInitiative, false);
-            const initiativeBatchId = trackInitiative ? RollParser.createPendingNativeInitiativeBatch(tokens) : '';
-            const isInitiativeRoll = safeMacroName.toLowerCase() === 'initiative';
-
-            for (let i = 0; i < tokens.length; i += 1) {
-                const token = tokens[i];
-                if (!token) {
-                    failed.push('Target token was not found.');
-                    continue;
-                }
-                const character = R20.getCharacterFromToken(token);
-                if (!character) {
-                    failed.push(CombatService.getTokenName(token) + ' must be linked to a character.');
-                    continue;
-                }
-                const characterId = String(character.id || token.get('represents') || '').trim();
-                if (!characterId) {
-                    failed.push(CombatService.getTokenName(token) + ' has no character id.');
-                    continue;
-                }
-                const tokenName = CombatService.getTokenName(token);
-                const characterName = String(character.get('name') || tokenName || 'Token').trim();
-                const commandSet = options.saveAbility
-                    ? CombatService.getNativeSaveCommandSet(characterId, options.saveAbility)
-                    : (() => {
-                        const sheetVersion = R20.detectSheetVersion(characterId);
-                        const requiresButton = isInitiativeRoll && sheetVersion === '2014';
-                        return {
-                            macroName: safeMacroName,
-                            buttonCommand: R20.buttonAbilityCommand(characterId, safeMacroName),
-                            nativeCommand: requiresButton ? '' : R20.chatAbilityCommand(characterId, safeMacroName),
-                            batchCommand: R20.chatAbilityCommand(characterId, safeMacroName),
-                            sheetVersion,
-                            requiresButton
-                        };
-                    })();
-                const playerCommand = commandSet.buttonCommand;
-                const nativeCommand = commandSet.nativeCommand;
-                const batchCommand = String(commandSet.batchCommand || nativeCommand || '').trim();
-                if (!playerCommand || !batchCommand) {
-                    failed.push(CombatService.getTokenName(token) + ' native roll command could not be resolved.');
-                    continue;
-                }
-                const tokenControlledBy = token && Utils.isFunction(token.get) ? String(token.get('controlledby') || '') : '';
-                const characterControlledBy = character && Utils.isFunction(character.get) ? String(character.get('controlledby') || '') : '';
-                const hasPlayerController = R20.isPlayerControlledToken(token, character);
-                const shouldAskPlayer = hasPlayerController;
-                if (!shouldAskPlayer && options.saveAbility && commandSet.sheetVersion === '2014' && RuntimeConfig.get('SHEET_2014_CA_ROLLS')) {
-                    ca2014PlainRolls.push({
-                        tokenId: String((Utils.isFunction(token.get) ? token.get('_id') : '') || token.id || '').trim(),
-                        tokenName,
-                        characterName
-                    });
-                    continue;
-                }
-                let initiativeRequestId = '';
-                if (trackInitiative) {
-                    initiativeRequestId = RollParser.createPendingNativeInitiative({
-                        tokenId: String((Utils.isFunction(token.get) ? token.get('_id') : '') || token.id || '').trim(),
-                        characterId,
-                        characterName,
-                        tokenName,
-                        batchId: initiativeBatchId
-                    });
-                }
-                if (!shouldAskPlayer && trackInitiative && isInitiativeRoll && commandSet.sheetVersion === '2014' && RuntimeConfig.get('SHEET_2014_CA_ROLLS')) {
-                    ca2014InitiativeRolls.push({
-                        tokenId: String((Utils.isFunction(token.get) ? token.get('_id') : '') || token.id || '').trim(),
-                        tokenName,
-                        characterName,
-                        batchId: initiativeBatchId,
-                        requestId: initiativeRequestId
-                    });
-                    continue;
-                }
-                if (shouldAskPlayer) {
-                    const recipients = this.getNativeRollRecipients(token, character);
-                    const card = Render.showNativeSheetRollRequest({
-                        title: options.individualTitle || options.title || 'Roll20 Roll',
-                        tokenName,
-                        rollName: options.rollName || safeMacroName,
-                        label: options.label || 'Roll',
-                        iconHtml: options.iconHtml || '&#127922;',
-                        command: playerCommand,
-                        tooltip: options.tooltip || ('Roll ' + safeMacroName)
-                    });
-                    recipients.forEach((recipient) => R20.whisper(recipient, card));
-                    individual += 1;
-                } else if (commandSet.requiresButton) {
-                    batchRolls.push({ tokenName, characterName, command: playerCommand, nativeCommand, batchCommand, tokenControlledBy, characterControlledBy, requestId: initiativeRequestId, sheetVersion: commandSet.sheetVersion });
-                } else {
-                    autoRolls.push({ tokenName, characterName, command: playerCommand, nativeCommand, batchCommand, tokenControlledBy, characterControlledBy, requestId: initiativeRequestId, sheetVersion: commandSet.sheetVersion });
-                }
-            }
-
-            if (ca2014InitiativeRolls.length) {
-                if (options.rollMode) {
-                    const results = [];
-                    ca2014InitiativeRolls.forEach((roll) => {
-                        const token = R20.getTokenById(roll.tokenId);
-                        const result = CombatService.rollInitiativeForToken(token, options.rollMode);
-                        RollParser.removePendingNativeInitiativeById(roll.requestId);
-                        if (result.ok) {
-                            results.push(result);
-                            if (trackInitiative && roll.batchId) {
-                                RollParser.recordPendingNativeInitiativeResult(result.tokenId, result.total, roll.batchId, roll.requestId);
-                            }
-                        } else {
-                            failed.push(result.message || 'Initiative roll failed.');
-                        }
-                    });
-                    if (results.length) R20.direct(Render.showInitiativeResults(results));
-                } else {
-                    R20.whisper('GM', Render.showNativeBatchRollRequest({
-                        title: '2014 Initiative Rolls',
-                        intro: 'Roll <strong>Initiative</strong> for:',
-                        names: ca2014InitiativeRolls.map((roll) => roll.tokenName || roll.characterName || 'Token'),
-                        label: 'Init',
-                        iconHtml: options.iconHtml || '&#127922;',
-                        command: '!combatAssistant roll2014init &#63;{Roll Mode|Normal,normal|Advantage,advantage|Disadvantage,disadvantage} ' +
-                            Utils.encodeJsonPayload({
-                                batchId: initiativeBatchId,
-                                rolls: ca2014InitiativeRolls.map((roll) => ({
-                                    tokenId: roll.tokenId,
-                                    requestId: roll.requestId
-                                })).filter((roll) => roll.tokenId)
-                            }),
-                        tooltip: 'Roll all listed 2014 initiatives with Combat Assistant'
-                    }));
-                }
-            }
-
-            if (autoRolls.length) {
-                if (trackInitiative) {
-                    RollParser.setNativeInitiativeAutoQueue(initiativeBatchId, autoRolls);
-                    RollParser.advanceNativeInitiativeAutoQueue(initiativeBatchId);
-                } else {
-                    R20.sendNativeCommandsSequentially(
-                        autoRolls.map((roll) => roll.nativeCommand || roll.batchCommand || ''),
-                        options.rollDelayMs || 750
-                    );
-                }
-            }
-            if (batchRolls.length) {
-                const batch = R20.createNativeRollBatchAbility(batchRolls.map((roll) => roll.batchCommand || roll.nativeCommand || ''));
-                if (batch.ok) {
-                    R20.whisper('GM', Render.showNativeBatchRollRequest({
-                        title: options.batchTitle || options.title || 'Roll20 Rolls',
-                        intro: options.batchIntro || 'Roll for:',
-                        names: batchRolls.map((roll) => roll.tokenName || roll.characterName || 'Token'),
-                        label: options.batchLabel || 'Roll All',
-                        iconHtml: options.iconHtml || '&#127922;',
-                        command: batch.command,
-                        tooltip: options.batchTooltip || 'Roll all listed tokens'
-                    }));
-                } else {
-                    failed.push(batch.message || 'Could not create Roll All button.');
-                }
-            }
-            if (ca2014PlainRolls.length) {
-                const abilityLabel = CombatService.abilityNameToShortLabel(options.saveAbility || '') || String(options.label || 'SAVE').toUpperCase();
-                if (options.rollMode) {
-                    const results = [];
-                    ca2014PlainRolls.forEach((roll) => {
-                        const token = R20.getTokenById(roll.tokenId);
-                        const result = CombatService.rollSavingThrowForToken(token, options.saveAbility, options.rollMode);
-                        if (result.ok) results.push(result);
-                        else failed.push(result.message || 'Saving throw failed.');
-                    });
-                    if (results.length) R20.direct(Render.showSavingThrowResults(results, abilityLabel));
-                } else {
-                    R20.whisper('GM', Render.showNativeBatchRollRequest({
-                        title: '2014 ' + abilityLabel + ' Saving Throws',
-                        intro: 'Roll <strong>' + Utils.escapeHtml(abilityLabel) + '</strong> saving throws:',
-                        names: ca2014PlainRolls.map((roll) => roll.tokenName || roll.characterName || 'Token'),
-                        label: 'Roll',
-                        iconHtml: options.iconHtml || '&#127922;',
-                        command: '!combatAssistant roll2014plain &#63;{Roll Mode|Normal,normal|Advantage,advantage|Disadvantage,disadvantage} ' +
-                            Utils.encodeJsonPayload({
-                                ability: options.saveAbility,
-                                tokenIds: ca2014PlainRolls.map((roll) => roll.tokenId).filter(Boolean)
-                            }),
-                        tooltip: 'Roll all listed 2014 saving throws with Combat Assistant'
-                    }));
-                }
-            }
-
+            const trackInitiative = Utils.toBoolean(safeOptions.trackInitiative, false);
             return {
-                sent: individual + autoRolls.length + batchRolls.length + ca2014PlainRolls.length + ca2014InitiativeRolls.length,
-                individual,
-                automatic: autoRolls.length + (options.rollMode ? ca2014InitiativeRolls.length : 0),
-                batch: batchRolls.length + ca2014PlainRolls.length + (options.rollMode ? 0 : ca2014InitiativeRolls.length),
-                failed
+                options: safeOptions,
+                safeMacroName,
+                trackInitiative,
+                initiativeBatchId: trackInitiative ? RollParser.createPendingNativeInitiativeBatch(tokens) : '',
+                isInitiativeRoll: safeMacroName.toLowerCase() === 'initiative',
+                autoRolls: [],
+                playerRolls: [],
+                batchRolls: [],
+                ca2014PlainRolls: [],
+                ca2014InitiativeRolls: [],
+                failed: [],
+                individual: 0
             };
+        },
+
+        getNativeRollCommandSet(characterId, plan) {
+            if (plan.options.saveAbility) {
+                return CombatService.getNativeSaveCommandSet(characterId, plan.options.saveAbility);
+            }
+            const sheetVersion = R20.detectSheetVersion(characterId);
+            const requiresButton = plan.isInitiativeRoll && sheetVersion === '2014';
+            return {
+                macroName: plan.safeMacroName,
+                buttonCommand: R20.buttonAbilityCommand(characterId, plan.safeMacroName),
+                nativeCommand: requiresButton ? '' : R20.chatAbilityCommand(characterId, plan.safeMacroName),
+                batchCommand: R20.chatAbilityCommand(characterId, plan.safeMacroName),
+                sheetVersion,
+                requiresButton
+            };
+        },
+
+        classifyNativeRollToken(token, plan) {
+            if (!token) {
+                plan.failed.push('Target token was not found.');
+                return;
+            }
+            const character = R20.getCharacterFromToken(token);
+            if (!character) {
+                plan.failed.push(CombatService.getTokenName(token) + ' must be linked to a character.');
+                return;
+            }
+            const characterId = String(character.id || token.get('represents') || '').trim();
+            if (!characterId) {
+                plan.failed.push(CombatService.getTokenName(token) + ' has no character id.');
+                return;
+            }
+
+            const tokenId = R20.getTokenId(token);
+            const tokenName = CombatService.getTokenName(token);
+            const characterName = String(character.get('name') || tokenName || 'Token').trim();
+            const commandSet = this.getNativeRollCommandSet(characterId, plan);
+            const playerCommand = String(commandSet.buttonCommand || '').trim();
+            const nativeCommand = String(commandSet.nativeCommand || '').trim();
+            const batchCommand = String(commandSet.batchCommand || nativeCommand || '').trim();
+            if (!batchCommand || (!commandSet.requiresButton && !playerCommand)) {
+                plan.failed.push(tokenName + ' native roll command could not be resolved.');
+                return;
+            }
+
+            const common = {
+                tokenId,
+                tokenName,
+                characterName,
+                command: playerCommand,
+                nativeCommand,
+                batchCommand,
+                tokenControlledBy: String(token.get('controlledby') || ''),
+                characterControlledBy: String(character.get('controlledby') || ''),
+                sheetVersion: commandSet.sheetVersion
+            };
+
+            if (plan.options.saveAbility && commandSet.sheetVersion === '2014' && RuntimeConfig.get('SHEET_2014_CA_ROLLS')) {
+                plan.ca2014PlainRolls.push(common);
+                return;
+            }
+
+            if (plan.trackInitiative) {
+                common.requestId = RollParser.createPendingNativeInitiative({
+                    tokenId,
+                    characterId,
+                    characterName,
+                    tokenName,
+                    batchId: plan.initiativeBatchId
+                });
+            }
+
+            const shouldAskPlayer = R20.isPlayerControlledToken(token, character) &&
+                RuntimeConfig.get('PLAYER_MANUAL_ROLL') &&
+                !!playerCommand;
+            if (shouldAskPlayer) {
+                plan.playerRolls.push({
+                    recipients: this.getNativeRollRecipients(token, character),
+                    card: Render.showNativeSheetRollRequest({
+                        title: plan.options.individualTitle || plan.options.title || 'Roll20 Roll',
+                        tokenName,
+                        rollName: plan.options.rollName || plan.safeMacroName,
+                        label: plan.options.label || 'Roll',
+                        iconHtml: plan.options.iconHtml || '&#127922;',
+                        command: playerCommand,
+                        tooltip: plan.options.tooltip || ('Roll ' + plan.safeMacroName)
+                    })
+                });
+                plan.individual += 1;
+                return;
+            }
+
+            if (plan.trackInitiative && plan.isInitiativeRoll && commandSet.sheetVersion === '2014' && RuntimeConfig.get('SHEET_2014_CA_ROLLS')) {
+                common.batchId = plan.initiativeBatchId;
+                plan.ca2014InitiativeRolls.push(common);
+                return;
+            }
+
+            if (commandSet.requiresButton) plan.batchRolls.push(common);
+            else plan.autoRolls.push(common);
+        },
+
+        resolveImmediate2014Rolls(plan) {
+            const abilityLabel = CombatService.abilityNameToShortLabel(plan.options.saveAbility || '') ||
+                String(plan.options.label || 'SAVE').toUpperCase();
+
+            if (plan.options.rollMode && plan.ca2014InitiativeRolls.length) {
+                const results = [];
+                plan.ca2014InitiativeRolls.forEach((roll) => {
+                    const token = R20.getTokenById(roll.tokenId);
+                    const result = CombatService.rollInitiativeForToken(token, plan.options.rollMode);
+                    RollParser.removePendingNativeInitiativeById(roll.requestId);
+                    if (!result.ok) {
+                        plan.failed.push(result.message || 'Initiative roll failed.');
+                        return;
+                    }
+                    results.push(result);
+                    if (plan.trackInitiative && roll.batchId) {
+                        RollParser.recordPendingNativeInitiativeResult(result.tokenId, result.total, roll.batchId, roll.requestId);
+                    }
+                });
+                if (results.length) R20.direct(Render.showInitiativeResults(results));
+            }
+
+            if (plan.options.rollMode && plan.ca2014PlainRolls.length) {
+                const results = [];
+                plan.ca2014PlainRolls.forEach((roll) => {
+                    const token = R20.getTokenById(roll.tokenId);
+                    const result = CombatService.rollSavingThrowForToken(token, plan.options.saveAbility, plan.options.rollMode);
+                    if (result.ok) results.push(result);
+                    else plan.failed.push(result.message || 'Saving throw failed.');
+                });
+                if (results.length) R20.direct(Render.showSavingThrowResults(results, abilityLabel));
+            }
+        },
+
+        sendPlayerNativeRollRequests(plan) {
+            plan.playerRolls.forEach((roll) => {
+                const recipients = Array.isArray(roll.recipients) && roll.recipients.length ? roll.recipients : ['GM'];
+                recipients.forEach((recipient) => R20.whisper(recipient, roll.card));
+            });
+        },
+
+        send2014NativeRollRequests(plan) {
+            const abilityLabel = CombatService.abilityNameToShortLabel(plan.options.saveAbility || '') ||
+                String(plan.options.label || 'SAVE').toUpperCase();
+
+            if (!plan.options.rollMode && plan.ca2014InitiativeRolls.length) {
+                R20.whisper('GM', Render.showNativeBatchRollRequest({
+                    title: '2014 Initiative Rolls',
+                    intro: 'Roll <strong>Initiative</strong> for:',
+                    names: plan.ca2014InitiativeRolls.map((roll) => roll.tokenName || roll.characterName || 'Token'),
+                    label: 'Init',
+                    iconHtml: plan.options.iconHtml || '&#127922;',
+                    command: '!combatAssistant roll2014init &#63;{Roll Mode|Auto,auto|Normal,normal|Advantage,advantage|Disadvantage,disadvantage} ' +
+                        Utils.encodeJsonPayload({
+                            batchId: plan.initiativeBatchId,
+                            rolls: plan.ca2014InitiativeRolls.map((roll) => ({
+                                tokenId: roll.tokenId,
+                                requestId: roll.requestId
+                            })).filter((roll) => roll.tokenId)
+                        }),
+                    tooltip: 'Roll all listed 2014 initiatives with Combat Assistant'
+                }));
+            }
+
+            if (!plan.options.rollMode && plan.ca2014PlainRolls.length) {
+                R20.whisper('GM', Render.showNativeBatchRollRequest({
+                    title: '2014 ' + abilityLabel + ' Saving Throws',
+                    intro: 'Roll <strong>' + Utils.escapeHtml(abilityLabel) + '</strong> saving throws:',
+                    names: plan.ca2014PlainRolls.map((roll) => roll.tokenName || roll.characterName || 'Token'),
+                    label: 'Roll',
+                    iconHtml: plan.options.iconHtml || '&#127922;',
+                    command: '!combatAssistant roll2014plain &#63;{Roll Mode|Normal,normal|Advantage,advantage|Disadvantage,disadvantage} ' +
+                        Utils.encodeJsonPayload({
+                            ability: plan.options.saveAbility,
+                            tokenIds: plan.ca2014PlainRolls.map((roll) => roll.tokenId).filter(Boolean)
+                        }),
+                    tooltip: 'Roll all listed 2014 saving throws with Combat Assistant'
+                }));
+            }
+        },
+
+        sendNativeBatchRequest(plan) {
+            if (!plan.batchRolls.length) return;
+            const batch = R20.createNativeRollBatchAbility(
+                plan.batchRolls.map((roll) => R20.nativeBatchExecutionCommand(roll))
+            );
+            if (!batch.ok) {
+                const message = batch.message || 'Could not create Roll All button.';
+                plan.failed.push(message);
+                Render.sendWhisperMessage('GM', 'Roll20 Rolls', message, 'failure');
+                return;
+            }
+            R20.whisper('GM', Render.showNativeBatchRollRequest({
+                title: plan.options.batchTitle || plan.options.title || 'Roll20 Rolls',
+                intro: plan.options.batchIntro || 'Roll for:',
+                names: plan.batchRolls.map((roll) => roll.tokenName || roll.characterName || 'Token'),
+                label: plan.options.batchLabel || 'Roll All',
+                iconHtml: plan.options.iconHtml || '&#127922;',
+                command: batch.command,
+                tooltip: plan.options.batchTooltip || 'Roll all listed tokens'
+            }));
+        },
+
+        sendDeferredNativeRollRequests(plan) {
+            this.sendPlayerNativeRollRequests(plan);
+            this.send2014NativeRollRequests(plan);
+            this.sendNativeBatchRequest(plan);
+        },
+
+        scheduleNativeRollPlan(plan) {
+            const sendDeferred = () => this.sendDeferredNativeRollRequests(plan);
+            if (!plan.autoRolls.length) {
+                sendDeferred();
+                return;
+            }
+            if (plan.trackInitiative) {
+                const queued = RollParser.setNativeInitiativeAutoQueue(plan.initiativeBatchId, plan.autoRolls, sendDeferred);
+                if (queued) RollParser.advanceNativeInitiativeAutoQueue(plan.initiativeBatchId);
+                else sendDeferred();
+                return;
+            }
+            const rollDelay = Math.max(100, Utils.toInt(plan.options.rollDelayMs, 750));
+            R20.sendNativeCommandsSequentially(
+                plan.autoRolls.map((roll) => roll.nativeCommand || roll.batchCommand || ''),
+                rollDelay
+            );
+            setTimeout(sendDeferred, (plan.autoRolls.length * rollDelay) + 250);
+        },
+
+        summarizeNativeRollPlan(plan) {
+            return {
+                sent: plan.individual + plan.autoRolls.length + plan.batchRolls.length +
+                    plan.ca2014PlainRolls.length + plan.ca2014InitiativeRolls.length,
+                individual: plan.individual,
+                automatic: plan.autoRolls.length + (plan.options.rollMode
+                    ? plan.ca2014InitiativeRolls.length + plan.ca2014PlainRolls.length
+                    : 0),
+                batch: plan.batchRolls.length + (plan.options.rollMode
+                    ? 0
+                    : plan.ca2014PlainRolls.length + plan.ca2014InitiativeRolls.length),
+                failed: plan.failed
+            };
+        },
+
+        sendNativeRollBatchForTokens(tokens, macroName, options) {
+            const plan = this.createNativeRollPlan(tokens, macroName, options);
+            if (!plan.safeMacroName) {
+                return { sent: 0, individual: 0, automatic: 0, batch: 0, failed: ['Native Roll20 macro could not be resolved.'] };
+            }
+            (Array.isArray(tokens) ? tokens : []).forEach((token) => this.classifyNativeRollToken(token, plan));
+            this.resolveImmediate2014Rolls(plan);
+            this.scheduleNativeRollPlan(plan);
+            return this.summarizeNativeRollPlan(plan);
         },
 
         async handle(ctx) {
@@ -4480,7 +8496,7 @@ const CombatAssistant = (() => {
                 const key = args[1] || '';
                 const value = args.slice(2).join(' ');
                 const result = RuntimeConfig.set(key, value);
-                if (!result.ok) Render.sendWhisperMessage(ctx.who, 'Settings', result.message, 'failure');
+                if (!result.ok) Render.sendWhisperMessage(ctx.who, result.title || 'Settings', result.message, 'failure');
                 else Render.showConfigMenu(ctx.who);
                 return;
             }
@@ -4494,6 +8510,30 @@ const CombatAssistant = (() => {
                 await this.handlePlayerActionUse(ctx, args.slice(1));
                 return;
             }
+            if (action === 'usearea') {
+                await this.handlePlayerAreaActionUse(ctx, args.slice(1));
+                return;
+            }
+            if (action === 'conc') {
+                this.handleConcentrationRecall(ctx, args.slice(1));
+                return;
+            }
+            if (action === 'conend') {
+                this.handleConcentrationEnd(ctx, args.slice(1));
+                return;
+            }
+            if (action === 'npcset') {
+                await this.handleNpcSetAction(ctx, args.slice(1));
+                return;
+            }
+            if (action === 'npcarea') {
+                await this.handleNpcAreaSetAction(ctx, args.slice(1));
+                return;
+            }
+            if (action === 'rollsave') {
+                await this.handleCombatAssistantSaveRoll(ctx, args.slice(1));
+                return;
+            }
             if (action === 'roll2014save') {
                 await this.handle2014CombatAssistantSaveRoll(ctx, args.slice(1));
                 return;
@@ -4504,6 +8544,10 @@ const CombatAssistant = (() => {
             }
             if (action === 'roll2014init') {
                 this.handle2014CombatAssistantInitiativeRoll(ctx, args.slice(1));
+                return;
+            }
+            if (action === 'cleanupbatch') {
+                this.handleBatchHelperCleanup(ctx, args.slice(1));
                 return;
             }
             if (action === 'deal') {
@@ -4527,10 +8571,304 @@ const CombatAssistant = (() => {
                 return;
             }
             if (action === 'test') {
-                this.handleTest(ctx);
+                this.handleTest(ctx, args.slice(1));
                 return;
             }
-            Render.sendWhisperMessage(ctx.who, 'Unknown Command', 'Use <code>!combatAssistant menu</code> or <code>!combat-assistant help</code>.', 'warning');
+            if (action === 'testrun') {
+                this.handleTestRun(ctx, args.slice(1));
+                return;
+            }
+            Render.sendWhisperMessage(ctx.who, 'Unknown Command', 'Use <code style="color:rgb(52,203,116);font-weight:900;">!ca menu</code> or <code>!ca help</code>.', 'warning');
+        },
+
+        getAccessibleConcentrationEntries(ctx, explicitTokenId) {
+            const root = State.get();
+            root.concentration = root.concentration || {};
+            const selectedIds = R20.getSelectedTokens(ctx.msg).map((token) => R20.getTokenId(token)).filter(Boolean);
+            const wantedTokenId = String(explicitTokenId || '').trim();
+            const entries = [];
+            Object.keys(root.concentration).forEach((tokenId) => {
+                const entry = root.concentration[tokenId] || {};
+                const casterTokenId = String(entry.casterTokenId || tokenId || '').trim();
+                if (wantedTokenId && casterTokenId !== wantedTokenId) return;
+                if (!wantedTokenId && selectedIds.length && selectedIds.indexOf(casterTokenId) < 0) return;
+                const token = R20.getTokenById(casterTokenId);
+                if (!token || !this.canUseTokenButton(ctx, token)) return;
+                entries.push(entry);
+            });
+            return entries;
+        },
+
+        concentrationButtonCard(entry) {
+            entry = entry || {};
+            const request = State.getPlayerActionRequest(entry.actionId);
+            const payload = request && request.payload ? request.payload : {};
+            const casterToken = R20.getTokenById(entry.casterTokenId);
+            const buttons = Render.areaRollControlButtons({
+                actionId: entry.actionId,
+                casterTokenId: entry.casterTokenId,
+                isConcentration: true,
+                rollTooltip: 'Roll the active concentration area again'
+            });
+            const areaInfo = payload.areaInfo && payload.areaInfo.isArea ? payload.areaInfo : null;
+            const body = Render.iconButtonTableHtml(buttons, {
+                columns: buttons.length,
+                footerHtml: areaInfo
+                    ? Render.playerAreaMarkerFooterHtml(areaInfo, payload)
+                    : 'Active concentration area.',
+                footer: ''
+            });
+            return Html.card({
+                title: 'Concentration',
+                body,
+                buildOptions: {
+                    titleHtml: Render.attackPromptTitleHtml({
+                        attackName: entry.spellName || payload.sourceAction || 'Concentration',
+                        tokenName: casterToken ? CombatService.getTokenName(casterToken) : (payload.sourceName || 'Caster'),
+                        tokenImgsrc: casterToken && Utils.isFunction(casterToken.get) ? String(casterToken.get('imgsrc') || payload.sourceImgsrc || '') : String(payload.sourceImgsrc || ''),
+                        isSaveAttack: payload.mode === 'save',
+                        saveAbility: payload.saveAbility,
+                        saveDc: payload.mode === 'save' ? payload.challenge : 0,
+                        attackTotal: payload.mode === 'attack' ? payload.challenge : 0,
+                        damageRolls: payload.damageRolls,
+                        damageTotal: Array.isArray(payload.damageRolls) ? payload.damageRolls.reduce((sum, roll) => sum + Math.max(0, Utils.toInt(roll && roll.total, 0)), 0) : 0,
+                        damageType: Array.isArray(payload.damageRolls) && payload.damageRolls.length ? payload.damageRolls[0].damageType : 'normal'
+                    })
+                }
+            });
+        },
+
+        rerollConcentrationDamage(entry) {
+            entry = entry || {};
+            const request = State.getPlayerActionRequest(entry.actionId);
+            if (!request || !request.payload) return false;
+            const formula = CombatService.getPrimaryDamageFormula(request.payload);
+            if (!formula) return false;
+            const reroll = CombatService.rollDamageFormula(formula);
+            if (!reroll.ok) {
+                Render.sendWhisperMessage('GM', 'Concentration Damage', Utils.escapeHtml(reroll.message || 'Damage formula could not be rerolled; using the stored damage.'), 'warning');
+                return false;
+            }
+            const baseRolls = Array.isArray(request.payload.damageRolls) && request.payload.damageRolls.length ? request.payload.damageRolls : [{ damageType: request.payload.damageType || 'normal' }];
+            const damageType = CombatService.normalizeDamageType(baseRolls[0] && baseRolls[0].damageType || request.payload.damageType || 'normal');
+            request.payload.damageRolls = [{ total: reroll.total, damageType, formula: reroll.formula }];
+            request.payload.damageTotal = reroll.total;
+            request.payload.damageType = damageType;
+            request.payload.damageFormula = reroll.formula;
+            const casterToken = R20.getTokenById(entry.casterTokenId);
+            Render.sendConcentrationSpellReroll({
+                casterImgsrc: casterToken && Utils.isFunction(casterToken.get) ? String(casterToken.get('imgsrc') || '') : '',
+                spellName: entry.spellName || request.attackName || request.payload.sourceAction || 'Concentration',
+                formula: reroll.formula,
+                total: reroll.total,
+                diceValues: reroll.diceValues,
+                modifier: reroll.modifier
+            });
+            return true;
+        },
+
+        handleConcentrationRecall(ctx, args) {
+            const entries = this.getAccessibleConcentrationEntries(ctx, args[0] || '');
+            if (!entries.length) {
+                Render.sendWhisperMessage(ctx.who, 'Concentration', 'No active concentration area was found for your token.', 'warning');
+                return;
+            }
+            if (entries.length === 1) {
+                this.rerollConcentrationDamage(entries[0]);
+                R20.whisper(ctx.who, this.concentrationButtonCard(entries[0]));
+                if (!ctx.isGM) R20.whisper('GM', this.concentrationButtonCard(entries[0]));
+                return;
+            }
+            const buttons = entries.map((entry) => {
+                const token = R20.getTokenById(entry.casterTokenId);
+                return Render.iconButtonHtml({
+                    iconHtml: '&#9201;&#65039;',
+                    label: token ? CombatService.getTokenName(token) : (entry.spellName || 'Con'),
+                    command: '!combatAssistant conc ' + Utils.attrSafe(entry.casterTokenId),
+                    backgroundColor: 'rgba(80,80,120,0.95)',
+                    tooltip: 'Show this concentration area controls'
+                });
+            });
+            R20.whisper(ctx.who, Html.card({
+                title: 'Concentration',
+                body: Render.iconButtonTableHtml(buttons, { columns: Math.min(5, Math.max(1, buttons.length)), footer: 'Choose which active concentration area to recall.' })
+            }));
+        },
+
+        handleConcentrationEnd(ctx, args) {
+            const tokenId = String(args[0] || '').trim();
+            const actionId = String(args[1] || '').trim();
+            let entry = tokenId ? State.getConcentrationByTokenId(tokenId) : null;
+            if (!entry && actionId) entry = State.getConcentrationByActionId(actionId);
+            if (!entry) {
+                Render.sendWhisperMessage(ctx.who, 'Concentration', 'No active concentration was found.', 'warning');
+                return;
+            }
+            const token = R20.getTokenById(entry.casterTokenId);
+            if (token && !this.canUseTokenButton(ctx, token)) {
+                Render.sendWhisperMessage(ctx.who, 'Permission Denied', 'You do not control this concentrating token.', 'failure');
+                return;
+            }
+            CombatService.endConcentrationByTokenId(entry.casterTokenId, 'ended manually');
+        },
+
+        isNpcSetSourceToken(token) {
+            if (!token || !Utils.isFunction(token.get)) return false;
+            const character = R20.getCharacterFromToken(token);
+            return !R20.isPlayerControlledToken(token, character);
+        },
+
+        buildNpcActionRequest(ctx, sourceToken, data) {
+            const safeData = data && typeof data === 'object' ? data : {};
+            const character = R20.getCharacterFromToken(sourceToken);
+            const sourceTokenId = R20.getTokenId(sourceToken);
+            const sourceCharacterId = character ? String(character.id || sourceToken.get('represents') || '').trim() : String(sourceToken.get('represents') || '').trim();
+            const sourcePageId = R20.getTokenPageId(sourceToken);
+            const saveAbility = CombatService.normalizeAbilityName(safeData.saveAbility || '');
+            const damageRolls = Array.isArray(safeData.damageRolls) && safeData.damageRolls.length
+                ? safeData.damageRolls
+                : [{ total: Math.max(0, Utils.toInt(safeData.damageTotal, 0)), damageType: safeData.damageType || 'normal', formula: safeData.damageFormula || 'Roll20' }];
+            const areaInfo = safeData.areaInfo && safeData.areaInfo.isArea ? safeData.areaInfo : { isArea: false };
+            const payload = {
+                type: 'damage',
+                mode: String(safeData.mode || (saveAbility ? 'save' : 'attack')).toLowerCase(),
+                challenge: Math.max(0, Utils.toInt(safeData.challenge || safeData.saveDc || safeData.attackTotal, 0)),
+                attackNatural: Math.max(0, Utils.toInt(safeData.attackNatural, 0)),
+                isCritical: !!safeData.isCritical,
+                saveAbility,
+                halfOnSuccess: !!safeData.halfOnSuccess,
+                halfOnSuccessKnown: !!safeData.halfOnSuccessKnown,
+                damageRolls,
+                sourceName: CombatService.getTokenName(sourceToken),
+                sourceAction: String(safeData.sourceAction || safeData.attackName || 'NPC Attack'),
+                sourceImgsrc: String(sourceToken.get('imgsrc') || safeData.sourceImgsrc || ''),
+                rangeText: String(safeData.rangeText || safeData.range || ''),
+                isSpellAction: !!safeData.isSpellAction,
+                isConcentration: !!safeData.isConcentration,
+                lightInfo: safeData.lightInfo && safeData.lightInfo.hasLight ? safeData.lightInfo : { hasLight: false },
+                areaInfo,
+                areaOptions: Array.isArray(safeData.areaOptions) && safeData.areaOptions.length ? safeData.areaOptions : R20.getAreaInfoOptions(areaInfo),
+                casterTokenId: sourceTokenId,
+                casterCharacterId: sourceCharacterId,
+                casterPageId: sourcePageId,
+                ignoreRangeCheck: true,
+                npcSet: true,
+                forceProjectileFx: !areaInfo.isArea
+            };
+            const actionId = State.createPlayerActionRequest({
+                type: 'damage',
+                payload,
+                sourceTokenId,
+                sourceCharacterId,
+                sourcePageId,
+                characterId: sourceCharacterId,
+                characterName: character ? String(character.get('name') || '') : CombatService.getTokenName(sourceToken),
+                attackName: payload.sourceAction,
+                uses: 1,
+                npcSet: true,
+                createdByPlayerId: String(ctx && ctx.playerId || '').trim()
+            });
+            return {
+                actionId,
+                request: State.getPlayerActionRequest(actionId),
+                payload
+            };
+        },
+
+        async handleNpcSetAction(ctx, args) {
+            if (!ctx.isGM) {
+                Render.sendWhisperMessage(ctx.who, 'Permission Denied', 'Only the GM can set NPC attacks.', 'failure');
+                return;
+            }
+            const data = Utils.decodeJsonPayload(args[0] || '', null);
+            const sourceId = String(args[1] || '').trim();
+            const targetId = String(args[2] || '').trim();
+            const sourceToken = R20.getTokenById(sourceId);
+            const targetToken = R20.getTokenById(targetId);
+            if (!data || !sourceToken || !targetToken) {
+                Render.sendWhisperMessage(ctx.who, 'NPC SET', 'Choose an NPC source token and a target token.', 'warning');
+                return;
+            }
+            if (!this.isNpcSetSourceToken(sourceToken)) {
+                Render.sendWhisperMessage(ctx.who, 'NPC Source Required', 'The selected source token has a player controller. NPC SET is only for uncontrolled NPC tokens.', 'warning');
+                return;
+            }
+            const pageId = R20.getTokenPageId(sourceToken);
+            if (pageId && R20.getTokenPageId(targetToken) && pageId !== R20.getTokenPageId(targetToken)) {
+                Render.sendWhisperMessage(ctx.who, 'NPC SET', 'Source and target must be on the same page.', 'warning');
+                return;
+            }
+            const built = this.buildNpcActionRequest(ctx, sourceToken, data);
+            await this.handlePlayerActionUse(ctx, [built.actionId, targetId]);
+        },
+
+        async handleNpcAreaSetAction(ctx, args) {
+            if (!ctx.isGM) {
+                Render.sendWhisperMessage(ctx.who, 'Permission Denied', 'Only the GM can set NPC area attacks.', 'failure');
+                return;
+            }
+            if (!RuntimeConfig.get('PLAYER_TOKEN_AREA_MARK')) {
+                Render.sendWhisperMessage(ctx.who, 'NPC Area SET Disabled', 'Enable Player Token Area Mark to use NPC SET for area attacks.', 'warning');
+                return;
+            }
+            const data = Utils.decodeJsonPayload(args[0] || '', null);
+            const sourceId = String(args[1] || '').trim();
+            const sourceToken = R20.getTokenById(sourceId);
+            const areaInfo = data && data.areaInfo && data.areaInfo.isArea ? data.areaInfo : null;
+            if (!data || !sourceToken || !areaInfo) {
+                Render.sendWhisperMessage(ctx.who, 'NPC Area SET', 'Choose an NPC source token for this area attack.', 'warning');
+                return;
+            }
+            if (!this.isNpcSetSourceToken(sourceToken)) {
+                Render.sendWhisperMessage(ctx.who, 'NPC Source Required', 'The selected source token has a player controller. NPC SET is only for uncontrolled NPC tokens.', 'warning');
+                return;
+            }
+            const built = this.buildNpcActionRequest(ctx, sourceToken, data);
+            if (!built.request) {
+                Render.sendWhisperMessage(ctx.who, 'NPC Area SET', 'The NPC area request could not be created.', 'failure');
+                return;
+            }
+            const markerResult = R20.createPlayerAreaMarkers(built.request, sourceToken, ctx.playerId || '');
+            if (markerResult.ok && markerResult.alternatives.length) {
+                built.request.areaMarkerAlternatives = markerResult.alternatives;
+                built.request.markerTokenIds = markerResult.markerIds.slice();
+                const firstAlternative = markerResult.alternatives[0];
+                built.request.markerTokenId = firstAlternative.markerTokenId;
+                built.request.markerName = firstAlternative.markerName;
+                built.request.areaMarkerGroup = firstAlternative.markerGroup || null;
+            } else {
+                Render.sendWhisperMessage(ctx.who, 'NPC Area Marker', markerResult.message || 'Area marker could not be created.', 'failure');
+                return;
+            }
+            const buttons = Render.areaRollControlButtons({
+                actionId: built.actionId,
+                casterTokenId: R20.getTokenId(sourceToken),
+                isConcentration: built.payload.isConcentration && RuntimeConfig.get('CONCENTRATION_TRACKING'),
+                rollTooltip: 'Move the NPC area marker, then roll every token inside it'
+            });
+            const body = Render.iconButtonTableHtml(buttons, {
+                columns: buttons.length,
+                footerHtml: Render.playerAreaMarkerFooterHtml(areaInfo, built.payload),
+                footer: ''
+            }) + (markerResult.message ? '<div style="padding-top:4px;color:rgb(235,160,90);font-size:10px;text-align:center;">' + Utils.escapeHtml(markerResult.message) + '</div>' : '');
+            R20.whisper('GM', Html.card({
+                title: 'NPC Area Ready',
+                body,
+                buildOptions: {
+                    titleHtml: Render.attackPromptTitleHtml({
+                        attackName: built.payload.sourceAction,
+                        tokenName: built.payload.sourceName,
+                        tokenImgsrc: built.payload.sourceImgsrc,
+                        isSaveAttack: built.payload.mode === 'save',
+                        saveAbility: built.payload.saveAbility,
+                        saveDc: built.payload.mode === 'save' ? built.payload.challenge : 0,
+                        attackTotal: built.payload.mode === 'attack' ? built.payload.challenge : 0,
+                        damageRolls: built.payload.damageRolls,
+                        damageTotal: built.payload.damageRolls.reduce((sum, roll) => sum + Math.max(0, Utils.toInt(roll && roll.total, 0)), 0),
+                        damageType: built.payload.damageRolls.length ? built.payload.damageRolls[0].damageType : 'normal'
+                    })
+                }
+            }));
         },
 
         async handlePlayerActionUse(ctx, args) {
@@ -4554,20 +8892,135 @@ const CombatAssistant = (() => {
                 Render.sendWhisperMessage(ctx.who, 'Target Required', 'The selected target token could not be found.', 'warning');
                 return;
             }
-            this.resolvePlayerActionSourceOnTargetPage(request, target);
-            if (!State.markPlayerActionUsed(actionId)) {
-                Render.sendWhisperMessage(ctx.who, 'Action Expired', 'This single-use button has already been used.', 'warning');
+            const sourceToken = this.resolvePlayerActionSourceOnTargetPage(request, target);
+            const rangeCheck = CombatService.validatePlayerActionRange(request, target);
+            if (!rangeCheck.ok) {
+                Render.sendWhisperMessage(ctx.who, 'Out of Range', rangeCheck.message || 'The selected target is not within range for this action.', 'failure');
+                return;
+            }
+            request.usedTargetIds = Array.isArray(request.usedTargetIds) ? request.usedTargetIds : [];
+            if (request.usedTargetIds.indexOf(targetId) >= 0) {
+                Render.sendWhisperMessage(ctx.who, 'Target Already Used', 'This area button was already used on that target.', 'warning');
+                return;
+            }
+            if (!State.reservePlayerAction(actionId, targetId)) {
+                Render.sendWhisperMessage(ctx.who, 'Action Busy', 'This action is already being resolved or has no remaining uses.', 'warning');
                 return;
             }
             const useCtx = Object.assign({}, ctx, {
                 msg: Object.assign({}, ctx.msg || {}, { selected: [] }),
                 fromPlayerAction: true
             });
-            if (String(request.type || '').toLowerCase() === 'heal') {
-                await this.handleHeal(useCtx, [Utils.encodeJsonPayload(request.payload || {}), targetId]);
+            CombatEffects.playProjectile(request, target, sourceToken);
+            try {
+                const outcome = String(request.type || '').toLowerCase() === 'heal'
+                    ? await this.handleHeal(useCtx, [Utils.encodeJsonPayload(request.payload || {}), targetId])
+                    : await this.handleDeal(useCtx, [Utils.encodeJsonPayload(request.payload || {}), targetId]);
+                if (outcome && (outcome.applied > 0 || outcome.queued > 0)) State.commitPlayerAction(actionId, targetId);
+                else State.releasePlayerAction(actionId, targetId);
+            } catch (error) {
+                State.releasePlayerAction(actionId, targetId);
+                throw error;
+            }
+        },
+
+        async handlePlayerAreaActionUse(ctx, args) {
+            const actionId = String(args[0] || '').trim();
+            const request = State.getPlayerActionRequest(actionId);
+            const concentrationAreaActive = !!(request && request.concentrationAreaActive);
+            if (!request || (request.used && !concentrationAreaActive)) {
+                Render.sendWhisperMessage(ctx.who, 'Action Expired', 'This area button has already been used or expired.', 'warning');
                 return;
             }
-            await this.handleDeal(useCtx, [Utils.encodeJsonPayload(request.payload || {}), targetId]);
+            if (!this.canUsePlayerActionRequest(ctx, request)) {
+                Render.sendWhisperMessage(ctx.who, 'Permission Denied', 'This area action belongs to a token you do not control.', 'failure');
+                return;
+            }
+            const activeAlternatives = R20.getActiveAreaMarkerAlternatives(request);
+            if (activeAlternatives.length > 1) {
+                const labels = activeAlternatives.map((alternative) => String(alternative && alternative.areaInfo && (alternative.areaInfo.label || alternative.areaInfo.shape) || 'Area'));
+                Render.sendWhisperMessage(
+                    ctx.who,
+                    'Choose One Area',
+                    'More than one area marker is still on the map: <strong>' + Utils.escapeHtml(labels.join(' and ')) + '</strong>. Delete the marker you will not use, then press Roll again.',
+                    'warning'
+                );
+                return;
+            }
+            if (!activeAlternatives.length) {
+                Render.sendWhisperMessage(ctx.who, 'Area Marker Missing', 'No complete area marker was found. Cast the spell again to create a new marker.', 'failure');
+                return;
+            }
+            R20.activateAreaMarkerAlternative(request, activeAlternatives[0]);
+            const marker = R20.findPlayerAreaMarker(request);
+            if (!marker) {
+                Render.sendWhisperMessage(ctx.who, 'Area Marker Missing', 'The selected area marker token could not be found.', 'failure');
+                return;
+            }
+            const rangeCheck = CombatService.validatePlayerAreaMarkerRange(request, marker);
+            if (!rangeCheck.ok) {
+                Render.sendWhisperMessage(ctx.who, 'Out of Range', rangeCheck.message || 'The area marker is not within range for this action.', 'failure');
+                return;
+            }
+            CombatEffects.playThrownAreaExplosion(request, request.payload || {}, marker);
+            const targets = R20.getTokensInsideAreaMarker(marker, request);
+            if (!targets.length) {
+                Render.sendWhisperMessage(ctx.who, 'Area Targets', 'No target tokens were found inside the area marker.', 'warning');
+                return;
+            }
+            const reservationKey = '__area__';
+            if (!State.reservePlayerAction(actionId, reservationKey)) {
+                Render.sendWhisperMessage(ctx.who, 'Action Busy', 'This area action is already being resolved or has expired.', 'warning');
+                return;
+            }
+            const payload = Object.assign({}, request.payload || {});
+            CombatEffects.playSelfAreaNova(request, payload);
+            const targetIds = targets.map((token) => R20.getTokenId(token)).filter(Boolean);
+            const concentrationTracking = RuntimeConfig.get('CONCENTRATION_TRACKING');
+            const shouldStartConcentrationArea = !!(concentrationTracking && payload.isConcentration && !concentrationAreaActive);
+            const keepMarkerUntilRollsFinish = !concentrationAreaActive && !payload.isConcentration && RuntimeConfig.get('PLAYER_AREA_MARKER_KEEP_UNTIL_ROLLED');
+            let persistentAreaStarted = false;
+            if (keepMarkerUntilRollsFinish) {
+                payload.playerAreaActionId = actionId;
+                payload.playerAreaMarkerPersistent = true;
+                payload.areaTargetIds = targetIds.slice();
+                persistentAreaStarted = State.beginPersistentAreaMarkerResolution(actionId, targetIds);
+            }
+            const useCtx = Object.assign({}, ctx, {
+                msg: Object.assign({}, ctx.msg || {}, {
+                    selected: targetIds.map((id) => ({ _id: id, _type: 'graphic' }))
+                }),
+                fromPlayerAction: true
+            });
+            Render.sendWhisperMessage(ctx.who, 'Area Targets', '<strong>' + Utils.escapeHtml(String(targets.length)) + '</strong> target(s) found inside the area marker.', 'normal');
+            try {
+                const outcome = String(request.type || '').toLowerCase() === 'heal'
+                    ? await this.handleHeal(useCtx, [Utils.encodeJsonPayload(payload)])
+                    : await this.handleDeal(useCtx, [Utils.encodeJsonPayload(payload)]);
+                if (concentrationAreaActive || shouldStartConcentrationArea) {
+                    if (shouldStartConcentrationArea) {
+                        const sourceToken = this.resolvePlayerActionSourceOnTargetPage(request, marker) || R20.getAreaMarkerSourceToken(request);
+                        CombatService.startConcentrationForRequest(request, sourceToken);
+                    }
+                    State.releasePlayerAction(actionId, reservationKey);
+                    const spellName = Utils.escapeHtml(String(request.attackName || payload.sourceAction || 'Concentration'));
+                    Render.sendWhisperMessage(ctx.who, 'Concentration', 'You have concentration in <strong style="color:rgb(245,220,80);">' + spellName + '</strong>. Use <code style="color:rgb(52,203,116);font-weight:900;">!ca conc</code> to recall this roll.', 'normal');
+                } else if (outcome && (outcome.applied > 0 || outcome.queued > 0)) {
+                    if (!persistentAreaStarted) {
+                        State.commitPlayerAction(actionId, reservationKey);
+                        State.removePlayerActionMarkers(request);
+                    } else if (outcome.queued <= 0) {
+                        State.removePersistentAreaMarkerRequest(actionId);
+                    }
+                } else {
+                    if (persistentAreaStarted) State.removePersistentAreaMarkerRequest(actionId);
+                    else State.releasePlayerAction(actionId, reservationKey);
+                }
+            } catch (error) {
+                if (persistentAreaStarted) State.removePersistentAreaMarkerRequest(actionId);
+                else State.releasePlayerAction(actionId, reservationKey);
+                throw error;
+            }
         },
 
         async handle2014CombatAssistantSaveRoll(ctx, args) {
@@ -4588,11 +9041,14 @@ const CombatAssistant = (() => {
                 if (!pending) continue;
                 const token = R20.getTokenById(pending.tokenId);
                 if (!token) {
+                    CombatService.completePersistentAreaMarkerTarget(pending.payload || {}, pending.tokenId);
                     Render.sendWhisperMessage(ctx.who, 'Damage Blocked', 'The pending saving throw target token was not found.', 'failure');
                     continue;
                 }
-                const roll = CombatService.rollSavingThrowForToken(token, pending.rollName || (pending.payload && pending.payload.saveAbility) || '', mode);
+                const rollMode = CombatService.normalizeRollMode(pending.forcedRollMode || mode);
+                const roll = CombatService.rollSavingThrowForToken(token, pending.rollName || (pending.payload && pending.payload.saveAbility) || '', rollMode);
                 if (!roll.ok) {
+                    CombatService.completePersistentAreaMarkerTarget(pending.payload || {}, token);
                     Render.sendWhisperMessage(ctx.who, '2014 Saving Throw', roll.message || 'Saving throw failed.', 'failure');
                     continue;
                 }
@@ -4602,18 +9058,86 @@ const CombatAssistant = (() => {
                     nativeSaveModifier: roll.modifier,
                     nativeSaveRolls: roll.rolls,
                     nativeSaveMode: roll.mode,
+                    nativeSaveRollModeReason: String(pending.forcedRollReason || ''),
                     nativeSaveRollName: (CombatService.abilityNameToShortLabel(roll.ability) || 'SAVE') + ' Save',
                     nativeSaveCharacterName: roll.characterName
                 });
+                if (pending.concentrationCheck || damagePayload.concentrationCheck) {
+                    roll.rollModeReason = pending.forcedRollReason || '';
+                    R20.direct(Render.showSavingThrowResults([roll], CombatService.abilityNameToShortLabel(roll.ability) || 'SAVE'));
+                    CombatService.resolveConcentrationSave(token, roll, pending);
+                    applied += 1;
+                    continue;
+                }
                 const result = await CombatService.applyDamageToToken(token, damagePayload);
                 if (!result.ok) {
+                    CombatService.completePersistentAreaMarkerTarget(damagePayload, token);
                     Render.sendWhisperMessage(ctx.who, 'Damage Blocked', result.message || 'Could not apply damage after the saving throw.', 'failure');
                     continue;
                 }
                 Render.sendDamageResult(result);
+                CombatService.completePersistentAreaMarkerTarget(damagePayload, token);
                 applied += 1;
             }
             if (!applied) Render.sendWhisperMessage(ctx.who, '2014 Saving Throws', 'No pending saving throws could be resolved.', 'warning');
+        },
+
+        async handleCombatAssistantSaveRoll(ctx, args) {
+            const requestId = String(args[0] || '').trim();
+            const requestedMode = CombatService.normalizeRollMode(args[1] || 'normal');
+            if (!requestId) {
+                Render.sendWhisperMessage(ctx.who, 'Saving Throw', 'The saving throw request was not found.', 'warning');
+                return;
+            }
+            const pending = RollParser.getPendingNativeSaveById(requestId);
+            if (!pending) {
+                Render.sendWhisperMessage(ctx.who, 'Saving Throw', 'This saving throw request expired or was already used.', 'warning');
+                return;
+            }
+            const token = R20.getTokenById(pending.tokenId);
+            if (!token) {
+                RollParser.consumePendingNativeSaveById(requestId);
+                CombatService.completePersistentAreaMarkerTarget(pending.payload || {}, pending.tokenId);
+                Render.sendWhisperMessage(ctx.who, 'Damage Blocked', 'The pending saving throw target token was not found.', 'failure');
+                return;
+            }
+            if (!this.canUseTokenButton(ctx, token)) {
+                Render.sendWhisperMessage(ctx.who, 'Permission Denied', 'You do not control this token.', 'failure');
+                return;
+            }
+            RollParser.consumePendingNativeSaveById(requestId);
+            const mode = CombatService.normalizeRollMode(pending.forcedRollMode || requestedMode);
+            const roll = CombatService.rollSavingThrowForToken(token, pending.rollName || (pending.payload && pending.payload.saveAbility) || '', mode);
+            if (!roll.ok) {
+                CombatService.completePersistentAreaMarkerTarget(pending.payload || {}, token);
+                Render.sendWhisperMessage(ctx.who, 'Saving Throw', roll.message || 'Saving throw failed.', 'failure');
+                return;
+            }
+            roll.rollModeReason = pending.forcedRollReason || '';
+            if (pending.concentrationCheck || (pending.payload && pending.payload.concentrationCheck)) {
+                R20.direct(Render.showSavingThrowResults([roll], CombatService.abilityNameToShortLabel(roll.ability) || 'SAVE'));
+                CombatService.resolveConcentrationSave(token, roll, pending);
+                return;
+            }
+            R20.direct(Render.showSavingThrowResults([roll], CombatService.abilityNameToShortLabel(roll.ability) || 'SAVE'));
+            const damagePayload = Object.assign({}, pending.payload || {}, {
+                nativeSaveTotal: roll.total,
+                nativeSaveNatural: roll.natural,
+                nativeSaveModifier: roll.modifier,
+                nativeSaveRolls: roll.rolls,
+                nativeSaveMode: roll.mode,
+                nativeSaveRollModeReason: String(pending.forcedRollReason || ''),
+                nativeSaveRollName: (CombatService.abilityNameToShortLabel(roll.ability) || 'SAVE') + ' Save',
+                nativeSaveCharacterName: roll.characterName
+            });
+            const result = await CombatService.applyDamageToToken(token, damagePayload);
+            if (!result.ok) {
+                CombatService.completePersistentAreaMarkerTarget(damagePayload, token);
+                Render.sendWhisperMessage(ctx.who, 'Damage Blocked', result.message || 'Could not apply damage after the saving throw.', 'failure');
+                return;
+            }
+            Render.sendDamageResult(result);
+            CombatService.completePersistentAreaMarkerTarget(damagePayload, token);
         },
 
         handle2014CombatAssistantPlainSaveRoll(ctx, args) {
@@ -4641,12 +9165,25 @@ const CombatAssistant = (() => {
             if (failed.length) Render.sendWhisperMessage(ctx.who, '2014 Saving Throws', Utils.escapeHtml(failed.join(' ')), 'warning');
         },
 
+        handleBatchHelperCleanup(ctx, args) {
+            const helperId = String(args[0] || '').trim();
+            const abilityName = String(args[1] || '').trim();
+            if (!helperId || !/^CT_Batch_/i.test(abilityName)) return;
+            setTimeout(() => {
+                try {
+                    R20.cleanupBatchHelperAfterUse(helperId, abilityName);
+                } catch (error) {
+                    Logger.debug('[batch-helper-cleanup]', error && error.message ? error.message : String(error));
+                }
+            }, 1000);
+        },
+
         handle2014CombatAssistantInitiativeRoll(ctx, args) {
             if (!ctx.isGM) {
                 Render.sendWhisperMessage(ctx.who, 'Permission Denied', 'Only the GM can roll grouped 2014 initiative.', 'failure');
                 return;
             }
-            const mode = CombatService.normalizeRollMode(args[0] || 'normal');
+            const mode = CombatService.normalizeInitiativeRollMode(args[0] || 'normal');
             const payload = Utils.decodeJsonPayload(args[1] || '', {});
             const batchId = String(payload.batchId || '').trim();
             const rolls = Array.isArray(payload.rolls)
@@ -4681,21 +9218,15 @@ const CombatAssistant = (() => {
             if (failed.length) Render.sendWhisperMessage(ctx.who, '2014 Initiative', Utils.escapeHtml(failed.join(' ')), 'warning');
         },
 
-        async handleDeal(ctx, args) {
-            const permission = this.ensureApplyPermission(Object.assign({}, ctx, { actionType: 'damage' }));
-            if (!permission.ok) {
-                Render.sendWhisperMessage(ctx.who, 'Permission Denied', permission.message, 'failure');
-                return;
-            }
-            let payload = null;
-            let targetId = '';
-            if (String(args[0] || '').toLowerCase() === 'manual') {
-                const damage = Math.max(0, Utils.toInt(args[1], 0));
-                const damageType = CombatService.normalizeDamageType(args[2] || 'normal');
-                const challenge = Math.max(0, Utils.toInt(args[3], 0));
-                const saveAbility = CombatService.normalizeAbilityName(args[4] || '');
-                const halfOnSuccess = Utils.toBoolean(args[5], false);
-                payload = {
+        parseDamageCommandArgs(args) {
+            const safeArgs = Array.isArray(args) ? args : [];
+            if (String(safeArgs[0] || '').toLowerCase() === 'manual') {
+                const damage = Math.max(0, Utils.toInt(safeArgs[1], 0));
+                const damageType = CombatService.normalizeDamageType(safeArgs[2] || 'normal');
+                const challenge = Math.max(0, Utils.toInt(safeArgs[3], 0));
+                const saveAbility = CombatService.normalizeAbilityName(safeArgs[4] || '');
+                const halfOnSuccess = Utils.toBoolean(safeArgs[5], false);
+                const payload = {
                     type: 'damage',
                     mode: saveAbility && challenge > 0 ? 'save' : (challenge > 0 ? 'attack' : 'direct'),
                     challenge,
@@ -4706,133 +9237,249 @@ const CombatAssistant = (() => {
                     sourceName: 'Manual',
                     sourceAction: 'Manual Damage'
                 };
-                const manualExtra = String(args[6] || '').trim();
-                if (manualExtra && ['normal', 'advantage', 'disadvantage', 'adv', 'dis'].indexOf(manualExtra.toLowerCase()) >= 0) {
-                    payload.rollMode = CombatService.normalizeRollMode(manualExtra);
-                    targetId = args[7] || '';
-                } else {
-                    targetId = args[6] || '';
-                }
-            } else {
-                payload = Utils.decodeJsonPayload(args[0] || '', null);
-                const secondArg = String(args[1] || '').trim();
-                if (secondArg && ['normal', 'advantage', 'disadvantage', 'adv', 'dis'].indexOf(secondArg.toLowerCase()) >= 0) {
-                    payload.rollMode = CombatService.normalizeRollMode(secondArg);
-                    targetId = args[2] || '';
-                } else {
-                    targetId = args[1] || '';
-                }
+                const optionalMode = String(safeArgs[6] || '').trim();
+                const hasRollMode = ['normal', 'advantage', 'disadvantage', 'adv', 'dis'].indexOf(optionalMode.toLowerCase()) >= 0;
+                if (hasRollMode) payload.rollMode = CombatService.normalizeRollMode(optionalMode);
+                return { payload, targetId: hasRollMode ? (safeArgs[7] || '') : (safeArgs[6] || '') };
             }
-            if (!payload) {
-                Render.sendWhisperMessage(ctx.who, 'Damage', 'Invalid damage payload.', 'failure');
-                return;
-            }
-            const tokens = this.getTargetTokens(ctx, targetId);
-            if (!tokens.length) {
-                Render.sendWhisperMessage(ctx.who, 'Damage', 'No target tokens were found. Select one or more tokens before pressing the button.', 'warning');
-                return;
-            }
-            const mode = String(payload.mode || 'direct').toLowerCase();
-            const challenge = Math.max(0, Utils.toInt(payload.challenge, 0));
-            const needsNativeSave = mode === 'save' && challenge > 0 && (payload.nativeSaveTotal === undefined || payload.nativeSaveTotal === null || String(payload.nativeSaveTotal).trim() === '');
-            if (needsNativeSave) {
-                const pendingNames = [];
-                const autoRolls = [];
-                const batchRolls = [];
-                const ca2014Rolls = [];
-                for (let i = 0; i < tokens.length; i += 1) {
-                    const queued = CombatService.startNativeSavingDamageRoll(tokens[i], payload, ctx.who);
-                    if (!queued.ok) {
-                        Render.sendWhisperMessage(ctx.who, 'Damage Blocked', queued.message || 'Could not queue Roll20 saving throw.', 'failure');
-                        continue;
-                    }
-                    if (queued.batchRoll && queued.sheetVersion === '2014' && RuntimeConfig.get('SHEET_2014_CA_ROLLS')) ca2014Rolls.push(queued);
-                    else if (queued.batchRoll && queued.sheetVersion === '2014') batchRolls.push(queued);
-                    else if (queued.batchRoll) autoRolls.push(queued);
-                    else pendingNames.push(queued.tokenName);
+
+            const payload = Utils.decodeJsonPayload(safeArgs[0] || '', null);
+            if (!payload) return { payload: null, targetId: '' };
+            const optionalMode = String(safeArgs[1] || '').trim();
+            const hasRollMode = ['normal', 'advantage', 'disadvantage', 'adv', 'dis'].indexOf(optionalMode.toLowerCase()) >= 0;
+            if (hasRollMode) payload.rollMode = CombatService.normalizeRollMode(optionalMode);
+            return { payload, targetId: hasRollMode ? (safeArgs[2] || '') : (safeArgs[1] || '') };
+        },
+
+        requiresNativeSavingRoll(payload) {
+            const source = payload || {};
+            const mode = String(source.mode || 'direct').toLowerCase();
+            const challenge = Math.max(0, Utils.toInt(source.challenge, 0));
+            const hasNativeTotal = source.nativeSaveTotal !== undefined &&
+                source.nativeSaveTotal !== null &&
+                String(source.nativeSaveTotal).trim() !== '';
+            return mode === 'save' && challenge > 0 && !hasNativeTotal;
+        },
+
+        createSavingDamageQueue(tokens, payload, ctx) {
+            const queue = {
+                playerRolls: [],
+                autoRolls: [],
+                batchRolls: [],
+                ca2014Rolls: [],
+                failed: 0
+            };
+            (Array.isArray(tokens) ? tokens : []).forEach((token) => {
+                const pending = CombatService.startNativeSavingDamageRoll(token, payload, ctx.who, { deferPlayerPrompt: true });
+                if (!pending.ok) {
+                    CombatService.completePersistentAreaMarkerTarget(payload, token);
+                    Render.sendWhisperMessage(ctx.who, 'Damage Blocked', pending.message || 'Could not queue Roll20 saving throw.', 'failure');
+                    queue.failed += 1;
+                    return;
                 }
-                if (autoRolls.length) {
-                    R20.sendNativeCommandsSequentially(
-                        autoRolls.map((roll) => roll.nativeCommand || roll.batchCommand || ''),
-                        850
-                    );
+                if (pending.batchRoll && pending.sheetVersion === '2014' &&
+                    (RuntimeConfig.get('SHEET_2014_CA_ROLLS') || pending.forcedRollMode)) {
+                    queue.ca2014Rolls.push(pending);
+                } else if (pending.batchRoll && pending.sheetVersion === '2014') {
+                    queue.batchRolls.push(pending);
+                } else if (pending.batchRoll) {
+                    queue.autoRolls.push(pending);
+                } else if (pending.playerPrompt) {
+                    queue.playerRolls.push(pending);
                 }
-                if (ca2014Rolls.length) {
-                    const abilityLabel = CombatService.abilityNameToShortLabel(payload.saveAbility || '') || 'SAVE';
-                    if (payload.rollMode) {
-                        for (let r = 0; r < ca2014Rolls.length; r += 1) {
-                            const pending = RollParser.consumePendingNativeSaveById(ca2014Rolls[r].requestId);
-                            if (!pending) continue;
-                            const token = R20.getTokenById(pending.tokenId);
-                            const roll = CombatService.rollSavingThrowForToken(token, pending.rollName || (pending.payload && pending.payload.saveAbility) || '', payload.rollMode);
-                            if (!roll.ok) {
-                                Render.sendWhisperMessage(ctx.who, '2014 Saving Throw', roll.message || 'Saving throw failed.', 'failure');
-                                continue;
-                            }
-                            const damagePayload = Object.assign({}, pending.payload || {}, {
-                                nativeSaveTotal: roll.total,
-                                nativeSaveNatural: roll.natural,
-                                nativeSaveModifier: roll.modifier,
-                                nativeSaveRolls: roll.rolls,
-                                nativeSaveMode: roll.mode,
-                                nativeSaveRollName: (CombatService.abilityNameToShortLabel(roll.ability) || abilityLabel) + ' Save',
-                                nativeSaveCharacterName: roll.characterName
-                            });
-                            const result = await CombatService.applyDamageToToken(token, damagePayload);
-                            if (!result.ok) {
-                                Render.sendWhisperMessage(ctx.who, 'Damage Blocked', result.message || 'Could not apply damage after the saving throw.', 'failure');
-                                continue;
-                            }
-                            Render.sendDamageResult(result);
-                        }
-                    } else {
-                        R20.whisper('GM', Render.showNativeBatchRollRequest({
-                            title: '2014 ' + abilityLabel + ' Saving Throws',
-                            intro: 'Roll <strong>' + Utils.escapeHtml(abilityLabel) + '</strong> saving throws' + (challenge > 0 ? (' DC ' + Utils.escapeHtml(String(challenge))) : '') + ':',
-                            names: ca2014Rolls.map((roll) => roll.tokenName || roll.characterName || 'Token'),
-                            label: 'Roll',
-                            iconHtml: '&#127922;',
-                            command: '!combatAssistant roll2014save &#63;{Roll Mode|Normal,normal|Advantage,advantage|Disadvantage,disadvantage} ' +
-                                Utils.encodeJsonPayload({ ids: ca2014Rolls.map((roll) => roll.requestId || '').filter(Boolean) }),
-                            tooltip: 'Roll all listed 2014 saving throws with Combat Assistant'
-                        }));
-                    }
+            });
+            return queue;
+        },
+
+        sendPlayerSavingDamageRequests(ctx, payload, challenge, rolls) {
+            (Array.isArray(rolls) ? rolls : []).forEach((roll) => {
+                const recipients = Array.isArray(roll.recipients) && roll.recipients.length ? roll.recipients : ['GM'];
+                const card = roll.card || Render.showNativeSaveRollRequest({
+                    tokenName: roll.tokenName,
+                    saveAbility: payload.saveAbility,
+                    challenge,
+                    damage: roll.damage || payload.damageTotal || 0,
+                    damageType: roll.damageType || payload.damageType || 'normal',
+                    command: roll.command || ''
+                });
+                recipients.forEach((recipient) => R20.whisper(recipient, card));
+            });
+        },
+
+        async resolve2014SavingDamageRolls(ctx, payload, rolls, modeOverride, abilityLabel) {
+            for (let index = 0; index < rolls.length; index += 1) {
+                const queuedRoll = rolls[index] || {};
+                const pending = RollParser.consumePendingNativeSaveById(queuedRoll.requestId);
+                if (!pending) {
+                    CombatService.completePersistentAreaMarkerTarget(payload, queuedRoll.tokenId || '');
+                    continue;
                 }
-                if (batchRolls.length) {
-                    const abilityLabel = CombatService.abilityNameToShortLabel(payload.saveAbility || '') || 'SAVE';
-                    const batch = R20.createNativeRollBatchAbility(batchRolls.map((roll) => roll.batchCommand || roll.nativeCommand || ''));
-                    if (batch.ok) {
-                        R20.whisper('GM', Render.showNativeBatchRollRequest({
-                            title: abilityLabel + ' Saving Throws',
-                            intro: 'Roll <strong>' + Utils.escapeHtml(abilityLabel) + '</strong> saving throws' + (challenge > 0 ? (' DC ' + Utils.escapeHtml(String(challenge))) : '') + ':',
-                            names: batchRolls.map((roll) => roll.tokenName || roll.characterName || 'Token'),
-                            label: 'Roll',
-                            iconHtml: '&#127922;',
-                            command: batch.command,
-                            tooltip: 'Roll all listed saving throws'
-                        }));
-                    } else {
-                        Render.sendWhisperMessage(ctx.who, 'Damage Blocked', batch.message || 'Could not create Roll All button.', 'failure');
-                    }
+                const token = R20.getTokenById(pending.tokenId);
+                if (!token) {
+                    CombatService.completePersistentAreaMarkerTarget(pending.payload || payload, pending.tokenId);
+                    Render.sendWhisperMessage(ctx.who, '2014 Saving Throw', 'The pending saving throw target token was not found.', 'failure');
+                    continue;
                 }
-                if (pendingNames.length) {
-                    Render.sendWhisperMessage(
-                        ctx.who,
-                        'Roll20 Saves Pending',
-                        'Waiting for Roll20 saving throws from: <b>' + Utils.escapeHtml(pendingNames.join(', ')) + '</b>.',
-                        'warning'
-                    );
+                const rollMode = CombatService.normalizeRollMode(
+                    pending.forcedRollMode || queuedRoll.forcedRollMode || modeOverride || 'normal'
+                );
+                const resultRoll = CombatService.rollSavingThrowForToken(
+                    token,
+                    pending.rollName || (pending.payload && pending.payload.saveAbility) || '',
+                    rollMode
+                );
+                if (!resultRoll.ok) {
+                    CombatService.completePersistentAreaMarkerTarget(pending.payload || payload, token);
+                    Render.sendWhisperMessage(ctx.who, '2014 Saving Throw', resultRoll.message || 'Saving throw failed.', 'failure');
+                    continue;
                 }
-                return;
-            }
-            for (let i = 0; i < tokens.length; i += 1) {
-                const result = await CombatService.applyDamageToToken(tokens[i], payload);
+                const damagePayload = Object.assign({}, pending.payload || {}, {
+                    nativeSaveTotal: resultRoll.total,
+                    nativeSaveNatural: resultRoll.natural,
+                    nativeSaveModifier: resultRoll.modifier,
+                    nativeSaveRolls: resultRoll.rolls,
+                    nativeSaveMode: resultRoll.mode,
+                    nativeSaveRollModeReason: String(pending.forcedRollReason || queuedRoll.forcedRollReason || ''),
+                    nativeSaveRollName: (CombatService.abilityNameToShortLabel(resultRoll.ability) || abilityLabel) + ' Save',
+                    nativeSaveCharacterName: resultRoll.characterName
+                });
+                const result = await CombatService.applyDamageToToken(token, damagePayload);
                 if (!result.ok) {
-                    Render.sendWhisperMessage(ctx.who, 'Damage Blocked', result.message || 'Could not apply damage.', 'failure');
+                    CombatService.completePersistentAreaMarkerTarget(damagePayload, token);
+                    Render.sendWhisperMessage(ctx.who, 'Damage Blocked', result.message || 'Could not apply damage after the saving throw.', 'failure');
                     continue;
                 }
                 Render.sendDamageResult(result);
+                CombatService.completePersistentAreaMarkerTarget(damagePayload, token);
             }
+        },
+
+        async send2014SavingDamageRequests(ctx, payload, challenge, rolls) {
+            if (!rolls.length) return;
+            const abilityLabel = CombatService.abilityNameToShortLabel(payload.saveAbility || '') || 'SAVE';
+            const forcedRolls = rolls.filter((roll) => !!roll.forcedRollMode);
+            const promptedRolls = rolls.filter((roll) => !roll.forcedRollMode);
+
+            if (forcedRolls.length) {
+                await this.resolve2014SavingDamageRolls(ctx, payload, forcedRolls, '', abilityLabel);
+            }
+            if (!promptedRolls.length) return;
+            if (payload.rollMode) {
+                await this.resolve2014SavingDamageRolls(ctx, payload, promptedRolls, payload.rollMode, abilityLabel);
+                return;
+            }
+            R20.whisper('GM', Render.showNativeBatchRollRequest({
+                title: '2014 ' + abilityLabel + ' Saving Throws',
+                intro: 'Roll <strong>' + Utils.escapeHtml(abilityLabel) + '</strong> saving throws' +
+                    (challenge > 0 ? (' DC ' + Utils.escapeHtml(String(challenge))) : '') + ':',
+                names: promptedRolls.map((roll) => roll.tokenName || roll.characterName || 'Token'),
+                label: 'Roll',
+                iconHtml: '&#127922;',
+                command: '!combatAssistant roll2014save &#63;{Roll Mode|Normal,normal|Advantage,advantage|Disadvantage,disadvantage} ' +
+                    Utils.encodeJsonPayload({ ids: promptedRolls.map((roll) => roll.requestId || '').filter(Boolean) }),
+                tooltip: 'Roll all listed 2014 saving throws with Combat Assistant'
+            }));
+        },
+
+        sendNativeSavingDamageBatch(ctx, payload, challenge, rolls) {
+            if (!rolls.length) return;
+            const abilityLabel = CombatService.abilityNameToShortLabel(payload.saveAbility || '') || 'SAVE';
+            const batch = R20.createNativeRollBatchAbility(
+                rolls.map((roll) => R20.nativeBatchExecutionCommand(roll))
+            );
+            if (!batch.ok) {
+                Render.sendWhisperMessage(ctx.who, 'Damage Blocked', batch.message || 'Could not create Roll All button.', 'failure');
+                return;
+            }
+            R20.whisper('GM', Render.showNativeBatchRollRequest({
+                title: abilityLabel + ' Saving Throws',
+                intro: 'Roll <strong>' + Utils.escapeHtml(abilityLabel) + '</strong> saving throws' +
+                    (challenge > 0 ? (' DC ' + Utils.escapeHtml(String(challenge))) : '') + ':',
+                names: rolls.map((roll) => roll.tokenName || roll.characterName || 'Token'),
+                label: 'Roll',
+                iconHtml: '&#127922;',
+                command: batch.command,
+                tooltip: 'Roll all listed saving throws'
+            }));
+        },
+
+        async sendDeferredSavingDamageRequests(ctx, payload, challenge, queue) {
+            this.sendPlayerSavingDamageRequests(ctx, payload, challenge, queue.playerRolls);
+            await this.send2014SavingDamageRequests(ctx, payload, challenge, queue.ca2014Rolls);
+            this.sendNativeSavingDamageBatch(ctx, payload, challenge, queue.batchRolls);
+        },
+
+        async queueNativeSavingDamage(ctx, tokens, payload) {
+            const challenge = Math.max(0, Utils.toInt(payload.challenge, 0));
+            const queue = this.createSavingDamageQueue(tokens, payload, ctx);
+            if (queue.autoRolls.length) {
+                R20.sendNativeCommandsSequentially(
+                    queue.autoRolls.map((roll) => roll.nativeCommand || roll.batchCommand || ''),
+                    850
+                );
+            }
+
+            const sendDeferred = () => this.sendDeferredSavingDamageRequests(ctx, payload, challenge, queue);
+            const deferredDelay = queue.autoRolls.length ? ((queue.autoRolls.length * 900) + 350) : 0;
+            if (deferredDelay > 0) {
+                setTimeout(() => {
+                    sendDeferred().catch((error) => {
+                        Logger.error('[deferred-saves]', error && error.message ? error.message : String(error));
+                    });
+                }, deferredDelay);
+            } else {
+                await sendDeferred();
+            }
+
+            return {
+                queued: queue.playerRolls.length + queue.autoRolls.length + queue.batchRolls.length + queue.ca2014Rolls.length,
+                failed: queue.failed
+            };
+        },
+
+        async applyDamageToTargets(ctx, tokens, payload) {
+            let applied = 0;
+            let failed = 0;
+            for (let index = 0; index < tokens.length; index += 1) {
+                const token = tokens[index];
+                const result = await CombatService.applyDamageToToken(token, payload);
+                if (!result.ok) {
+                    CombatService.completePersistentAreaMarkerTarget(payload, token);
+                    Render.sendWhisperMessage(ctx.who, 'Damage Blocked', result.message || 'Could not apply damage.', 'failure');
+                    failed += 1;
+                    continue;
+                }
+                Render.sendDamageResult(result);
+                CombatService.completePersistentAreaMarkerTarget(payload, token);
+                applied += 1;
+            }
+            return { applied, failed };
+        },
+
+        async handleDeal(ctx, args) {
+            const permission = this.ensureApplyPermission(Object.assign({}, ctx, { actionType: 'damage' }));
+            if (!permission.ok) {
+                Render.sendWhisperMessage(ctx.who, 'Permission Denied', permission.message, 'failure');
+                return { applied: 0, queued: 0, failed: 1 };
+            }
+
+            const parsed = this.parseDamageCommandArgs(args);
+            if (!parsed.payload) {
+                Render.sendWhisperMessage(ctx.who, 'Damage', 'Invalid damage payload.', 'failure');
+                return { applied: 0, queued: 0, failed: 1 };
+            }
+            const tokens = this.getTargetTokens(ctx, parsed.targetId);
+            if (!tokens.length) {
+                Render.sendWhisperMessage(ctx.who, 'Damage', 'No target tokens were found. Select one or more tokens before pressing the button.', 'warning');
+                return { applied: 0, queued: 0, failed: 1 };
+            }
+
+            if (this.requiresNativeSavingRoll(parsed.payload)) {
+                const queued = await this.queueNativeSavingDamage(ctx, tokens, parsed.payload);
+                return { applied: 0, queued: queued.queued, failed: queued.failed };
+            }
+            const applied = await this.applyDamageToTargets(ctx, tokens, parsed.payload);
+            return { applied: applied.applied, queued: 0, failed: applied.failed };
         },
 
         async handleSave(ctx, args) {
@@ -4864,8 +9511,7 @@ const CombatAssistant = (() => {
                 iconHtml: '&#128735;',
                 tooltip: 'Roll ' + abilityLabel + ' saving throw',
                 batchTooltip: 'Roll all listed ' + abilityLabel + ' saving throws',
-                rollMode,
-                alwaysAskControlled: true
+                rollMode
             });
             if (result.failed.length) Render.sendWhisperMessage(ctx.who, 'Saving Throw', Utils.escapeHtml(result.failed.join(' ')), 'warning');
         },
@@ -4892,7 +9538,7 @@ const CombatAssistant = (() => {
                 label: 'Init',
                 iconHtml: '&#127922;',
                 command: '!combatAssistant rollinit ' + Utils.attrSafe(tokenId) +
-                    (needs2014Mode ? ' &#63;{2014 Roll Mode|Normal,normal|Advantage,advantage|Disadvantage,disadvantage}' : ''),
+                    (needs2014Mode ? ' &#63;{2014 Roll Mode|Auto,auto|Normal,normal|Advantage,advantage|Disadvantage,disadvantage}' : ''),
                 tooltip: 'Roll initiative with Combat Assistant'
             });
             recipients.forEach((recipient) => R20.whisper(recipient, card));
@@ -4901,6 +9547,7 @@ const CombatAssistant = (() => {
 
         runCombatAssistantInitiative(tokens, ctx, rollMode) {
             const automatic = [];
+            const playerTokens = [];
             let requested = 0;
             const failed = [];
             tokens.forEach((token) => {
@@ -4909,8 +9556,8 @@ const CombatAssistant = (() => {
                     failed.push(CombatService.getTokenName(token) + ' must be linked to a character.');
                     return;
                 }
-                if (R20.isPlayerControlledToken(token, character)) {
-                    if (this.whisperCombatAssistantInitiativeButton(token, ctx)) requested += 1;
+                if (R20.isPlayerControlledToken(token, character) && RuntimeConfig.get('PLAYER_MANUAL_ROLL')) {
+                    playerTokens.push(token);
                     return;
                 }
                 const characterId = String(character.id || (Utils.isFunction(token.get) ? token.get('represents') : '') || '').trim();
@@ -4925,6 +9572,9 @@ const CombatAssistant = (() => {
                 CombatService.applyInitiativeResults(automatic);
                 R20.direct(Render.showInitiativeResults(automatic));
             }
+            playerTokens.forEach((token) => {
+                if (this.whisperCombatAssistantInitiativeButton(token, ctx)) requested += 1;
+            });
             if (requested) {
                 Render.sendWhisperMessage(ctx.who, 'Initiative', 'Initiative roll request sent to player-controlled token(s).', 'normal');
             }
@@ -4934,8 +9584,8 @@ const CombatAssistant = (() => {
         async handleCombatAssistantInitiativeRoll(ctx, args) {
             const tokenId = String(args[0] || '').trim();
             const rollModeArg = String(args[1] || '').trim();
-            const rollMode = ['normal', 'advantage', 'disadvantage', 'adv', 'dis'].indexOf(rollModeArg.toLowerCase()) >= 0
-                ? CombatService.normalizeRollMode(rollModeArg)
+            const rollMode = ['auto', 'sheet', 'normal', 'advantage', 'disadvantage', 'adv', 'dis'].indexOf(rollModeArg.toLowerCase()) >= 0
+                ? CombatService.normalizeInitiativeRollMode(rollModeArg)
                 : '';
             const token = R20.getTokenById(tokenId);
             if (!token) {
@@ -4963,8 +9613,8 @@ const CombatAssistant = (() => {
         async handleInitiative(ctx, args) {
             args = args || [];
             const rollModeArg = String(args[0] || '').trim();
-            const rollMode = ['normal', 'advantage', 'disadvantage', 'adv', 'dis'].indexOf(rollModeArg.toLowerCase()) >= 0
-                ? CombatService.normalizeRollMode(rollModeArg)
+            const rollMode = ['auto', 'sheet', 'normal', 'advantage', 'disadvantage', 'adv', 'dis'].indexOf(rollModeArg.toLowerCase()) >= 0
+                ? CombatService.normalizeInitiativeRollMode(rollModeArg)
                 : '';
             const tokens = this.getTargetTokens(ctx, '');
             if (!tokens.length) {
@@ -4996,16 +9646,19 @@ const CombatAssistant = (() => {
                 tooltip: 'Roll initiative',
                 batchTooltip: 'Roll initiative for all listed tokens',
                 trackInitiative: true,
-                rollMode,
-                alwaysAskControlled: true
+                rollMode
             });
             if (result.failed.length) Render.sendWhisperMessage(ctx.who, 'Initiative', Utils.escapeHtml(result.failed.join(' ')), 'warning');
         },
 
-        handleTest(ctx) {
+        handleTest(ctx, args) {
             const tokens = this.getTargetTokens(ctx, '');
             if (!tokens.length) {
-                Render.sendPublicMessage('Combat Assistant Test', 'No selected token.', 'warning');
+                Render.sendPublicMessage(
+                    'Combat Assistant Test',
+                    'No selected token.',
+                    'warning'
+                );
                 return;
             }
             const rows = tokens.map((token) => {
@@ -5021,14 +9674,30 @@ const CombatAssistant = (() => {
                     'character.controlledby: <code>' + Utils.escapeHtml(characterControlledBy || '(empty)') + '</code>' +
                 '</div>';
             }).join('<hr style="border:0;border-top:1px solid rgba(255,255,255,0.25);margin:4px 0;">');
-            Render.sendPublicMessage('Combat Assistant Test', rows, 'normal');
+            Render.sendPublicMessage(
+                'Combat Assistant Test',
+                rows,
+                'normal'
+            );
+        },
+
+        handleTestRun(ctx, args) {
+            const payload = Utils.decodeJsonPayload(args[0] || '', {});
+            const command = String(payload.command || '').trim();
+            if (!command) {
+                Render.sendWhisperMessage(ctx.who, 'Test Button', 'No command was provided.', 'warning');
+                return;
+            }
+            R20.send(command);
         },
 
         async handleHeal(ctx, args) {
+            let applied = 0;
+            let failed = 0;
             const permission = this.ensureApplyPermission(Object.assign({}, ctx, { actionType: 'heal' }));
             if (!permission.ok) {
                 Render.sendWhisperMessage(ctx.who, 'Permission Denied', permission.message, 'failure');
-                return;
+                return { applied, failed: failed + 1 };
             }
             let payload = null;
             let targetId = '';
@@ -5047,21 +9716,26 @@ const CombatAssistant = (() => {
             }
             if (!payload) {
                 Render.sendWhisperMessage(ctx.who, 'Healing', 'Invalid healing payload.', 'failure');
-                return;
+                return { applied, failed: failed + 1 };
             }
             const tokens = this.getTargetTokens(ctx, targetId);
             if (!tokens.length) {
                 Render.sendWhisperMessage(ctx.who, 'Healing', 'No target tokens were found. Select one or more tokens before pressing the button.', 'warning');
-                return;
+                return { applied, failed: failed + 1 };
             }
             for (let i = 0; i < tokens.length; i += 1) {
                 const result = await CombatService.applyHealToToken(tokens[i], payload);
                 if (!result.ok) {
+                    CombatService.completePersistentAreaMarkerTarget(payload, tokens[i]);
                     Render.sendWhisperMessage(ctx.who, 'Healing Blocked', result.message || 'Could not apply healing.', 'failure');
+                    failed += 1;
                     continue;
                 }
                 Render.sendHealResult(result, ctx.who);
+                CombatService.completePersistentAreaMarkerTarget(payload, tokens[i]);
+                applied += 1;
             }
+            return { applied, failed };
         }
     };
 
@@ -5069,6 +9743,29 @@ const CombatAssistant = (() => {
      * Events / registration
      * --------------------------------------------------------------------- */
     const Events = {
+        onGraphicChange(obj) {
+            try {
+                if (!SCRIPT_ACTIVE) return;
+                R20.syncAreaMarkerGroupForMovedToken(obj);
+            } catch (error) {
+                Logger.debug('[change:graphic]', error && error.message ? error.message : String(error));
+            }
+        },
+
+        onGraphicDestroy(obj) {
+            try {
+                if (!SCRIPT_ACTIVE) return;
+                const tokenId = R20.getTokenId(obj);
+                const concentration = tokenId ? State.getConcentrationByTokenId(tokenId) : null;
+                if (concentration) {
+                    CombatService.endConcentrationByTokenId(tokenId, 'caster token removed', { silent: true });
+                }
+                R20.handleAreaMarkerDestroyed(obj);
+            } catch (error) {
+                Logger.debug('[destroy:graphic]', error && error.message ? error.message : String(error));
+            }
+        },
+
         async onChatMessage(msg) {
             try {
                 if (!SCRIPT_ACTIVE) return;
@@ -5100,43 +9797,51 @@ const CombatAssistant = (() => {
         },
 
         onReady() {
-            const sandboxVersion = String((typeof Campaign === 'function' && Campaign() && Campaign().sandboxVersion) || '').trim().toLowerCase();
-            if (sandboxVersion && sandboxVersion !== 'experimental') {
-                Render.sendWhisperMessage(
-                    'GM',
-                    META.NAME.toUpperCase(),
-                    Html.span('API SANDBOX VERSION: DEFAULT<br>', 'color:rgb(208, 139, 28)') +
-                    '<br>' +
-                    'Combat Assistant is not available.<br>' +
-                    'Go to Mod Library and set "API Sandbox Version" to Experimental to use this API.',
-                    'failure'
-                );
-                return;
-            }
-
-            if (!R20.hasSheetApi()) {
-                Render.sendWhisperMessage(
-                    'GM',
-                    META.NAME.toUpperCase(),
-                    Html.span('REQUIRED SHEET API NOT AVAILABLE<br>', 'color:rgb(208, 139, 28)') +
-                    '<br>' +
-                    'Combat Assistant requires Roll20 getSheetItem() and setSheetItem().<br>' +
-                    'Restart the Mod sandbox or verify the current Roll20 Mod environment.',
-                    'failure'
-                );
-                return;
-            }
-
+            const capabilities = R20.getRuntimeCapabilities();
             State.ensure();
-            State.cleanupRuntimeQueues();
-            R20.cleanupBatchAbilities(20, 10 * 60 * 1000);
+            State.reconcilePersistentState();
+            State.cleanupRuntimeQueues(true);
+            R20.cleanupBatchAbilities(20, PLAYER_ACTION_TTL_MS, { noCreate: true, removeWhenEmpty: true, removeAll: true });
             SCRIPT_ACTIVE = true;
-            Logger.info('Ready v' + META.VERSION + '. Use !combatAssistant menu or !combat-assistant help');
+
+            if (!capabilities.experimentalSandbox) {
+                Render.sendWhisperMessage(
+                    'GM',
+                    META.NAME.toUpperCase(),
+                    Html.span('COMPATIBILITY MODE<br>', 'color:rgb(208,139,28)') +
+                    '<br>' +
+                    'The script is running, but Beacon sheet features may require the Experimental API Sandbox.<br>' +
+                    '2014 sheets and unlinked token bars remain available.',
+                    'warning'
+                );
+            }
+            if (!capabilities.sheetWriter) {
+                Render.sendWhisperMessage(
+                    'GM',
+                    META.NAME.toUpperCase(),
+                    Html.span('SHEET WRITES DISABLED<br>', 'color:rgb(208,139,28)') +
+                    '<br>' +
+                    'Roll20 setSheetItem() is not available. Linked Beacon HP and Temp HP cannot be changed, but unlinked token bars and non-sheet features remain active.',
+                    'warning'
+                );
+            }
+
+            Render.showBootstrapCard();
+            Logger.info(
+                'Ready v' + META.VERSION +
+                ' sandbox=' + capabilities.sandboxVersion +
+                ' sheetWriter=' + String(capabilities.sheetWriter) +
+                '. Use !combatAssistant menu or !combat-assistant help'
+            );
         }
     };
 
-    on('ready', Events.onReady);
-    on('chat:message', Events.onChatMessage);
+    on('ready', () => {
+        Events.onReady();
+        on('chat:message', Events.onChatMessage);
+        on('change:graphic', Events.onGraphicChange);
+        on('destroy:graphic', Events.onGraphicDestroy);
+    });
 
     return Object.freeze({
         META,
@@ -5145,6 +9850,8 @@ const CombatAssistant = (() => {
         RuntimeConfig,
         Utils,
         Html,
+        R20,
+        CombatEffects,
         Render,
         RollParser,
         CombatService
