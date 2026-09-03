@@ -4,7 +4,7 @@
  * @Project     Combat Assistant
  * @Description Lightweight Roll20 combat assistance extracted from T&T ideas.
  * @Author      AmadeusVF
- * @Version     1.1.0
+ * @Version     1.1.1
  * =========================================================
  *
  * Design goals:
@@ -37,7 +37,7 @@ const CombatAssistant = (() => {
         SHORT_NAME: 'CA',
         LOG_NAME: 'Combat Assistant',
         CHAT_NAME: 'Combat Assistant',
-        VERSION: '1.1.0',
+        VERSION: '1.1.1',
         SCHEMA_VERSION: 3,
         STATE_KEY: 'COMBAT_ASSISTANT',
         LEGACY_STATE_KEY: 'COMBAT_TRACKER',
@@ -1213,11 +1213,7 @@ const CombatAssistant = (() => {
         },
 
         getRuntimeCapabilities() {
-            const campaign = typeof Campaign === 'function' ? Campaign() : null;
-            const sandboxVersion = String((campaign && campaign.sandboxVersion) || '').trim().toLowerCase();
             return {
-                sandboxVersion: sandboxVersion || 'unknown',
-                experimentalSandbox: sandboxVersion === 'experimental',
                 sheetReader: this.hasSheetReader(),
                 sheetWriter: this.hasSheetWriter()
             };
@@ -5507,11 +5503,18 @@ const CombatAssistant = (() => {
             const safeResults = (Array.isArray(results) ? results : [])
                 .filter((result) => result && result.tokenId && result.total !== undefined && result.total !== null);
             if (!safeResults.length || typeof Campaign !== 'function') return false;
+            const priorityValue = (value) => Utils.toNumber(value, 0);
+            const sortedResults = safeResults
+                .map((result, index) => Object.assign({ __order: index }, result))
+                .sort((a, b) => {
+                    const diff = priorityValue(b.total) - priorityValue(a.total);
+                    if (diff !== 0) return diff;
+                    return Utils.toInt(a.__order, 0) - Utils.toInt(b.__order, 0);
+                });
 
             let turnOrder = this.getCurrentTurnOrder();
-            const activeTurnId = String(turnOrder[0] && turnOrder[0].id || '').trim();
             const rolledIds = Object.create(null);
-            safeResults.forEach((result) => {
+            sortedResults.forEach((result) => {
                 const id = String(result.tokenId || '').trim();
                 if (id) rolledIds[id] = true;
             });
@@ -5520,17 +5523,12 @@ const CombatAssistant = (() => {
                 const id = String(entry && entry.id || '').trim();
                 return !id || !rolledIds[id];
             });
-            safeResults.forEach((result) => {
+            sortedResults.forEach((result) => {
                 turnOrder.push(this.makeTurnOrderEntry(result.tokenId, result.total));
             });
-            turnOrder.sort((a, b) => Utils.toNumber(b && b.pr, 0) - Utils.toNumber(a && a.pr, 0));
+            turnOrder.sort((a, b) => priorityValue(b && b.pr) - priorityValue(a && a.pr));
 
-            if (activeTurnId) {
-                const activeIndex = turnOrder.findIndex((entry) => String(entry && entry.id || '').trim() === activeTurnId);
-                if (activeIndex > 0) turnOrder = turnOrder.slice(activeIndex).concat(turnOrder.slice(0, activeIndex));
-            }
-
-            const firstPageId = String((safeResults.find((result) => String(result.pageId || '').trim()) || {}).pageId || this.getTokenPageId(safeResults[0].tokenId) || '').trim();
+            const firstPageId = String((sortedResults.find((result) => String(result.pageId || '').trim()) || {}).pageId || this.getTokenPageId(sortedResults[0].tokenId) || '').trim();
             const before = this.getCurrentTurnOrder();
             Campaign().set('turnorder', JSON.stringify(turnOrder));
             if (firstPageId) Campaign().set('initiativepage', firstPageId);
@@ -9804,17 +9802,6 @@ const CombatAssistant = (() => {
             R20.cleanupBatchAbilities(20, PLAYER_ACTION_TTL_MS, { noCreate: true, removeWhenEmpty: true, removeAll: true });
             SCRIPT_ACTIVE = true;
 
-            if (!capabilities.experimentalSandbox) {
-                Render.sendWhisperMessage(
-                    'GM',
-                    META.NAME.toUpperCase(),
-                    Html.span('COMPATIBILITY MODE<br>', 'color:rgb(208,139,28)') +
-                    '<br>' +
-                    'The script is running, but Beacon sheet features may require the Experimental API Sandbox.<br>' +
-                    '2014 sheets and unlinked token bars remain available.',
-                    'warning'
-                );
-            }
             if (!capabilities.sheetWriter) {
                 Render.sendWhisperMessage(
                     'GM',
@@ -9829,7 +9816,6 @@ const CombatAssistant = (() => {
             Render.showBootstrapCard();
             Logger.info(
                 'Ready v' + META.VERSION +
-                ' sandbox=' + capabilities.sandboxVersion +
                 ' sheetWriter=' + String(capabilities.sheetWriter) +
                 '. Use !combatAssistant menu or !combat-assistant help'
             );
