@@ -4,7 +4,7 @@
  * @Project     Combat Assistant
  * @Description Lightweight Roll20 combat assistance extracted from T&T ideas.
  * @Author      AmadeusVF
- * @Version     1.1.1
+ * @Version     1.2.1
  * =========================================================
  *
  * Design goals:
@@ -23,6 +23,8 @@
  *   !combatAssistant set tempbar 3
  *   !combatAssistant deal <payload|manual> ...
  *   !combatAssistant heal <payload|manual> ...
+ *   !combatAssistant resource
+ *   !combatAssistant turn next|focus|remove|stop ...
  */
 const CombatAssistant = (() => {
     'use strict';
@@ -37,8 +39,8 @@ const CombatAssistant = (() => {
         SHORT_NAME: 'CA',
         LOG_NAME: 'Combat Assistant',
         CHAT_NAME: 'Combat Assistant',
-        VERSION: '1.1.1',
-        SCHEMA_VERSION: 3,
+        VERSION: '1.2.1',
+        SCHEMA_VERSION: 6,
         STATE_KEY: 'COMBAT_ASSISTANT',
         LEGACY_STATE_KEY: 'COMBAT_TRACKER',
     });
@@ -53,10 +55,17 @@ const CombatAssistant = (() => {
         use: true,
         usearea: true,
         conc: true,
+        concopen: true,
         conend: true,
         cleanupbatch: true,
         rollsave: true,
-        rollinit: true
+        rollinit: true,
+        turn: true,
+        turnnext: true,
+        turnfocus: true,
+        resource: true,
+        resources: true,
+        resourceadjust: true
     });
 
     const INITIATIVE_BATCH_TIMERS = Object.create(null);
@@ -66,6 +75,9 @@ const CombatAssistant = (() => {
     const NATIVE_SAVE_CAPTURE_BUFFER = {
         timer: null,
         rolls: []
+    };
+    const TURN_TRACKER_TIMERS = {
+        additions: null
     };
     let STATE_INITIALIZED = false;
     let AREA_MARKER_GROUP_SYNC_ACTIVE = false;
@@ -211,6 +223,20 @@ const CombatAssistant = (() => {
         PLAYER_MANUAL_ROLL: false,
         CA_ROLLS_INITIATIVE: false,
         SHEET_2014_CA_ROLLS: false,
+        TURN_TRACKER: true,
+        TURN_AUTO_FOCUS: false,
+        SHOW_PLAYER_RESOURCES: false,
+        SHOW_NPC_RESOURCES: true,
+        PLAYER_PUBLIC_RESOURCE_USAGE: false,
+        CONC_TURN_TRACKER: false,
+        ROUND_COUNTER: true,
+        PUBLIC_ROUND_COUNTER: false,
+        REMOVE_NPC_DEAD_TOKENS: false,
+        TURN_MARKER: true,
+        PUBLIC_TURN_MARKER: false,
+        TURN_MARKER_IMAGE_URL: 'https://files.d20.io/images/495303287/txqHTA2ByhDGG_aL7-Qe2g/med.webm?1785019892',
+        TURN_MARKER_IMG_SIZE: 20,
+        TURN_MARKER_FOLLOW: false,
         HP_BAR: 1,
         AC_BAR: 2,
         TEMP_HP_BAR: 3,
@@ -254,6 +280,22 @@ const CombatAssistant = (() => {
         { key: 'PROJECTILE_EFFECT_NAME', label: 'Projectile Effect Name', type: 'text', tip: 'Optional built-in or Custom FX name used from the attacker to the selected target for ranged projectile attacks. Leave empty to disable projectile FX.' },
         { key: 'DIRECT_HIT_EFFECT_NAME', label: 'Direct Hit Effect Name', type: 'text', tip: 'Built-in base effect or exact Custom FX name used when damage is applied without a saving throw. Built-in effects use the blood color. Leave empty to disable.' },
         { key: 'AREA_HIT_EFFECT_NAME', label: 'Area Hit Effect Name', type: 'text', tip: 'Built-in base effect or exact Custom FX name used when damage is applied through a saving throw. Built-in effects use the damage type color. Leave empty to disable.' },
+        { type: 'section', label: 'Turn Tracker' },
+        { key: 'TURN_TRACKER', label: 'Turn Tracker', type: 'boolean', tip: 'Track combat rounds and current turns from the Turn Order. Player Next buttons are always active while Turn Tracker is ON.' },
+        { key: 'TURN_AUTO_FOCUS', label: 'Turn Auto Focus', type: 'boolean', tip: 'Ping and focus everyone on the current turn token.' },
+        { key: 'CONC_TURN_TRACKER', label: 'Conc. Turn Tracker', type: 'boolean', tip: 'Decrease finite concentration duration once when the concentrating token reaches its turn, and end concentration automatically at 0 turns left.' },
+        { key: 'ROUND_COUNTER', label: 'Round Counter', type: 'boolean', tip: 'Whisper the GM the Round Counter card with all tokens currently in combat.' },
+        { key: 'PUBLIC_ROUND_COUNTER', label: 'Public Round Counter', type: 'boolean', tip: 'Also show the Round Counter card publicly. Round Counter must be ON.' },
+        { key: 'REMOVE_NPC_DEAD_TOKENS', label: 'Remove NPC Dead Tokens', type: 'boolean', tip: 'ON automatically removes unlinked NPC turns with 0 HP. OFF shows a red Remove button below Next on that token turn card.' },
+        { key: 'TURN_MARKER', label: 'Turn Marker', type: 'boolean', tip: 'Spawn a marker token on the current turn token.' },
+        { key: 'PUBLIC_TURN_MARKER', label: 'Turn Marker Token Public', type: 'boolean', tip: 'OFF puts the turn marker on the GM layer. ON puts it on the map layer and brings it forward.' },
+        { key: 'TURN_MARKER_IMAGE_URL', label: 'Turn Marker Token Image', type: 'roll20image', tip: 'Roll20 uploaded image used for the turn marker token. Must start with https://files.d20.io/images/.' },
+        { key: 'TURN_MARKER_IMG_SIZE', label: 'Turn Marker Token Offset', type: 'number', tip: 'Pixel offset added to the current token width and height. Default 20.' },
+        { key: 'TURN_MARKER_FOLLOW', label: 'Turn Marker Follow', type: 'boolean', tip: 'Keep the marker centered and scaled when the current turn token moves or resizes.' },
+        { type: 'section', label: 'Resources' },
+        { key: 'SHOW_PLAYER_RESOURCES', label: 'Show Player Resources', type: 'boolean', tip: 'Show the current player-controlled token\'s limited resources and spell slots directly on its Turn card.' },
+        { key: 'SHOW_NPC_RESOURCES', label: 'Show NPC Resources', type: 'boolean', tip: 'Show limited resources and spell slots for non-player-controlled tokens on the GM Turn card only.' },
+        { key: 'PLAYER_PUBLIC_RESOURCE_USAGE', label: 'Player Public Usage', type: 'boolean', tip: 'When a player uses or recovers a resource, send the Resource Update card to public chat instead of private whispers.' },
         { type: 'section', label: 'Extra' },
         { key: 'DEBUG', label: 'Debug', type: 'boolean', tip: 'Log debug information in the Roll20 API console.' },
         //{ key: 'AREA_RADIUS_DEBUG_DRAW', label: 'Area Radius Debug Draw', type: 'boolean', tip: 'Draw temporary GM-only reference circles when resolving radius, sphere, cylinder, or emanation area markers.' },
@@ -339,6 +381,34 @@ const CombatAssistant = (() => {
                 '2014_CA': 'SHEET_2014_CA_ROLLS',
                 '2014_CA_ROLLS': 'SHEET_2014_CA_ROLLS',
                 SHEET_2014_CA_ROLLS: 'SHEET_2014_CA_ROLLS',
+                TURN: 'TURN_TRACKER',
+                TURN_TRACKER: 'TURN_TRACKER',
+                SHOW_PLAYER_RESOURCES: 'SHOW_PLAYER_RESOURCES',
+                PLAYER_RESOURCES: 'SHOW_PLAYER_RESOURCES',
+                SHOW_NPC_RESOURCES: 'SHOW_NPC_RESOURCES',
+                NPC_RESOURCES: 'SHOW_NPC_RESOURCES',
+                PLAYER_PUBLIC_RESOURCE_USAGE: 'PLAYER_PUBLIC_RESOURCE_USAGE',
+                PLAYER_PUBLIC_USAGE: 'PLAYER_PUBLIC_RESOURCE_USAGE',
+                PUBLIC_RESOURCE_USAGE: 'PLAYER_PUBLIC_RESOURCE_USAGE',
+                CONC_TURN_TRACKER: 'CONC_TURN_TRACKER',
+                CONCENTRATION_TURN_TRACKER: 'CONC_TURN_TRACKER',
+                CONC_TURN: 'CONC_TURN_TRACKER',
+                ROUND_COUNTER: 'ROUND_COUNTER',
+                PUBLIC_ROUND_COUNTER: 'PUBLIC_ROUND_COUNTER',
+                REMOVE_DEAD: 'REMOVE_NPC_DEAD_TOKENS',
+                REMOVE_NPC_DEAD: 'REMOVE_NPC_DEAD_TOKENS',
+                REMOVE_NPC_DEAD_TOKENS: 'REMOVE_NPC_DEAD_TOKENS',
+                TURN_MARKER: 'TURN_MARKER',
+                PUBLIC_TURN_MARKER: 'PUBLIC_TURN_MARKER',
+                TURN_MARKER_TOKEN_IMAGE: 'TURN_MARKER_IMAGE_URL',
+                TURN_MARKER_URL: 'TURN_MARKER_IMAGE_URL',
+                TURN_MARKER_IMAGE: 'TURN_MARKER_IMAGE_URL',
+                TURN_MARKER_IMAGE_URL: 'TURN_MARKER_IMAGE_URL',
+                TURN_MARKER_TOKEN_OFFSET: 'TURN_MARKER_IMG_SIZE',
+                TURN_MARKER_SIZE: 'TURN_MARKER_IMG_SIZE',
+                TURN_MARKER_IMG_SIZE: 'TURN_MARKER_IMG_SIZE',
+                TURN_MARKER_FOLLOW: 'TURN_MARKER_FOLLOW',
+                TURN_AUTO_FOCUS: 'TURN_AUTO_FOCUS',
                 REVEAL_NAMES: 'REVEAL_TOKEN_NAMES_IN_LOG',
                 REVEAL_TOKEN_NAMES: 'REVEAL_TOKEN_NAMES_IN_LOG',
                 REVEAL_TOKEN_NAMES_IN_LOG: 'REVEAL_TOKEN_NAMES_IN_LOG',
@@ -367,6 +437,17 @@ const CombatAssistant = (() => {
                 pendingNativeInitiativeSeq: 0,
                 playerActionRequests: {},
                 concentration: {},
+                turnTracker: {
+                    round: 0,
+                    pivotTokenId: '',
+                    pivotPr: '',
+                    currentTokenId: '',
+                    knownTokenIds: [],
+                    roundProgressTokenIds: [],
+                    pendingAddedTokenIds: [],
+                    turnMarkerId: '',
+                    active: false
+                },
                 helperCharacterId: ''
             };
         },
@@ -408,6 +489,16 @@ const CombatAssistant = (() => {
             root.pendingNativeInitiativeSeq = Math.max(0, Utils.toInt(root.pendingNativeInitiativeSeq, 0));
             root.playerActionRequests = this.isRecord(root.playerActionRequests) ? root.playerActionRequests : {};
             root.concentration = this.isRecord(root.concentration) ? root.concentration : {};
+            root.turnTracker = this.isRecord(root.turnTracker) ? root.turnTracker : {};
+            root.turnTracker.round = Math.max(0, Utils.toInt(root.turnTracker.round, 0));
+            root.turnTracker.pivotTokenId = String(root.turnTracker.pivotTokenId || '').trim();
+            root.turnTracker.pivotPr = String(root.turnTracker.pivotPr || '').trim();
+            root.turnTracker.currentTokenId = String(root.turnTracker.currentTokenId || '').trim();
+            root.turnTracker.knownTokenIds = Array.isArray(root.turnTracker.knownTokenIds) ? root.turnTracker.knownTokenIds : [];
+            root.turnTracker.roundProgressTokenIds = Array.isArray(root.turnTracker.roundProgressTokenIds) ? root.turnTracker.roundProgressTokenIds : [];
+            root.turnTracker.pendingAddedTokenIds = Array.isArray(root.turnTracker.pendingAddedTokenIds) ? root.turnTracker.pendingAddedTokenIds : [];
+            root.turnTracker.turnMarkerId = String(root.turnTracker.turnMarkerId || '').trim();
+            root.turnTracker.active = Utils.toBoolean(root.turnTracker.active, false);
             root.helperCharacterId = String(root.helperCharacterId || '').trim();
             root.schemaVersion = META.SCHEMA_VERSION;
         },
@@ -1041,6 +1132,7 @@ const CombatAssistant = (() => {
             if (field.type === 'bar') return Utils.clamp(Utils.toInt(value, RUNTIME_CONFIG_DEFAULTS[field.key]), 1, 4);
             if (field.type === 'bar0') return Utils.clamp(Utils.toInt(value, RUNTIME_CONFIG_DEFAULTS[field.key]), 0, 4);
             if (field.type === 'percent') return Utils.clamp(Utils.toInt(value, RUNTIME_CONFIG_DEFAULTS[field.key]), 0, 100);
+            if (field.type === 'number') return Math.max(0, Utils.toInt(value, RUNTIME_CONFIG_DEFAULTS[field.key]));
             if (field.type === 'roll20image') return Utils.extractUrl(value);
             if (field.type === 'image' || field.key === 'CHAT_BACKGROUND_IMAGE_URL') {
                 const url = String(value === undefined || value === null ? '' : value).trim();
@@ -1070,6 +1162,13 @@ const CombatAssistant = (() => {
                 const pct = Utils.toInt(raw, null);
                 if (pct === null || String(pct) !== raw || pct < 0 || pct > 100) {
                     return { ok: false, message: field.label + ' must be a whole number from 0 to 100.' };
+                }
+            }
+            if (field.type === 'number') {
+                const raw = String(value === undefined || value === null ? '' : value).trim();
+                const number = Utils.toInt(raw, null);
+                if (number === null || String(number) !== raw || number < 0) {
+                    return { ok: false, message: field.label + ' must be a whole number of 0 or greater.' };
                 }
             }
             if (field.type === 'roll20image' && !Utils.isRoll20FileUrl(value)) {
@@ -3553,6 +3652,7 @@ const CombatAssistant = (() => {
                 sourceAction: String(result.attackName || ''),
                 sourceImgsrc: String(result.tokenImgsrc || ''),
                 rangeText: String(result.rangeText || result.range || ''),
+                durationText: String(result.durationText || result.duration || ''),
                 isSpellAction: !!result.isSpellAction,
                 isConcentration: !!result.isConcentration,
                 lightInfo: result.lightInfo && result.lightInfo.hasLight ? result.lightInfo : { hasLight: false },
@@ -3750,7 +3850,7 @@ const CombatAssistant = (() => {
                         command: '!combatAssistant set ' + Utils.attrSafe(field.key) + ' &#63;{' + Utils.attrSafe(field.label) + '|' + opts + '}',
                         tooltip: 'Edit ' + field.label
                     });
-                } else if (field.type === 'percent') {
+                } else if (field.type === 'percent' || field.type === 'number') {
                     button = this.compactSettingButtonHtml({
                         label: String(value || 0),
                         command: '!combatAssistant set ' + Utils.attrSafe(field.key) + ' &#63;{' + Utils.attrSafe(field.label) + '|' + Utils.attrSafe(String(value || 0)) + '}',
@@ -3817,7 +3917,7 @@ const CombatAssistant = (() => {
                 label: 'Conc.',
                 command: '!ca conc',
                 backgroundColor: 'rgba(80,80,120,0.95)',
-                tooltip: 'Open active concentration area controls'
+                tooltip: 'Reroll active concentration damage and open controls'
             });
             const body = this.iconButtonTableHtml([dmgButton, healButton, saveButton, initButton, concButton], {
                 columns: 5,
@@ -3837,7 +3937,14 @@ const CombatAssistant = (() => {
                     '<code>!ca menu</code> open the main menu<br>' +
                     '<code>!ca help</code> show this help card<br>' +
                     '<code>!ca config</code> open settings<br>' +
-                    '<code>!ca conc</code> recall active concentration area buttons<br><br>' +
+                    '<code>!ca conc</code> reroll active concentration damage and recall its area buttons<br>' +
+                    '<code>!ca resource</code> show resources and spell slots for selected linked token(s)<br><br>' +
+
+                    '<b>Turn Tracker</b><br>' +
+                    '<code>!ca turn next &lt;token_id&gt;</code> end the current turn<br>' +
+                    '<code>!ca turn focus &lt;token_id&gt;</code> focus the token on the map<br>' +
+                    '<code>!ca turn remove &lt;token_id&gt;</code> advance, then remove that turn (GM)<br>' +
+                    '<code>!ca turn stop yes</code> stop combat and clear the tracker (GM)<br><br>' +
 
                     '<b>Examples</b><br>' +
                     'with token(s) selected<br>'+
@@ -4006,6 +4113,22 @@ const CombatAssistant = (() => {
                 '</tr></tbody></table>';
             this.sendPublicMessage('Concentration Lost', body, 'failure', {
                 titleHtml: this.concentrationTitleHtml(result.casterImgsrc || '', 'Concentration Lost')
+            });
+        },
+
+        sendConcentrationExpired(result) {
+            result = result || {};
+            const revealNames = RuntimeConfig.get('REVEAL_TOKEN_NAMES_IN_LOG');
+            const revealSource = RuntimeConfig.get('REVEAL_DAMAGE_SOURCE');
+            const casterLabel = revealNames ? String(result.casterName || 'Caster') : 'Caster';
+            const spellName = String(result.spellName || '').trim();
+            const casterHtml = Html.span(Utils.escapeHtml(casterLabel), 'color:' + CONFIG.DEFAULT_TEXT_CHARACTER_COLOR + ';font-weight:900;');
+            const spellHtml = spellName && revealSource
+                ? Html.span(Utils.escapeHtml(spellName), 'color:rgb(245,220,80);font-weight:900;')
+                : 'the spell';
+            const body = casterHtml + "'s concentration on " + spellHtml + ' ends naturally as the spell reaches the end of its duration.';
+            this.sendPublicMessage('Concentration Ended', body, 'normal', {
+                titleHtml: this.concentrationTitleHtml(result.casterImgsrc || '', 'Concentration Ended')
             });
         },
 
@@ -4580,6 +4703,7 @@ const CombatAssistant = (() => {
                 halfOnSuccess,
                 halfOnSuccessKnown: saveDc > 0,
                 rangeText: readInlineDetail('Range'),
+                durationText: readInlineDetail('Duration'),
                 areaText: readInlineDetail('Area')
             };
         },
@@ -4800,6 +4924,22 @@ const CombatAssistant = (() => {
                 if (narrativeDamageRolls.length) return narrativeDamageRolls;
             }
             return damageRolls;
+        },
+
+        extractDurationText(fields, advanced, content) {
+            const direct = Utils.cleanRoll20Label(
+                fields.duration || fields.spellduration || fields.spell_duration || (advanced && advanced.durationText) || ''
+            );
+            if (direct) return direct;
+
+            const candidates = [fields.properties, fields.props, fields.description, fields.desc, content].filter(Boolean);
+            for (let i = 0; i < candidates.length; i += 1) {
+                const text = Utils.stripHtml(String(candidates[i] || '')).replace(/\s+/g, ' ').trim();
+                if (!text) continue;
+                const match = text.match(/\bDuration\s*:\s*(.+?)(?=\s+\b(?:Area|Range|Casting\s+Time|Attack|Save|Heal|Components?|School|Cantrip|Level|Material)\b|$)/i);
+                if (match && String(match[1] || '').trim()) return Utils.cleanRoll20Label(match[1]);
+            }
+            return '';
         },
 
         extractRangeText(fields, advanced, content) {
@@ -5126,6 +5266,7 @@ const CombatAssistant = (() => {
             const attack = this.parseAttackRoll(msg, fields, advanced);
             const damageRolls = this.parseDamageRolls(msg, fields, advanced, attack);
             const rangeText = this.extractRangeText(fields, advanced, content);
+            const durationText = this.extractDurationText(fields, advanced, content);
             const damageTotal = damageRolls.length
                 ? damageRolls.reduce((sum, entry) => sum + Math.max(0, Utils.toInt(entry.total, 0)), 0)
                 : Math.max(0, Utils.toInt(advanced && advanced.damageTotal, 0));
@@ -5202,6 +5343,7 @@ const CombatAssistant = (() => {
                 halfOnSuccess: !!((advanced && advanced.halfOnSuccess) || attack.halfOnSuccess),
                 halfOnSuccessKnown: !!((advanced && advanced.halfOnSuccessKnown) || attack.halfOnSuccessKnown),
                 rangeText,
+                durationText,
                 isSpellAction,
                 isConcentration,
                 hasSpellContext,
@@ -5512,7 +5654,14 @@ const CombatAssistant = (() => {
                     return Utils.toInt(a.__order, 0) - Utils.toInt(b.__order, 0);
                 });
 
-            let turnOrder = this.getCurrentTurnOrder();
+            const before = this.getCurrentTurnOrder();
+            let turnOrder = before.map((entry) => Object.assign({}, entry));
+            const trackerState = State.get().turnTracker && typeof State.get().turnTracker === 'object'
+                ? State.get().turnTracker
+                : {};
+            const activeCurrentTokenId = trackerState.active
+                ? String(trackerState.currentTokenId || '').trim()
+                : '';
             const rolledIds = Object.create(null);
             sortedResults.forEach((result) => {
                 const id = String(result.tokenId || '').trim();
@@ -5528,8 +5677,16 @@ const CombatAssistant = (() => {
             });
             turnOrder.sort((a, b) => priorityValue(b && b.pr) - priorityValue(a && a.pr));
 
+            // Roll20 treats index 0 as the active turn. During an active combat,
+            // sorting a newly rolled initiative must not jump the turn back to the
+            // highest initiative. Keep the full initiative order, but rotate that
+            // sorted cycle so the token that was already acting remains at index 0.
+            if (activeCurrentTokenId) {
+                const activeIndex = turnOrder.findIndex((entry) => String(entry && entry.id || '').trim() === activeCurrentTokenId);
+                if (activeIndex > 0) turnOrder = turnOrder.slice(activeIndex).concat(turnOrder.slice(0, activeIndex));
+            }
+
             const firstPageId = String((sortedResults.find((result) => String(result.pageId || '').trim()) || {}).pageId || this.getTokenPageId(sortedResults[0].tokenId) || '').trim();
-            const before = this.getCurrentTurnOrder();
             Campaign().set('turnorder', JSON.stringify(turnOrder));
             if (firstPageId) Campaign().set('initiativepage', firstPageId);
             this.debugTurnOrderWrite('Native Initiative Update', before, turnOrder);
@@ -6117,8 +6274,11 @@ const CombatAssistant = (() => {
 
         sendPlayerPrompt(result) {
             const isHealing = !!result.isHealing;
-            if (isHealing && !RuntimeConfig.get('PLAYER_HEALING_BUTTON')) return false;
-            if (!isHealing && !RuntimeConfig.get('PLAYER_ATTACK_BUTTON')) return false;
+            const playerActionEnabled = isHealing
+                ? RuntimeConfig.get('PLAYER_HEALING_BUTTON')
+                : RuntimeConfig.get('PLAYER_ATTACK_BUTTON');
+            const concentrationTracking = !!(result && result.isConcentration && RuntimeConfig.get('CONCENTRATION_TRACKING'));
+            if (!playerActionEnabled && !concentrationTracking) return false;
             const token = R20.resolveRollSourceToken(result, result.playerId || '');
             const character = token ? R20.getCharacterFromToken(token) : null;
             const playerRecipients = R20.getCharacterControllerDisplayNames(character);
@@ -6130,7 +6290,7 @@ const CombatAssistant = (() => {
             const saveAbility = CombatService.normalizeAbilityName(result.saveAbility || '');
             const areaInfo = result && result.areaInfo && result.areaInfo.isArea ? result.areaInfo : { isArea: false, options: [] };
             const areaOptions = R20.getAreaInfoOptions(areaInfo);
-            const useAreaMarkerRequested = !isHealing && areaInfo.isArea && RuntimeConfig.get('PLAYER_TOKEN_AREA_MARK');
+            const useAreaMarkerRequested = playerActionEnabled && !isHealing && areaInfo.isArea && RuntimeConfig.get('PLAYER_TOKEN_AREA_MARK');
             let areaTargets = [];
             let useCount = 1;
             const payloadObject = isHealing ? {
@@ -6141,6 +6301,7 @@ const CombatAssistant = (() => {
                 sourceAction: String(result.attackName || 'Healing'),
                 sourceImgsrc: String((token && token.get('imgsrc')) || result.tokenImgsrc || ''),
                 rangeText: String(result.rangeText || result.range || ''),
+                durationText: String(result.durationText || result.duration || ''),
                 isSpellAction: !!result.isSpellAction,
                 isConcentration: !!result.isConcentration,
                 lightInfo: result.lightInfo && result.lightInfo.hasLight ? result.lightInfo : { hasLight: false },
@@ -6165,6 +6326,7 @@ const CombatAssistant = (() => {
                 sourceAction: String(result.attackName || ''),
                 sourceImgsrc: String((token && token.get('imgsrc')) || result.tokenImgsrc || ''),
                 rangeText: String(result.rangeText || result.range || ''),
+                durationText: String(result.durationText || result.duration || ''),
                 isSpellAction: !!result.isSpellAction,
                 isConcentration: !!result.isConcentration,
                 lightInfo: result.lightInfo && result.lightInfo.hasLight ? result.lightInfo : { hasLight: false },
@@ -6210,6 +6372,15 @@ const CombatAssistant = (() => {
                     request.areaTargetIds = [];
                 }
             }
+            // Concentration begins when the spell is cast/captured, not when the player
+            // later presses Roll/ATK. This makes the token tooltip and turn counter
+            // available immediately and also supports non-area concentration spells.
+            const concentrationStarted = !!(request && token && payloadObject.isConcentration && RuntimeConfig.get('CONCENTRATION_TRACKING') &&
+                CombatService.startConcentrationForRequest(request, token));
+            // Concentration tracking is independent of whether player ATK/Heal buttons
+            // are enabled. If no player action button is requested, retain the request
+            // solely as the active concentration/reroll payload and stop here.
+            if (!playerActionEnabled) return concentrationStarted;
             const command = useAreaMarker
                 ? ('!combatAssistant usearea ' + actionId)
                 : ('!combatAssistant use ' + actionId + ' &#64;{target|token_id}');
@@ -6349,6 +6520,7 @@ const CombatAssistant = (() => {
                     halfOnSuccess: clearSaveFromPriorAttack ? false : !!(parsed.halfOnSuccess || (prior && prior.halfOnSuccess)),
                     halfOnSuccessKnown: clearSaveFromPriorAttack ? false : !!(parsed.halfOnSuccessKnown || (prior && prior.halfOnSuccessKnown)),
                     rangeText: parsed.rangeText || (prior && prior.rangeText) || '',
+                    durationText: parsed.durationText || (prior && prior.durationText) || '',
                     isSpellAction: !!(parsed.isSpellAction || (prior && prior.isSpellAction)),
                     isConcentration: !!(parsed.isConcentration || (prior && prior.isConcentration)),
                     lightInfo: (parsed.lightInfo && parsed.lightInfo.hasLight ? parsed.lightInfo : null) || (prior && prior.lightInfo) || { hasLight: false },
@@ -6359,6 +6531,989 @@ const CombatAssistant = (() => {
                 });
                 this.sendAttackDamagePrompts(result);
                 if (prior) this.clearRecentAttack(prior);
+            }
+        }
+    };
+
+    /** -----------------------------------------------------------------------
+     * Turn tracker
+     * --------------------------------------------------------------------- */
+    const TurnTracker = {
+        getState() {
+            const root = State.get();
+            root.turnTracker = root.turnTracker && typeof root.turnTracker === 'object' && !Array.isArray(root.turnTracker)
+                ? root.turnTracker
+                : {};
+            root.turnTracker.round = Math.max(0, Utils.toInt(root.turnTracker.round, 0));
+            root.turnTracker.knownTokenIds = Array.isArray(root.turnTracker.knownTokenIds) ? root.turnTracker.knownTokenIds : [];
+            root.turnTracker.roundProgressTokenIds = Array.isArray(root.turnTracker.roundProgressTokenIds) ? root.turnTracker.roundProgressTokenIds : [];
+            root.turnTracker.pendingAddedTokenIds = Array.isArray(root.turnTracker.pendingAddedTokenIds) ? root.turnTracker.pendingAddedTokenIds : [];
+            root.turnTracker.turnMarkerId = String(root.turnTracker.turnMarkerId || '').trim();
+            return root.turnTracker;
+        },
+
+        isEnabled() {
+            return RuntimeConfig.get('TURN_TRACKER');
+        },
+
+        parseTurnOrder(raw) {
+            if (Array.isArray(raw)) return raw.filter(Boolean).map((entry) => Object.assign({}, entry));
+            try {
+                const parsed = JSON.parse(String(raw || '[]'));
+                return Array.isArray(parsed) ? parsed.filter(Boolean).map((entry) => Object.assign({}, entry)) : [];
+            } catch (error) {
+                return [];
+            }
+        },
+
+        getCurrentTurnOrder() {
+            if (typeof Campaign !== 'function') return [];
+            try {
+                return this.parseTurnOrder(Campaign().get('turnorder') || '[]');
+            } catch (error) {
+                return [];
+            }
+        },
+
+        tokenEntries(order) {
+            return (Array.isArray(order) ? order : [])
+                .filter((entry) => {
+                    const id = String(entry && entry.id || '').trim();
+                    return id && id !== '-1' && !!R20.getTokenById(id);
+                })
+                .map((entry, index) => Object.assign({ __order: index }, entry));
+        },
+
+        entryPriority(entry) {
+            return Utils.toNumber(entry && entry.pr, 0);
+        },
+
+        findPivot(order) {
+            const entries = this.tokenEntries(order);
+            if (!entries.length) return null;
+            let pivot = entries[0];
+            for (let i = 1; i < entries.length; i += 1) {
+                const candidate = entries[i];
+                if (this.entryPriority(candidate) > this.entryPriority(pivot)) pivot = candidate;
+            }
+            return pivot;
+        },
+
+        idsFromOrder(order) {
+            return this.tokenEntries(order).map((entry) => String(entry.id || '').trim()).filter(Boolean);
+        },
+
+        firstTokenId(order) {
+            const first = this.tokenEntries(order)[0] || null;
+            return first ? String(first.id || '').trim() : '';
+        },
+
+        rotateOrderToToken(order, tokenId) {
+            const list = (Array.isArray(order) ? order : []).filter(Boolean).map((entry) => Object.assign({}, entry));
+            const safeTokenId = String(tokenId || '').trim();
+            if (!safeTokenId || list.length <= 1) return list;
+            const index = list.findIndex((entry) => String(entry && entry.id || '').trim() === safeTokenId);
+            if (index <= 0) return list;
+            return list.slice(index).concat(list.slice(0, index));
+        },
+
+        difference(a, b) {
+            const wanted = Object.create(null);
+            (Array.isArray(b) ? b : []).forEach((id) => { wanted[String(id)] = true; });
+            return (Array.isArray(a) ? a : []).filter((id) => !wanted[String(id)]);
+        },
+
+        unique(ids) {
+            const seen = Object.create(null);
+            return (Array.isArray(ids) ? ids : []).filter((id) => {
+                const safeId = String(id || '').trim();
+                if (!safeId || seen[safeId]) return false;
+                seen[safeId] = true;
+                return true;
+            });
+        },
+
+        initializeFromCurrentTurnOrder() {
+            if (!this.isEnabled()) return false;
+            const order = this.getCurrentTurnOrder();
+            const entries = this.tokenEntries(order);
+            const state = this.getState();
+            if (!entries.length) {
+                this.resetState();
+                return false;
+            }
+            const pivot = this.findPivot(entries);
+            state.active = true;
+            state.round = Math.max(1, Utils.toInt(state.round, 1));
+            state.pivotTokenId = String(pivot && pivot.id || '').trim();
+            state.pivotPr = pivot ? String(pivot.pr || '') : '';
+            state.currentTokenId = this.firstTokenId(entries);
+            state.knownTokenIds = this.idsFromOrder(entries);
+            state.roundProgressTokenIds = this.unique([state.currentTokenId]);
+            this.updateCurrentTurnPresentation(this.tokenEntries(entries)[0] || null, { sendCard: false, focus: false });
+            return true;
+        },
+
+        resetState() {
+            const state = this.getState();
+            state.round = 0;
+            state.pivotTokenId = '';
+            state.pivotPr = '';
+            state.currentTokenId = '';
+            state.knownTokenIds = [];
+            state.roundProgressTokenIds = [];
+            state.pendingAddedTokenIds = [];
+            state.active = false;
+            this.removeTurnMarker();
+            if (TURN_TRACKER_TIMERS.additions) {
+                clearTimeout(TURN_TRACKER_TIMERS.additions);
+                TURN_TRACKER_TIMERS.additions = null;
+            }
+            return true;
+        },
+
+        tokenImageHtml(info, size, highlight, label) {
+            const imgsrc = String(info && info.imgsrc || '').trim();
+            const dead = !!(info && info.dead);
+            const tooltip = String(label || (info && info.name) || 'Token').trim();
+            const image = Utils.isSafeImageUrl(imgsrc)
+                ? '<img src="' + Utils.attrSafe(imgsrc) + '" style="display:block;width:' + size + 'px;height:' + size + 'px;object-fit:cover;border-radius:4px;" />'
+                : '<span style="display:block;width:' + size + 'px;height:' + size + 'px;line-height:' + size + 'px;text-align:center;border-radius:4px;background:rgba(55,55,55,0.95);color:rgb(210,210,210);font-size:14px;font-weight:900;">?</span>';
+            const deadOverlay = dead
+                ? '<span style="position:absolute;left:0;top:0;width:' + size + 'px;height:' + size + 'px;border-radius:4px;background:rgba(220,0,0,0.42);z-index:1;"></span>'
+                : '';
+            const addedMarker = highlight
+                ? '<span title="New token" style="position:absolute;right:-2px;top:-6px;z-index:3;color:rgb(52,203,116);font-size:13px;line-height:13px;font-weight:900;text-shadow:0 1px 2px rgb(0,0,0),0 0 2px rgb(0,0,0);">&#9650;</span>'
+                : '';
+            return '<span title="' + Utils.attrSafe(tooltip) + '" style="display:inline-block;position:relative;width:' + size + 'px;height:' + size + 'px;vertical-align:middle;overflow:visible;">' + image + deadOverlay + addedMarker + '</span>';
+        },
+
+        tokenHasHpLink(token) {
+            if (!token) return false;
+            for (let i = 1; i <= 4; i += 1) {
+                if (CombatService.linkedBarMatches(token, i, 'hp')) return true;
+            }
+            return false;
+        },
+
+        getTokenHpInfo(token) {
+            const hpBarNumber = CombatService.getBarNumberForAttribute(token, 'hp', 'HP_BAR');
+            const bar = CombatService.getBar(token, hpBarNumber);
+            if (!bar.ok) return { value: 0, max: null, linked: false, hasValue: false };
+            const rawValue = token && Utils.isFunction(token.get) ? token.get('bar' + String(hpBarNumber) + '_value') : '';
+            return {
+                value: Math.max(0, Utils.toInt(bar.value, 0)),
+                max: bar.max,
+                linked: this.tokenHasHpLink(token),
+                hasValue: rawValue !== undefined && rawValue !== null && String(rawValue).trim() !== ''
+            };
+        },
+
+        parseSpeedValue(value, fallback) {
+            const defaultValue = fallback === undefined ? null : fallback;
+            if (value === undefined || value === null || String(value).trim() === '') return defaultValue;
+            const match = String(value).match(/-?\d+(?:\.\d+)?/);
+            if (!match) return defaultValue;
+            const speed = Math.floor(Number(match[0]));
+            return Number.isFinite(speed) && speed >= 0 ? speed : defaultValue;
+        },
+
+        getLegacyTokenSpeed(characterId) {
+            const safeCharacterId = String(characterId || '').trim();
+            if (!safeCharacterId) return 30;
+            const values = [];
+            ['speed', 'npc_speed'].forEach((name) => {
+                if (typeof getAttrByName === 'function') {
+                    try {
+                        const resolved = this.parseSpeedValue(getAttrByName(safeCharacterId, name), null);
+                        if (resolved !== null) values.push(resolved);
+                    } catch (ignored) {}
+                }
+                const direct = CombatService.readAttributeRaw(safeCharacterId, [name], '');
+                const directValue = this.parseSpeedValue(direct, null);
+                if (directValue !== null) values.push(directValue);
+            });
+            return values.length ? Math.max.apply(null, values) : 30;
+        },
+
+        getTokenSpeed(characterId) {
+            const safeCharacterId = String(characterId || '').trim();
+            if (!safeCharacterId) return 30;
+            if (R20.detectSheetVersion(safeCharacterId) === '2014') return this.getLegacyTokenSpeed(safeCharacterId);
+
+            // Beacon values are resolved asynchronously just before the Turn card is sent.
+            // Keep a sane placeholder here for synchronous callers such as getTokenInfo().
+            return 30;
+        },
+
+        async resolveTurnCardSpeed(info) {
+            const safeInfo = info || {};
+            const character = safeInfo.character;
+            const characterId = character
+                ? String(character.id || (Utils.isFunction(character.get) ? character.get('_id') : '') || '').trim()
+                : '';
+            if (!characterId) return safeInfo;
+            if (R20.detectSheetVersion(characterId) === '2014') {
+                safeInfo.speed = this.getLegacyTokenSpeed(characterId);
+                return safeInfo;
+            }
+
+            let resolved = null;
+            if (typeof getSheetItem === 'function') {
+                try {
+                    resolved = this.parseSpeedValue(await getSheetItem(characterId, 'speed', 'current'), null);
+                } catch (error) {
+                    Logger.debug('[turn-card:speed:2024]', error && error.message ? error.message : String(error));
+                }
+            }
+
+            // Last-resort compatibility fallback. Beacon sheets should normally use getSheetItem().
+            if (resolved === null && typeof getAttrByName === 'function') {
+                try {
+                    resolved = this.parseSpeedValue(getAttrByName(characterId, 'speed'), null);
+                } catch (ignored) {}
+            }
+            if (resolved !== null) safeInfo.speed = resolved;
+            return safeInfo;
+        },
+
+        getTokenStatusLabels(token) {
+            if (!token || !Utils.isFunction(token.get)) return '';
+            return String(token.get('statusmarkers') || '')
+                .split(',')
+                .map((entry) => String(entry || '').trim().split('@')[0])
+                .filter(Boolean)
+                .join(', ');
+        },
+
+        getTokenInfo(entry) {
+            const tokenId = String(entry && entry.id || '').trim();
+            const token = R20.getTokenById(tokenId);
+            const character = token ? R20.getCharacterFromToken(token) : null;
+            const hp = token ? this.getTokenHpInfo(token) : { value: 0, max: null, linked: false, hasValue: false };
+            const ac = token ? CombatService.readAc(token) : 0;
+            const characterId = character ? String(character.id || '').trim() : '';
+            return {
+                entry,
+                token,
+                character,
+                tokenId,
+                name: token ? CombatService.getTokenName(token) : String(entry && entry.custom || 'Token'),
+                characterName: character && Utils.isFunction(character.get) ? String(character.get('name') || '').trim() : '',
+                imgsrc: token && Utils.isFunction(token.get) ? String(token.get('imgsrc') || '').trim() : '',
+                initiative: String(entry && entry.pr !== undefined ? entry.pr : ''),
+                hp: hp.value,
+                hpMax: hp.max,
+                hpLinked: hp.linked,
+                hasHpValue: hp.hasValue,
+                dead: hp.hasValue && hp.value <= 0,
+                ac,
+                speed: this.getTokenSpeed(characterId),
+                markers: token ? this.getTokenStatusLabels(token) : '',
+                playerControlled: token ? R20.isPlayerControlledToken(token, character) : false,
+                recipients: token ? R20.getTokenControllerDisplayNames(token, character) : []
+            };
+        },
+
+        roundRecipientIsPublic() {
+            return RuntimeConfig.get('PUBLIC_ROUND_COUNTER');
+        },
+
+        roundTokenLabel(info, publicCard) {
+            const initiative = String(info && info.initiative || '-');
+            if (publicCard) return initiative;
+            return String(info && info.name || 'Token') + ' | HP ' + String(info && info.hp !== undefined ? info.hp : 0) + ' | ' + initiative;
+        },
+
+        buildRoundCounterCard(order, options) {
+            const opts = options || {};
+            const entries = this.tokenEntries(order || this.getCurrentTurnOrder());
+            const publicCard = !!opts.publicCard;
+            const highlightIds = this.unique(opts.highlightTokenIds || []);
+            const round = Math.max(0, Utils.toInt(opts.round, this.getState().round || 0));
+            const count = entries.length;
+            const tokenHtml = entries.map((entry) => {
+                const info = this.getTokenInfo(entry);
+                const highlighted = highlightIds.indexOf(info.tokenId) >= 0;
+                return '<span title="' + Utils.attrSafe(this.roundTokenLabel(info, publicCard)) + '" style="display:inline-block;vertical-align:top;width:32px;height:32px;text-align:center;margin:1px 2px 4px 2px;">' +
+                    this.tokenImageHtml(info, 30, highlighted, this.roundTokenLabel(info, publicCard)) +
+                '</span>';
+            }).join('');
+            const stopButton = opts.includeStop
+                ? Render.compactSettingButtonHtml({
+                    label: 'Stop',
+                    command: '!combatAssistant turnstop &#63;{Stop Combat|No,no|Yes,yes}',
+                    tooltip: 'End combat and clear the Turn Order',
+                    backgroundColor: 'rgba(120,40,40,0.95)'
+                })
+                : '';
+            const roundBox = Render.rollBadgeHtml({ total: round, natural: 0, tooltip: 'Round ' + String(round) }, '', {
+                size: 40,
+                fontSize: '20px',
+                bgColor: 'rgba(55,55,55,0.95)'
+            });
+            const body =
+                '<table style="width:100%;border-collapse:collapse;table-layout:fixed;"><tbody>' +
+                    '<tr>' +
+                        '<td style="width:80%;text-align:center;vertical-align:middle;padding:0 6px 5px 0;color:rgb(165,165,165);font-size:12px;line-height:14px;">' +
+                            Utils.escapeHtml(String(count)) + ' Tokens in Combat' +
+                        '</td>' +
+                        '<td style="width:20%;text-align:center;vertical-align:middle;padding:0 0 5px 0;color:rgb(205,205,205);font-size:10px;line-height:14px;font-weight:900;">Round</td>' +
+                    '</tr>' +
+                    '<tr>' +
+                        '<td style="width:80%;text-align:center;vertical-align:top;padding:0 6px 0 0;">' + (tokenHtml || '<span style="color:rgb(150,150,150);font-size:11px;">No tokens</span>') + '</td>' +
+                        '<td style="width:20%;text-align:center;vertical-align:top;padding:0;">' +
+                            roundBox +
+                            (stopButton ? ('<div style="padding-top:5px;">' + stopButton + '</div>') : '') +
+                        '</td>' +
+                    '</tr>' +
+                '</tbody></table>';
+            return Html.card({
+                title: String(opts.title || 'Round Counter'),
+                body,
+                buildOptions: { titleColor: 'rgb(230,230,230)', borderColor: 'rgb(127,127,127)' }
+            });
+        },
+
+        sendRoundCounter(options) {
+            if (!this.isEnabled() || !RuntimeConfig.get('ROUND_COUNTER')) return false;
+            const order = options && options.order;
+            const gmCard = this.buildRoundCounterCard(order, Object.assign({}, options || {}, {
+                publicCard: false,
+                includeStop: options && Object.prototype.hasOwnProperty.call(options, 'includeStop') ? options.includeStop : true
+            }));
+            R20.whisper('GM', gmCard);
+            if (this.roundRecipientIsPublic()) {
+                const publicCard = this.buildRoundCounterCard(order, Object.assign({}, options || {}, {
+                    publicCard: true,
+                    includeStop: false
+                }));
+                R20.send(publicCard);
+            }
+            return true;
+        },
+
+        buildTurnCard(info, includeNext, includeRemove, options) {
+            const opts = options || {};
+            const tokenName = String(info && info.name || 'Token');
+            const displayName = String(info && (info.characterName || info.name) || 'Token');
+            const hpColor = info && info.hp > 0 ? 'rgb(52,203,116)' : 'rgb(220,45,45)';
+            const tokenFocusButton = this.turnFocusImageButtonHtml(info, 40);
+            const concentration = info && info.tokenId ? State.getConcentrationByTokenId(info.tokenId) : null;
+            const tooltipTurnsLeft = concentration ? CombatService.concentrationTurnsLeftFromToken(info && info.token) : null;
+            const stateTurnsLeft = concentration && concentration.turnsLeft !== null && concentration.turnsLeft !== undefined
+                ? Math.max(0, Utils.toInt(concentration.turnsLeft, 0))
+                : null;
+            const concentrationTurnsLeft = tooltipTurnsLeft !== null ? tooltipTurnsLeft : stateTurnsLeft;
+            const concentrationTurnLabel = concentrationTurnsLeft !== null ? (String(concentrationTurnsLeft) + ' T.') : '∞ T.';
+            const concentrationButton = concentration
+                ? Render.iconButtonHtml({
+                    iconHtml: '&#9203;',
+                    label: concentrationTurnLabel,
+                    command: '!combatAssistant conc ' + Utils.attrSafe(info.tokenId),
+                    width: 42,
+                    height: 38,
+                    iconSize: 16,
+                    labelSize: 9,
+                    tooltip: "Reroll this concentration spell's damage and open its controls" + (concentrationTurnsLeft !== null ? (' - ' + String(concentrationTurnsLeft) + ' turn(s) left') : ''),
+                    backgroundColor: 'rgba(80,80,120,0.95)',
+                    margin: '0'
+                })
+                : '';
+            const nextButton = includeNext
+                ? Render.iconButtonHtml({
+                    iconHtml: '&#10145;&#65039;',
+                    label: 'Next',
+                    command: '!combatAssistant turnnext ' + Utils.attrSafe(info.tokenId),
+                    width: 42,
+                    height: 38,
+                    iconSize: 16,
+                    labelSize: 10,
+                    tooltip: 'End this turn',
+                    backgroundColor: 'rgba(45,45,45,0.95)',
+                    margin: '0'
+                })
+                : '';
+            const removeButton = includeRemove
+                ? Render.compactSettingButtonHtml({
+                    label: 'Remove',
+                    command: '!combatAssistant turnremove ' + Utils.attrSafe(info.tokenId),
+                    width: 38,
+                    tooltip: 'Advance to the next turn, then remove this defeated token from the Turn Order',
+                    backgroundColor: 'rgba(120,40,40,0.95)'
+                })
+                : '';
+            const mainTurnButtons = (concentrationButton ? (concentrationButton + '<span style="display:inline-block;width:4px;height:1px;vertical-align:middle;"></span>') : '') + nextButton;
+            const turnButtons = '<div style="white-space:nowrap;text-align:right;line-height:0;">' + mainTurnButtons + '</div>' +
+                (removeButton ? ('<div style="padding-top:3px;text-align:right;">' + removeButton + '</div>') : '');
+            const markers = String(info && info.markers || '').trim() || '-';
+            let turnResourceList = '';
+            const allowPlayerResources = RuntimeConfig.get('SHOW_PLAYER_RESOURCES') && info && info.playerControlled;
+            const allowNpcResources = RuntimeConfig.get('SHOW_NPC_RESOURCES') && info && !info.playerControlled && opts.gmCard === true;
+            if ((allowPlayerResources || allowNpcResources) && info && info.character && info.tokenId) {
+                try {
+                    const characterId = String(info.character.id || (Utils.isFunction(info.character.get) ? info.character.get('_id') : '') || '').trim();
+                    if (characterId) {
+                        const resourceEntries = ResourceService.getEntries(characterId);
+                        if (resourceEntries.length) turnResourceList = ResourceService.buildResourceListHtml(info.tokenId, resourceEntries);
+                    }
+                } catch (error) {
+                    Logger.debug('[turn-card:resources]', error && error.message ? error.message : String(error));
+                }
+            }
+            const mainTurnRow =
+                '<table style="width:100%;border-collapse:collapse;table-layout:fixed;"><tbody><tr>' +
+                    '<td style="width:64%;text-align:left;vertical-align:middle;padding:0 6px 0 0;">' +
+                        '<table style="width:100%;border-collapse:collapse;table-layout:auto;"><tbody><tr>' +
+                            '<td rowspan="3" style="width:44px;text-align:left;vertical-align:top;padding:0 6px 0 0;">' + tokenFocusButton + '</td>' +
+                            '<td style="text-align:left;vertical-align:top;color:' + CONFIG.DEFAULT_TEXT_CHARACTER_COLOR + ';font-size:13px;line-height:15px;font-weight:900;">' + Utils.escapeHtml(displayName) + '</td>' +
+                        '</tr><tr>' +
+                            '<td style="text-align:left;vertical-align:top;font-size:11px;line-height:14px;color:rgb(220,220,220);">' +
+                                '<span style="color:' + hpColor + ';font-weight:900;">&#10084;&#65039; ' + Utils.escapeHtml(String(info && info.hp !== undefined ? info.hp : 0)) + '</span>' +
+                                ' | <span style="color:rgb(84,186,255);font-weight:900;">&#128737;&#65039; ' + Utils.escapeHtml(String(info && info.ac || 0)) + '</span>' +
+                                ' | <span style="color:rgb(235,205,75);font-weight:900;">&#127939; ' + Utils.escapeHtml(String(info && info.speed || 0)) + '</span>' +
+                            '</td>' +
+                        '</tr><tr>' +
+                            '<td style="text-align:left;vertical-align:top;color:rgb(170,170,170);font-size:10px;line-height:12px;">' + Utils.escapeHtml(markers) + '</td>' +
+                        '</tr></tbody></table>' +
+                    '</td>' +
+                    '<td style="width:36%;text-align:right;vertical-align:middle;padding:0;">' + turnButtons + '</td>' +
+                '</tr></tbody></table>';
+            const resourceSection = turnResourceList
+                ? '<div style="height:1px;background:rgb(105,105,105);margin:7px 0 4px 0;"></div>' + turnResourceList
+                : '';
+            return Html.card({
+                title: tokenName + '\'s Turn',
+                body: mainTurnRow + resourceSection,
+                buildOptions: { titleColor: CONFIG.DEFAULT_TEXT_CHARACTER_COLOR, borderColor: 'rgb(127,127,127)', bodyAlign: 'left' }
+            });
+        },
+
+        turnFocusImageButtonHtml(info, size) {
+            const tokenId = String(info && info.tokenId || '').trim();
+            const label = String(info && info.name || 'Token').trim();
+            const image = this.tokenImageHtml(info, size, false, 'Focus ' + label);
+            if (!tokenId) return image;
+            return '<a href="!combatAssistant turnfocus ' + Utils.attrSafe(tokenId) + '" title="' + Utils.attrSafe('Focus ' + label) + '" style="display:inline-block;width:' + size + 'px;height:' + size + 'px;padding:0;margin:0;border:0;background:transparent;text-decoration:none;line-height:' + size + 'px;vertical-align:middle;">' + image + '</a>';
+        },
+
+        setPivotFromOrder(order) {
+            const pivot = this.findPivot(order);
+            const state = this.getState();
+            state.pivotTokenId = String(pivot && pivot.id || '').trim();
+            state.pivotPr = pivot ? String(pivot.pr || '') : '';
+            return state.pivotTokenId;
+        },
+
+        pruneRoundProgress(currentIds) {
+            const allowed = Object.create(null);
+            (Array.isArray(currentIds) ? currentIds : []).forEach((id) => { allowed[String(id)] = true; });
+            const state = this.getState();
+            state.roundProgressTokenIds = this.unique(state.roundProgressTokenIds || []).filter((id) => allowed[String(id)]);
+            return state.roundProgressTokenIds;
+        },
+
+        recordRoundProgress(tokenId, currentIds) {
+            const safeTokenId = String(tokenId || '').trim();
+            if (!safeTokenId) return [];
+            const state = this.getState();
+            state.roundProgressTokenIds = this.unique((state.roundProgressTokenIds || []).concat([safeTokenId]));
+            if (Array.isArray(currentIds) && currentIds.length) this.pruneRoundProgress(currentIds);
+            return state.roundProgressTokenIds;
+        },
+
+        hasCompletedRoundProgress(currentIds) {
+            const seen = Object.create(null);
+            this.unique(this.getState().roundProgressTokenIds || []).forEach((id) => { seen[String(id)] = true; });
+            return (Array.isArray(currentIds) ? currentIds : []).every((id) => !!seen[String(id)]);
+        },
+
+        getTurnMarker() {
+            const markerId = String(this.getState().turnMarkerId || '').trim();
+            return markerId ? getObj('graphic', markerId) : null;
+        },
+
+        removeTurnMarker() {
+            const state = this.getState();
+            const marker = this.getTurnMarker();
+            if (marker && Utils.isFunction(marker.remove)) {
+                try {
+                    marker.remove();
+                } catch (error) {
+                    Logger.debug('[turn-marker:remove]', error && error.message ? error.message : String(error));
+                }
+            }
+            state.turnMarkerId = '';
+            return true;
+        },
+
+        isTurnMarkerGraphic(token) {
+            if (!token || !Utils.isFunction(token.get)) return false;
+            const markerId = String(this.getState().turnMarkerId || '').trim();
+            const tokenId = R20.getTokenId(token);
+            if (markerId && tokenId === markerId) return true;
+            return String(token.get('gmnotes') || '').indexOf('Managed by Combat Assistant Turn Marker') >= 0;
+        },
+
+        getTurnMarkerLayer() {
+            return RuntimeConfig.get('PUBLIC_TURN_MARKER') ? 'map' : 'gmlayer';
+        },
+
+        bringTurnMarkerForward(marker) {
+            if (!marker || !RuntimeConfig.get('PUBLIC_TURN_MARKER')) return false;
+            const move = () => {
+                try {
+                    if (typeof toFront === 'function') toFront(marker);
+                } catch (ignored) {}
+            };
+            move();
+            setTimeout(move, 100);
+            return true;
+        },
+
+        updateTurnMarkerForEntry(entry) {
+            if (!this.isEnabled() || !RuntimeConfig.get('TURN_MARKER')) {
+                this.removeTurnMarker();
+                return false;
+            }
+            const info = this.getTokenInfo(entry);
+            const token = info && info.token;
+            const imgsrc = String(RuntimeConfig.get('TURN_MARKER_IMAGE_URL') || '').trim();
+            if (!token || !Utils.isFunction(token.get) || !Utils.isRoll20FileUrl(imgsrc) || !imgsrc || typeof createObj !== 'function') {
+                this.removeTurnMarker();
+                return false;
+            }
+            const pageId = R20.getTokenPageId(token);
+            if (!pageId) {
+                this.removeTurnMarker();
+                return false;
+            }
+            const offset = Math.max(0, Utils.toInt(RuntimeConfig.get('TURN_MARKER_IMG_SIZE'), 20));
+            const width = Math.max(1, Utils.toNumber(token.get('width'), 70) + offset);
+            const height = Math.max(1, Utils.toNumber(token.get('height'), 70) + offset);
+            const layer = this.getTurnMarkerLayer();
+            const markerData = {
+                _pageid: pageId,
+                layer,
+                imgsrc,
+                name: 'CA Turn Marker',
+                left: Utils.toNumber(token.get('left'), 0),
+                top: Utils.toNumber(token.get('top'), 0),
+                width,
+                height,
+                rotation: Utils.toNumber(token.get('rotation'), 0),
+                showname: false,
+                showplayers_name: false,
+                represents: '',
+                controlledby: '',
+                isdrawing: true,
+                disableTokenMenu: true,
+                gmnotes: 'Managed by Combat Assistant Turn Marker'
+            };
+            const markerUpdateData = Object.assign({}, markerData);
+            delete markerUpdateData._pageid;
+            let marker = this.getTurnMarker();
+            try {
+                if (!marker || !Utils.isFunction(marker.get) || String(marker.get('_pageid') || '').trim() !== pageId) {
+                    if (marker && Utils.isFunction(marker.remove)) marker.remove();
+                    marker = createObj('graphic', markerData);
+                    this.getState().turnMarkerId = marker ? String(marker.id || '').trim() : '';
+                } else if (Utils.isFunction(marker.set)) {
+                    marker.set(markerUpdateData);
+                }
+                this.bringTurnMarkerForward(marker);
+            } catch (error) {
+                Logger.debug('[turn-marker:update]', error && error.message ? error.message : String(error));
+                this.getState().turnMarkerId = '';
+                return false;
+            }
+            return !!marker;
+        },
+
+        focusTurnToken(entry, force) {
+            if (!force && !RuntimeConfig.get('TURN_AUTO_FOCUS')) return false;
+            if (typeof sendPing !== 'function') return false;
+            const info = this.getTokenInfo(entry);
+            const token = info && info.token;
+            const pageId = token ? R20.getTokenPageId(token) : '';
+            if (!token || !pageId || !Utils.isFunction(token.get)) return false;
+            try {
+                sendPing(Utils.toNumber(token.get('left'), 0), Utils.toNumber(token.get('top'), 0), pageId, null, true);
+                return true;
+            } catch (error) {
+                Logger.debug('[turn-focus]', error && error.message ? error.message : String(error));
+                return false;
+            }
+        },
+
+        focusTokenById(tokenId, ctx) {
+            const safeTokenId = String(tokenId || '').trim();
+            if (!safeTokenId) return false;
+            const token = R20.getTokenById(safeTokenId);
+            if (!token) return false;
+            if (ctx && !ctx.isGM && !CommandHandlers.canUseTokenButton(ctx, token)) {
+                Render.sendWhisperMessage(ctx.who, 'Permission Denied', 'You do not control this token.', 'failure');
+                return false;
+            }
+            const entry = this.tokenEntries(this.getCurrentTurnOrder()).filter((turn) => String(turn.id || '').trim() === safeTokenId)[0] || { id: safeTokenId, pr: '' };
+            return this.focusTurnToken(entry, true);
+        },
+
+        updateCurrentTurnPresentation(entry, options) {
+            const opts = options || {};
+            if (!entry) return false;
+            this.updateTurnMarkerForEntry(entry);
+            if (opts.focus !== false) this.focusTurnToken(entry, false);
+            if (opts.sendCard) this.sendTurnCard(entry);
+            return true;
+        },
+
+        refreshCurrentTurnPresentation(options) {
+            const current = this.tokenEntries(this.getCurrentTurnOrder())[0] || null;
+            return current ? this.updateCurrentTurnPresentation(current, options || { sendCard: false, focus: false }) : false;
+        },
+
+        handleGraphicChange(token) {
+            if (!this.isEnabled() || !RuntimeConfig.get('TURN_MARKER_FOLLOW')) return false;
+            if (this.isTurnMarkerGraphic(token)) return false;
+            const tokenId = R20.getTokenId(token);
+            if (!tokenId || tokenId !== String(this.getState().currentTokenId || '').trim()) return false;
+            return this.refreshCurrentTurnPresentation({ sendCard: false, focus: false });
+        },
+
+        handleGraphicDestroyed(token) {
+            if (!token) return false;
+            const tokenId = R20.getTokenId(token);
+            const state = this.getState();
+            if (tokenId && tokenId === String(state.turnMarkerId || '').trim()) {
+                state.turnMarkerId = '';
+                return true;
+            }
+            if (tokenId && tokenId === String(state.currentTokenId || '').trim()) {
+                this.removeTurnMarker();
+                return true;
+            }
+            return false;
+        },
+
+        sendTurnCard(entry) {
+            if (!this.isEnabled() || !entry) return false;
+            const info = this.getTokenInfo(entry);
+            if (!info.token) return false;
+            const expectedTokenId = String(info.tokenId || '').trim();
+            const deliver = (resolvedInfo) => {
+                // A Beacon speed read is asynchronous. If the turn already changed while
+                // Roll20 was resolving it, suppress the stale card instead of sending it late.
+                const current = this.tokenEntries(this.getCurrentTurnOrder())[0] || null;
+                if (expectedTokenId && current && String(current.id || '').trim() !== expectedTokenId) return false;
+                const finalInfo = resolvedInfo || info;
+                const showRemove = !RuntimeConfig.get('REMOVE_NPC_DEAD_TOKENS') && this.isDeadNpcInfo(finalInfo);
+                const gmCard = this.buildTurnCard(finalInfo, true, showRemove, { gmCard: true });
+                R20.whisper('GM', gmCard);
+                if (finalInfo.playerControlled) {
+                    // Player Next is intrinsic to Turn Tracker: there is no separate
+                    // PLAYER_END_TURNS setting anymore. Only the GM receives Remove.
+                    const playerCard = this.buildTurnCard(finalInfo, true, false, { gmCard: false });
+                    finalInfo.recipients.forEach((recipient) => {
+                        if (recipient) R20.whisper(recipient, playerCard);
+                    });
+                }
+                return true;
+            };
+
+            const characterId = info.character
+                ? String(info.character.id || (Utils.isFunction(info.character.get) ? info.character.get('_id') : '') || '').trim()
+                : '';
+            if (characterId && R20.detectSheetVersion(characterId) === '2024') {
+                this.resolveTurnCardSpeed(info)
+                    .then(deliver)
+                    .catch((error) => {
+                        Logger.debug('[turn-card:speed]', error && error.message ? error.message : String(error));
+                        deliver(info);
+                    });
+                return true;
+            }
+            return deliver(info);
+        },
+
+        processConcentrationTurnStart(entry) {
+            if (!entry) return false;
+            const tokenId = String(entry.id || '').trim();
+            return tokenId ? CombatService.processConcentrationTurnStart(tokenId) : false;
+        },
+
+        isDeadNpcInfo(info) {
+            return !!(info && info.token && !info.hpLinked && info.hasHpValue && info.hp <= 0);
+        },
+
+        isDeadNpcTurn(entry) {
+            return this.isDeadNpcInfo(this.getTokenInfo(entry));
+        },
+
+        removeTurn(tokenId) {
+            if (!this.isEnabled()) return false;
+            if (typeof Campaign !== 'function') return false;
+            const safeTokenId = String(tokenId || '').trim();
+            if (!safeTokenId) return false;
+            const before = this.getCurrentTurnOrder();
+            const after = before.filter((entry) => String(entry && entry.id || '').trim() !== safeTokenId);
+            Campaign().set('turnorder', JSON.stringify(after));
+            return before.length !== after.length;
+        },
+
+        maybeHandleCurrentDeadNpc(order) {
+            const current = this.tokenEntries(order)[0] || null;
+            if (!current || !this.isDeadNpcTurn(current)) return false;
+            if (RuntimeConfig.get('REMOVE_NPC_DEAD_TOKENS')) {
+                this.removeTurn(current.id);
+                return true;
+            }
+            // With automatic removal OFF the normal turn card carries a small red
+            // Remove button below Next. No separate Token Remover card is sent.
+            return false;
+        },
+
+        removeCurrentTurnAfterAdvance(tokenId, ctx) {
+            if (!this.isEnabled()) return false;
+            const safeTokenId = String(tokenId || '').trim();
+            const order = this.getCurrentTurnOrder();
+            const current = this.tokenEntries(order)[0] || null;
+            if (!current || !safeTokenId || String(current.id || '').trim() !== safeTokenId) {
+                Render.sendWhisperMessage(ctx && ctx.who || 'GM', 'Turn Tracker', 'That token is not the current turn.', 'warning');
+                return false;
+            }
+            if (!this.isDeadNpcTurn(current)) {
+                Render.sendWhisperMessage(ctx && ctx.who || 'GM', 'Turn Tracker', 'Remove is only available for a defeated unlinked NPC turn.', 'warning');
+                return false;
+            }
+            if (order.length <= 1) return this.removeTurn(safeTokenId);
+
+            // Advance first so all normal next-turn presentation, focus, marker and
+            // round-wrap behavior runs exactly as it would from the Next button.
+            // Remove the old token on the following tick, after that transition.
+            if (!this.advanceTurn(safeTokenId, ctx)) return false;
+            setTimeout(() => {
+                this.removeTurn(safeTokenId);
+            }, 0);
+            return true;
+        },
+
+        advanceTurn(tokenId, ctx) {
+            if (!this.isEnabled()) return false;
+            const order = this.getCurrentTurnOrder();
+            const entries = this.tokenEntries(order);
+            const current = entries[0] || null;
+            const safeTokenId = String(tokenId || '').trim();
+            if (!current || !safeTokenId || String(current.id || '').trim() !== safeTokenId) {
+                Render.sendWhisperMessage(ctx && ctx.who || 'GM', 'Turn Tracker', 'That token is not the current turn.', 'warning');
+                return false;
+            }
+            const token = R20.getTokenById(safeTokenId);
+            if (!ctx.isGM && !CommandHandlers.canUseTokenButton(ctx, token)) {
+                Render.sendWhisperMessage(ctx.who, 'Permission Denied', 'You do not control this token.', 'failure');
+                return false;
+            }
+            const state = this.getState();
+            if (order.length <= 1) {
+                state.round = Math.max(1, Utils.toInt(state.round, 1)) + 1;
+                state.currentTokenId = safeTokenId;
+                state.roundProgressTokenIds = [safeTokenId];
+                this.processConcentrationTurnStart(current);
+                this.sendRoundCounter({ order, includeStop: true, round: state.round });
+                this.updateCurrentTurnPresentation(current, { sendCard: true, focus: true });
+                return true;
+            }
+            const rotated = order.slice(1).concat(order.slice(0, 1));
+            const rotatedIds = this.idsFromOrder(rotated);
+            const next = this.tokenEntries(rotated)[0] || null;
+            const nextId = String(next && next.id || '').trim();
+            let pivotId = String(state.pivotTokenId || '').trim();
+            if (!pivotId || this.idsFromOrder(order).indexOf(pivotId) < 0) pivotId = this.setPivotFromOrder(order);
+            const startsNewRound = !!(nextId && pivotId && nextId === pivotId && String(current.id || '').trim() !== pivotId);
+
+            // Keep the tracker state ahead of Campaign().set(). This prevents the
+            // change:campaign:turnorder handler from treating a CA Next rotation as
+            // an unprocessed turn change and, most importantly, makes the wrap from
+            // the last token back to the pivot increment the round deterministically.
+            if (nextId) {
+                state.currentTokenId = nextId;
+                if (startsNewRound) {
+                    state.round = Math.max(1, Utils.toInt(state.round, 1)) + 1;
+                    state.roundProgressTokenIds = this.unique([nextId]);
+                } else {
+                    this.recordRoundProgress(nextId, rotatedIds);
+                }
+            }
+
+            if (next) this.processConcentrationTurnStart(next);
+            Campaign().set('turnorder', JSON.stringify(rotated));
+
+            if (startsNewRound) {
+                this.sendRoundCounter({ order: rotated, includeStop: true, round: state.round });
+            }
+            if (next) {
+                if (this.maybeHandleCurrentDeadNpc(rotated)) return true;
+                this.updateCurrentTurnPresentation(next, { sendCard: true, focus: true });
+            }
+            return true;
+        },
+
+        stopCombat(confirm) {
+            if (!this.isEnabled()) return false;
+            const answer = String(confirm || '').trim().toLowerCase();
+            if (answer !== 'yes' && answer !== 'y') return false;
+            const order = this.getCurrentTurnOrder();
+            const state = this.getState();
+            const round = Math.max(0, Utils.toInt(state.round, 0));
+            if (typeof Campaign === 'function') Campaign().set('turnorder', '[]');
+            this.sendRoundCounter({ order, includeStop: false, round, title: 'Combat Ended' });
+            this.resetState();
+            return true;
+        },
+
+        scheduleAddedTokensRender(addedIds) {
+            const state = this.getState();
+            state.pendingAddedTokenIds = this.unique((state.pendingAddedTokenIds || []).concat(addedIds || []));
+            if (TURN_TRACKER_TIMERS.additions) clearTimeout(TURN_TRACKER_TIMERS.additions);
+
+            TURN_TRACKER_TIMERS.additions = setTimeout(() => {
+                TURN_TRACKER_TIMERS.additions = null;
+                if (!this.isEnabled()) return;
+
+                const currentOrder = this.getCurrentTurnOrder();
+                const currentIds = this.idsFromOrder(currentOrder);
+                const currentState = this.getState();
+                const knownIds = this.unique(currentState.knownTokenIds || []);
+                const newlyDiscovered = this.difference(currentIds, knownIds);
+
+                // Re-check the live Turn Order after the 3-second quiet window.
+                // If another token appeared without a clean Roll20 change event,
+                // absorb it into the batch and restart the 3-second window.
+                if (newlyDiscovered.length) {
+                    currentState.pendingAddedTokenIds = this.unique((currentState.pendingAddedTokenIds || []).concat(newlyDiscovered));
+                    currentState.knownTokenIds = currentIds.slice();
+                    this.scheduleAddedTokensRender([]);
+                    return;
+                }
+
+                const present = Object.create(null);
+                currentIds.forEach((id) => { present[String(id)] = true; });
+                const highlights = this.unique(currentState.pendingAddedTokenIds || [])
+                    .filter((id) => !!present[String(id)]);
+                currentState.pendingAddedTokenIds = [];
+
+                if (highlights.length) {
+                    this.sendRoundCounter({
+                        order: currentOrder,
+                        highlightTokenIds: highlights,
+                        includeStop: true,
+                        round: currentState.round
+                    });
+                }
+            }, 3000);
+        },
+
+        handleTurnOrderChange(campaign, previous) {
+            if (!this.isEnabled()) return;
+            const currentOrder = this.getCurrentTurnOrder();
+            const previousOrder = previous && Object.prototype.hasOwnProperty.call(previous, 'turnorder')
+                ? this.parseTurnOrder(previous.turnorder)
+                : [];
+            const currentIds = this.idsFromOrder(currentOrder);
+            const previousIds = this.idsFromOrder(previousOrder);
+            const state = this.getState();
+            if (!currentIds.length) {
+                this.resetState();
+                return;
+            }
+
+            // Prefer our persistent known-token set once combat is active. It is a
+            // more reliable baseline than Roll20's previous.turnorder for API-driven
+            // mutations and prevents additions from being missed between rapid edits.
+            const knownBefore = this.unique(state.knownTokenIds || []);
+            const structuralBaselineIds = state.active && knownBefore.length ? knownBefore : previousIds;
+            const addedIds = this.difference(currentIds, structuralBaselineIds);
+            const removedIds = this.difference(structuralBaselineIds, currentIds);
+            const previousFirst = previousIds[0] || String(state.currentTokenId || '').trim();
+            const currentFirst = currentIds[0] || '';
+            let pivotId = String(state.pivotTokenId || '').trim();
+            const trackedCurrentId = String(state.currentTokenId || '').trim();
+            const firstChanged = currentFirst && currentFirst !== trackedCurrentId;
+            const structuralChange = addedIds.length > 0 || removedIds.length > 0;
+            let showRound = false;
+
+            // Adding an initiative entry is structural, not a turn advance. Roll20
+            // may sort the whole list and move the highest initiative to index 0.
+            // If the token that was already acting is still present, rotate the new
+            // cycle back around that token and keep all turn/round progress intact.
+            const activePureAddition = !!(
+                state.active &&
+                addedIds.length > 0 &&
+                removedIds.length === 0 &&
+                trackedCurrentId &&
+                currentIds.indexOf(trackedCurrentId) >= 0
+            );
+            if (activePureAddition) {
+                const preservedOrder = currentFirst === trackedCurrentId
+                    ? currentOrder
+                    : this.rotateOrderToToken(currentOrder, trackedCurrentId);
+                const preservedIds = this.idsFromOrder(preservedOrder);
+                const pivot = this.findPivot(preservedOrder);
+                if (pivot) {
+                    state.pivotTokenId = String(pivot.id || '').trim();
+                    state.pivotPr = String(pivot.pr || '');
+                }
+                this.recordRoundProgress(trackedCurrentId, preservedIds);
+                state.currentTokenId = trackedCurrentId;
+                state.knownTokenIds = currentIds.slice();
+                this.scheduleAddedTokensRender(addedIds);
+                if (currentFirst !== trackedCurrentId && typeof Campaign === 'function') {
+                    Campaign().set('turnorder', JSON.stringify(preservedOrder));
+                }
+                const preservedCurrent = this.tokenEntries(preservedOrder)[0] || null;
+                if (preservedCurrent) this.updateCurrentTurnPresentation(preservedCurrent, { sendCard: false, focus: false });
+                return;
+            }
+
+            if (!state.active || (!previousIds.length && !knownBefore.length)) {
+                state.round = Math.max(1, Utils.toInt(state.round, 0) || 1);
+                state.active = true;
+                pivotId = this.setPivotFromOrder(currentOrder);
+                state.roundProgressTokenIds = this.unique([currentFirst]);
+                showRound = true;
+            } else if (structuralChange) {
+                pivotId = this.setPivotFromOrder(currentOrder);
+                state.roundProgressTokenIds = this.unique([currentFirst]);
+            } else {
+                if (!pivotId || currentIds.indexOf(pivotId) < 0) {
+                    pivotId = this.setPivotFromOrder(currentOrder);
+                    state.roundProgressTokenIds = this.unique([currentFirst]);
+                }
+                if (firstChanged) {
+                    this.recordRoundProgress(previousFirst, currentIds);
+                    if (currentFirst === pivotId && previousFirst !== currentFirst && this.hasCompletedRoundProgress(currentIds)) {
+                        state.round = Math.max(1, Utils.toInt(state.round, 1)) + 1;
+                        state.roundProgressTokenIds = this.unique([currentFirst]);
+                        showRound = true;
+                    } else {
+                        this.recordRoundProgress(currentFirst, currentIds);
+                    }
+                }
+            }
+
+            state.pivotTokenId = pivotId;
+            state.pivotPr = (this.tokenEntries(currentOrder).filter((entry) => String(entry.id || '').trim() === pivotId)[0] || {}).pr || state.pivotPr || '';
+            state.currentTokenId = currentFirst;
+            state.knownTokenIds = currentIds.slice();
+
+            if ((firstChanged || showRound) && currentFirst) this.processConcentrationTurnStart(this.tokenEntries(currentOrder)[0]);
+            if (showRound) this.sendRoundCounter({ order: currentOrder, includeStop: true, round: state.round });
+            if (addedIds.length && previousIds.length) this.scheduleAddedTokensRender(addedIds);
+            if (firstChanged || showRound) {
+                if (this.maybeHandleCurrentDeadNpc(currentOrder)) return;
+                this.updateCurrentTurnPresentation(this.tokenEntries(currentOrder)[0], { sendCard: true, focus: true });
+            } else {
+                this.updateCurrentTurnPresentation(this.tokenEntries(currentOrder)[0], { sendCard: false, focus: false });
             }
         }
     };
@@ -6745,6 +7900,99 @@ const CombatAssistant = (() => {
                 .indexOf(safeMarker) >= 0;
         },
 
+        concentrationDurationTurns(durationText) {
+            const text = Utils.stripHtml(String(durationText || '')).replace(/\s+/g, ' ').trim().toLowerCase();
+            if (!text) return null;
+            const match = text.match(/(?:up\s+to\s+)?(\d+(?:\.\d+)?)\s*(rounds?|turns?|seconds?|secs?|minutes?|mins?|hours?|hrs?|days?)/i);
+            if (!match) return null;
+            const amount = Math.max(0, Utils.toNumber(match[1], 0));
+            const unit = String(match[2] || '').toLowerCase();
+            if (amount <= 0) return 0;
+            let turnsPerUnit = 1;
+            if (/^sec/.test(unit)) turnsPerUnit = 1 / 6;
+            else if (/^min/.test(unit)) turnsPerUnit = 10;
+            else if (/^h(?:ou)?r/.test(unit)) turnsPerUnit = 600;
+            else if (/^day/.test(unit)) turnsPerUnit = 14400;
+            return Math.max(1, Math.ceil(amount * turnsPerUnit));
+        },
+
+        concentrationTurnsLeftFromTooltip(text) {
+            const source = String(text || '');
+            const blockStart = source.search(/(?:^|\n)\s*CA Concentration\s*:/i);
+            if (blockStart < 0) return null;
+            const block = source.slice(blockStart);
+            const match = block.match(/(?:^|\n)\s*Duration\s*:\s*(\d+)\s+turns?\s+left\b/i);
+            if (!match) return null;
+            return Math.max(0, Utils.toInt(match[1], 0));
+        },
+
+        concentrationTurnsLeftFromToken(token) {
+            if (!token || !Utils.isFunction(token.get)) return null;
+            return this.concentrationTurnsLeftFromTooltip(token.get('tooltip'));
+        },
+
+        concentrationDurationLine(entry) {
+            const turnsLeft = entry && entry.turnsLeft !== null && entry.turnsLeft !== undefined
+                ? Math.max(0, Utils.toInt(entry.turnsLeft, 0))
+                : null;
+            if (turnsLeft === null) return 'Duration: Until concentration ends';
+            return 'Duration: ' + String(turnsLeft) + ' turn' + (turnsLeft === 1 ? '' : 's') + ' left';
+        },
+
+        buildConcentrationTooltip(entry) {
+            const data = entry || {};
+            return 'CA Concentration: ' + String(data.spellName || 'Concentration').trim() +
+                '\nToken: ' + String(data.casterTokenId || '').trim() +
+                '\nAction: ' + String(data.actionId || '').trim() +
+                '\n' + this.concentrationDurationLine(data);
+        },
+
+        syncConcentrationTooltip(entry, token) {
+            if (!entry || !token || !Utils.isFunction(token.get) || !Utils.isFunction(token.set)) return false;
+            const currentTooltip = String(token.get('tooltip') || '');
+            const baseTooltip = this.stripConcentrationTooltip(currentTooltip);
+            const nextTooltip = (baseTooltip ? (baseTooltip + '\n') : '') + this.buildConcentrationTooltip(entry);
+            try {
+                // Write the text independently first. Roll20 has historically had quirks
+                // around the show_tooltip toggle, while the tooltip property itself is writable.
+                token.set('tooltip', nextTooltip);
+                token.set('show_tooltip', true);
+                if (String(token.get('tooltip') || '') !== nextTooltip) {
+                    token.set({ tooltip: nextTooltip, show_tooltip: true });
+                }
+                return String(token.get('tooltip') || '') === nextTooltip;
+            } catch (error) {
+                Logger.debug('[concentration:tooltip]', error && error.message ? error.message : String(error));
+                return false;
+            }
+        },
+
+        processConcentrationTurnStart(tokenId) {
+            if (!RuntimeConfig.get('CONC_TURN_TRACKER')) return false;
+            const safeTokenId = String(tokenId || '').trim();
+            if (!safeTokenId) return false;
+            const entry = State.getConcentrationByTokenId(safeTokenId);
+            if (!entry || entry.turnsLeft === null || entry.turnsLeft === undefined) return false;
+            const token = R20.getTokenById(safeTokenId);
+            const tooltipTurns = this.concentrationTurnsLeftFromToken(token);
+            const before = tooltipTurns !== null
+                ? tooltipTurns
+                : Math.max(0, Utils.toInt(entry.turnsLeft, 0));
+            const after = Math.max(0, before - 1);
+            entry.turnsLeft = after;
+            if (after > 0) {
+                this.syncConcentrationTooltip(entry, token);
+                return true;
+            }
+            Render.sendConcentrationExpired({
+                casterName: token ? this.getTokenName(token) : String(entry.casterName || 'Caster'),
+                casterImgsrc: token && Utils.isFunction(token.get) ? String(token.get('imgsrc') || '') : '',
+                spellName: entry.spellName || 'Concentration'
+            });
+            this.endConcentrationByTokenId(safeTokenId, 'duration expired', { silent: true });
+            return true;
+        },
+
         stripConcentrationTooltip(text) {
             return String(text || '').replace(/\n?\s*CA Concentration:[\s\S]*$/i, '').trim();
         },
@@ -6764,17 +8012,11 @@ const CombatAssistant = (() => {
                     State.removePlayerActionMarkers(previousRequest);
                 }
             }
-            const priorTooltip = String(casterToken.get('tooltip') || '');
-            const priorShowTooltip = Utils.toBoolean(casterToken.get('show_tooltip'), false);
-            const baseTooltip = this.stripConcentrationTooltip(priorTooltip);
-            const concentrationTooltip = 'CA Concentration: ' + spellName + '\nToken: ' + casterTokenId + '\nAction: ' + actionId;
-            try {
-                casterToken.set({
-                    show_tooltip: true,
-                    gm_only_tooltip: false,
-                    tooltip: (baseTooltip ? (baseTooltip + '\n') : '') + concentrationTooltip
-                });
-            } catch (ignored) {}
+            const currentTooltip = String(casterToken.get('tooltip') || '');
+            const priorTooltip = previous ? String(previous.priorTooltip || '') : this.stripConcentrationTooltip(currentTooltip);
+            const priorShowTooltip = previous ? !!previous.priorShowTooltip : Utils.toBoolean(casterToken.get('show_tooltip'), false);
+            const durationText = String(request.payload.durationText || '').trim();
+            const durationTurns = this.concentrationDurationTurns(durationText);
             this.setTokenStatusMarker(casterToken, 'stopwatch', true);
             request.payload.casterTokenId = casterTokenId;
             request.concentrationAreaActive = true;
@@ -6783,11 +8025,28 @@ const CombatAssistant = (() => {
                 actionId,
                 casterTokenId,
                 spellName,
+                durationText,
+                durationTurns,
+                turnsLeft: durationTurns,
                 priorTooltip,
                 priorShowTooltip,
                 markerTokenIds: State.getPlayerActionMarkerIds(request)
             });
+            const concentrationEntry = State.getConcentrationByTokenId(casterTokenId);
+            this.syncConcentrationTooltip(concentrationEntry, casterToken);
             return true;
+        },
+
+        repairConcentrationTooltips() {
+            const root = State.get();
+            const concentration = root && root.concentration && typeof root.concentration === 'object' ? root.concentration : {};
+            let repaired = 0;
+            Object.keys(concentration).forEach((tokenId) => {
+                const entry = concentration[tokenId];
+                const token = R20.getTokenById(tokenId);
+                if (entry && token && this.syncConcentrationTooltip(entry, token)) repaired += 1;
+            });
+            return repaired;
         },
 
         endConcentrationByTokenId(tokenId, reason, options) {
@@ -8105,6 +9364,754 @@ const CombatAssistant = (() => {
     };
 
     /** -----------------------------------------------------------------------
+     * Resources
+     * --------------------------------------------------------------------- */
+    const ResourceService = {
+        LEVEL_WORDS: Object.freeze(['', 'FIRST', 'SECOND', 'THIRD', 'FOURTH', 'FIFTH', 'SIXTH', 'SEVENTH', 'EIGHTH', 'NINTH']),
+        MAX_STORE_BYTES: 9500000,
+        SHEET_WORKER_TIMEOUT_MS: 2500,
+
+        toResourceInt(value, fallback) {
+            const n = parseInt(value, 10);
+            return Number.isNaN(n) ? (fallback === undefined ? 0 : fallback) : Math.max(0, n);
+        },
+
+        getCharacterContext(token) {
+            const character = token ? R20.getCharacterFromToken(token) : null;
+            const characterId = character ? String(character.id || '').trim() : '';
+            return { token, character, characterId };
+        },
+
+        getLegacyAttributes(characterId) {
+            const safeCharacterId = String(characterId || '').trim();
+            return safeCharacterId ? (findObjs({ _type: 'attribute', _characterid: safeCharacterId }) || []) : [];
+        },
+
+        legacyAttributeMap(attributes) {
+            const map = Object.create(null);
+            (Array.isArray(attributes) ? attributes : []).forEach((attr) => {
+                if (!attr || !Utils.isFunction(attr.get)) return;
+                const name = String(attr.get('name') || '').trim();
+                if (name) map[name.toLowerCase()] = attr;
+            });
+            return map;
+        },
+
+        legacyAttributeCurrent(attr, fallback) {
+            if (!attr || !Utils.isFunction(attr.get)) return fallback === undefined ? '' : fallback;
+            const value = attr.get('current');
+            return value === undefined || value === null ? (fallback === undefined ? '' : fallback) : value;
+        },
+
+        legacyAttributeMax(valueAttr, attrMap, valueAttrName, characterId) {
+            let max = 0;
+            if (valueAttr && Utils.isFunction(valueAttr.get)) {
+                const directMax = valueAttr.get('max');
+                if (directMax !== undefined && directMax !== null && String(directMax).trim() !== '') {
+                    max = this.toResourceInt(directMax, 0);
+                }
+            }
+            if (max <= 0) {
+                const maxAttrName = String(valueAttrName || '') + '_max';
+                const maxAttr = attrMap[maxAttrName.toLowerCase()];
+                if (maxAttr) max = this.toResourceInt(this.legacyAttributeCurrent(maxAttr, 0), 0);
+                if (max <= 0 && typeof getAttrByName === 'function' && characterId) {
+                    try {
+                        const resolvedSeparate = getAttrByName(String(characterId), maxAttrName);
+                        max = this.toResourceInt(resolvedSeparate, max);
+                    } catch (ignored) {}
+                }
+            }
+            if (max <= 0 && typeof getAttrByName === 'function' && characterId) {
+                try {
+                    const resolvedMax = getAttrByName(String(characterId), String(valueAttrName || ''), 'max');
+                    max = this.toResourceInt(resolvedMax, max);
+                } catch (ignored) {}
+            }
+            return max;
+        },
+
+        buildLegacyResourceEntries(characterId) {
+            const attributes = this.getLegacyAttributes(characterId);
+            const attrMap = this.legacyAttributeMap(attributes);
+            const resources = [];
+            const seen = Object.create(null);
+            const addResource = (label, valueAttrName) => {
+                const safeLabel = String(label || '').trim();
+                const safeValueAttrName = String(valueAttrName || '').trim();
+                const key = safeValueAttrName.toLowerCase();
+                if (!safeLabel || !safeValueAttrName || seen[key]) return;
+                const valueAttr = attrMap[key];
+                if (!valueAttr) return;
+                const max = this.legacyAttributeMax(valueAttr, attrMap, safeValueAttrName, characterId);
+                if (max <= 0) return;
+                const current = this.toResourceInt(this.legacyAttributeCurrent(valueAttr, 0), 0);
+                seen[key] = true;
+                resources.push({
+                    label: safeLabel,
+                    current,
+                    max,
+                    sheetVersion: '2014',
+                    ref: { kind: 'legacy-resource', valueAttr: safeValueAttrName, label: safeLabel }
+                });
+            };
+
+            const classNameAttr = attrMap.class_resource_name;
+            const otherNameAttr = attrMap.other_resource_name;
+            addResource(this.legacyAttributeCurrent(classNameAttr, ''), 'class_resource');
+            addResource(this.legacyAttributeCurrent(otherNameAttr, ''), 'other_resource');
+
+            attributes.forEach((attr) => {
+                if (!attr || !Utils.isFunction(attr.get)) return;
+                const attrName = String(attr.get('name') || '').trim();
+                const match = attrName.match(/^repeating_resource_(.+)_resource_(left|right)$/i);
+                if (!match) return;
+                const nameAttr = attrMap[(attrName + '_name').toLowerCase()];
+                addResource(this.legacyAttributeCurrent(nameAttr, ''), attrName);
+            });
+
+            const spellSlots = [];
+            for (let level = 1; level <= 9; level += 1) {
+                const totalName = 'lvl' + String(level) + '_slots_total';
+                const currentName = 'lvl' + String(level) + '_slots_expended';
+                const totalAttr = attrMap[totalName];
+                const max = this.toResourceInt(this.legacyAttributeCurrent(totalAttr, 0), 0);
+                if (max <= 0) continue;
+                const currentAttr = attrMap[currentName];
+                const rawCurrent = currentAttr ? this.legacyAttributeCurrent(currentAttr, '') : '';
+                const current = rawCurrent === '' ? max : this.toResourceInt(rawCurrent, max);
+                spellSlots.push({
+                    label: 'Spell Slots Lv' + String(level),
+                    current,
+                    max,
+                    sheetVersion: '2014',
+                    ref: { kind: 'legacy-spell', valueAttr: currentName, maxAttr: totalName, level, label: 'Spell Slots Lv' + String(level) }
+                });
+            }
+            return spellSlots.concat(resources);
+        },
+
+        getStoreRoot(characterId) {
+            const roots = R20.getCharacterStoreDumpRoots(characterId);
+            return roots.length ? roots[0] : null;
+        },
+
+        getStoreIntegrants(root) {
+            if (!root || typeof root !== 'object') return {};
+            const wrapped = root.integrants;
+            if (wrapped && typeof wrapped === 'object' && wrapped.integrants && typeof wrapped.integrants === 'object') return wrapped.integrants;
+            return wrapped && typeof wrapped === 'object' ? wrapped : {};
+        },
+
+        parseObject(value) {
+            if (value && typeof value === 'object' && !Array.isArray(value)) return value;
+            const raw = String(value || '').trim();
+            if (!raw) return {};
+            try {
+                const parsed = JSON.parse(raw);
+                return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+            } catch (error) {
+                return {};
+            }
+        },
+
+        flatFormulaValue(formula, fallback) {
+            const data = formula && typeof formula === 'object' ? formula : {};
+            const value = data.flatValue;
+            const numeric = parseFloat(value);
+            return Number.isFinite(numeric) ? Math.max(0, Math.floor(numeric)) : (fallback === undefined ? 0 : fallback);
+        },
+
+        beaconResourceMax(resource, integrants) {
+            let max = 0;
+            if (resource && resource.maxValue !== undefined && resource.maxValue !== null && String(resource.maxValue).trim() !== '') {
+                max = this.toResourceInt(resource.maxValue, 0);
+            }
+            max = Math.max(max, this.flatFormulaValue(resource && resource.maxValueFormula, 0));
+            const relations = resource && resource.relations && typeof resource.relations === 'object' ? resource.relations : {};
+            Object.keys(relations).forEach((modifierId) => {
+                if (relations[modifierId] !== 'modifiedBy') return;
+                const modifier = integrants[modifierId];
+                if (!modifier || modifier._enabled === false) return;
+                const changes = this.parseObject(modifier.modifications);
+                ['max', 'maxValue', 'maxValueFormula.flatValue'].forEach((key) => {
+                    if (!Object.prototype.hasOwnProperty.call(changes, key)) return;
+                    const candidate = this.toResourceInt(changes[key], 0);
+                    if (candidate > max) max = candidate;
+                });
+            });
+            return max;
+        },
+
+        buildBeaconResourceEntries(characterId, suppliedRoot) {
+            const root = suppliedRoot && typeof suppliedRoot === 'object' ? suppliedRoot : this.getStoreRoot(characterId);
+            if (!root) return [];
+            const integrants = this.getStoreIntegrants(root);
+            const resources = [];
+            Object.keys(integrants).forEach((id) => {
+                const resource = integrants[id];
+                if (!resource || resource._enabled === false || String(resource.type || '').toLowerCase() !== 'resource') return;
+                const name = String(resource.name || '').trim();
+                const recordName = String(resource.recordName || '').trim();
+                const label = recordName || name || String(resource.builderDisplayName || '').trim();
+                if (!label) return;
+                const current = this.toResourceInt(resource.value, 0);
+                let max = this.beaconResourceMax(resource, integrants);
+                if (max <= 0 && current > 0) max = current;
+                if (max <= 0) return;
+                resources.push({
+                    label,
+                    current,
+                    max,
+                    sheetVersion: '2024',
+                    name,
+                    recordName,
+                    shortID: String(resource.shortID || '').trim(),
+                    ref: { kind: 'beacon-resource', id: String(resource._id || id), label, name, recordName, shortID: String(resource.shortID || '').trim() }
+                });
+            });
+
+            const currentByLevel = root.spellSlots && root.spellSlots.currentByLevel && typeof root.spellSlots.currentByLevel === 'object'
+                ? root.spellSlots.currentByLevel
+                : {};
+            const maxima = Object.create(null);
+            Object.keys(integrants).forEach((id) => {
+                const slot = integrants[id];
+                if (!slot || slot._enabled === false || String(slot.type || '').toLowerCase() !== 'spell slot') return;
+                let level = this.toResourceInt(slot.spellLevel, 0);
+                if (!level) {
+                    const match = String(slot.recordName || slot.name || '').match(/level\s+(\d+)\s+spell\s+slots?/i);
+                    level = match ? this.toResourceInt(match[1], 0) : 0;
+                }
+                if (level < 1 || level > 9) return;
+                const value = this.flatFormulaValue(slot.valueFormula, 0);
+                if (value <= 0) return;
+                const bucket = maxima[level] || { base: 0, modify: 0, other: 0 };
+                const calculation = String(slot.calculation || '').trim().toLowerCase();
+                if (calculation === 'set base') bucket.base = Math.max(bucket.base, value);
+                else if (calculation === 'modify') bucket.modify += value;
+                else bucket.other = Math.max(bucket.other, value);
+                maxima[level] = bucket;
+            });
+
+            const spellSlots = [];
+            for (let level = 1; level <= 9; level += 1) {
+                const bucket = maxima[level] || { base: 0, modify: 0, other: 0 };
+                const max = this.toResourceInt(Math.max(bucket.base + bucket.modify, bucket.other), 0);
+                if (max <= 0) continue;
+                const key = this.LEVEL_WORDS[level];
+                const current = this.toResourceInt(currentByLevel[key], 0);
+                spellSlots.push({
+                    label: 'Spell Slots Lv' + String(level),
+                    current,
+                    max,
+                    sheetVersion: '2024',
+                    ref: { kind: 'beacon-spell', level, levelKey: key, label: 'Spell Slots Lv' + String(level) }
+                });
+            }
+            resources.sort((a, b) => String(a.label).localeCompare(String(b.label)));
+            return spellSlots.concat(resources);
+        },
+
+        getEntries(characterId) {
+            const sheetVersion = R20.detectSheetVersion(characterId);
+            return sheetVersion === '2024'
+                ? this.buildBeaconResourceEntries(characterId)
+                : this.buildLegacyResourceEntries(characterId);
+        },
+
+        resourceAdjustButtonHtml(tokenId, entry, direction) {
+            const isUse = direction === 'use';
+            const payload = Utils.encodeJsonPayload(entry && entry.ref || {});
+            const command = Render.sanitizeCommand('!combatAssistant resourceadjust ' + direction + ' ' + Utils.attrSafe(tokenId) + ' ' + payload + ' &#63;{Quantity|1}');
+            const tooltip = isUse ? ('Use ' + String(entry && entry.label || 'resource')) : ('Recover ' + String(entry && entry.label || 'resource'));
+            const symbol = isUse ? '-' : '+';
+            return '<a href="' + command + '" title="' + Utils.attrSafe(tooltip) + '" style="display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;min-width:14px;min-height:14px;padding:0;margin:0;overflow:hidden;text-decoration:none;border:0;border-radius:3px;box-sizing:border-box;box-shadow:inset 0 0 0 1px rgba(255,255,255,0.65);background:' +
+                (isUse ? 'rgba(150,45,45,0.95)' : 'rgba(35,125,70,0.95)') + ';color:rgb(255,255,255);text-align:center;vertical-align:middle;line-height:14px;">' +
+                '<b style="display:flex;align-items:center;justify-content:center;width:14px;height:14px;margin:0;padding:0;text-align:center;font-size:14px;line-height:14px;font-family:Arial,Helvetica,sans-serif;">' + symbol + '</b>' +
+            '</a>';
+        },
+
+        buildResourceRowsHtml(tokenId, entries) {
+            return (Array.isArray(entries) ? entries : []).map((entry) => {
+                const currentColor = entry.current > 0 ? 'rgb(52,203,116)' : 'rgb(220,45,45)';
+                const valueHtml = '<b style="font-size:13px;line-height:14px;"><span style="color:' + currentColor + ';">' + Utils.escapeHtml(String(entry.current)) + '</span> <span style="color:rgb(225,225,225);">/</span> ' +
+                    '<span style="color:rgb(52,203,116);">' + Utils.escapeHtml(String(entry.max)) + '</span></b>';
+                const minus = this.resourceAdjustButtonHtml(tokenId, entry, 'use');
+                const plus = this.resourceAdjustButtonHtml(tokenId, entry, 'recover');
+                return '<tr>' +
+                    '<td style="text-align:left;vertical-align:middle;padding:3px 4px 3px 0;color:rgb(232,220,180);font-size:11px;line-height:14px;overflow-wrap:anywhere;">' + Utils.escapeHtml(entry.label) + '</td>' +
+                    '<td style="width:104px;text-align:right;vertical-align:middle;padding:3px 0;white-space:nowrap;font-size:13px;line-height:14px;">' +
+                        valueHtml + '<span style="display:inline-block;width:5px;"></span>' + minus + '<span style="display:inline-block;width:3px;"></span>' + plus +
+                    '</td>' +
+                '</tr>';
+            }).join('');
+        },
+
+        buildResourceListHtml(tokenId, entries) {
+            const rows = this.buildResourceRowsHtml(tokenId, entries);
+            return rows ? '<table style="width:100%;border-collapse:collapse;table-layout:fixed;"><tbody>' + rows + '</tbody></table>' : '';
+        },
+
+        buildResourcesCard(token, character, entries) {
+            const tokenId = R20.getTokenId(token);
+            const characterName = character && Utils.isFunction(character.get) ? String(character.get('name') || 'Character').trim() : 'Character';
+            const titleHtml = Html.span(Utils.escapeHtml(characterName), 'color:' + CONFIG.DEFAULT_TEXT_CHARACTER_COLOR + ';font-weight:900;') +
+                Html.span('&#39;s Resources', 'color:rgb(235,235,235);font-weight:900;');
+            const resourceList = this.buildResourceListHtml(tokenId, entries);
+            const body = resourceList || '<div style="text-align:center;color:rgb(170,170,170);font-size:11px;line-height:14px;padding:4px 0;">No limited resources or spell slots were found.</div>';
+            return Html.card({
+                title: characterName + "'s Resources",
+                body,
+                buildOptions: { titleHtml, titleColor: 'rgb(235,235,235)', bodyAlign: 'left' }
+            });
+        },
+
+        showForContext(ctx) {
+            const tokens = R20.getSelectedTokens(ctx && ctx.msg);
+            if (!tokens.length) {
+                Render.sendWhisperMessage(ctx && ctx.who || 'GM', 'Resources', 'Select one or more tokens linked to a character sheet.', 'warning');
+                return false;
+            }
+            let sent = 0;
+            tokens.forEach((token) => {
+                if (!ctx.isGM && !R20.tokenIsControlledByPlayer(token, R20.getCharacterFromToken(token), ctx.playerId)) return;
+                const info = this.getCharacterContext(token);
+                if (!info.characterId || !info.character) return;
+                R20.whisper(ctx.who || 'GM', this.buildResourcesCard(token, info.character, this.getEntries(info.characterId)));
+                sent += 1;
+            });
+            if (!sent) {
+                Render.sendWhisperMessage(ctx && ctx.who || 'GM', 'Resources', 'No selected token with an accessible linked character sheet was found.', 'warning');
+                return false;
+            }
+            return true;
+        },
+
+        resolveLegacyRef(characterId, ref) {
+            const attrs = this.getLegacyAttributes(characterId);
+            const map = this.legacyAttributeMap(attrs);
+            const valueAttrName = String(ref && ref.valueAttr || '').trim();
+            const valueAttr = map[valueAttrName.toLowerCase()] || null;
+            let max = 0;
+            let current = 0;
+            if (String(ref && ref.kind) === 'legacy-spell') {
+                const maxAttrName = String(ref && ref.maxAttr || '').trim();
+                max = this.toResourceInt(this.legacyAttributeCurrent(map[maxAttrName.toLowerCase()], 0), 0);
+                const raw = valueAttr ? this.legacyAttributeCurrent(valueAttr, '') : '';
+                current = raw === '' ? max : this.toResourceInt(raw, max);
+            } else {
+                current = this.toResourceInt(this.legacyAttributeCurrent(valueAttr, 0), 0);
+                max = this.legacyAttributeMax(valueAttr, map, valueAttrName, characterId);
+            }
+            return { current, max, valueAttrName, valueAttr, label: String(ref && ref.label || 'Resource') };
+        },
+
+        writeLegacyCurrent(characterId, attrName, value) {
+            const safeCharacterId = String(characterId || '').trim();
+            const safeAttrName = String(attrName || '').trim();
+            const safeValue = String(this.toResourceInt(value, 0));
+            if (!safeCharacterId || !safeAttrName) return false;
+            const attrs = this.getLegacyAttributes(safeCharacterId);
+            let attr = attrs.find((entry) => entry && Utils.isFunction(entry.get) && String(entry.get('name') || '').trim().toLowerCase() === safeAttrName.toLowerCase()) || null;
+            try {
+                if (!attr && typeof createObj === 'function') {
+                    attr = createObj('attribute', { _characterid: safeCharacterId, name: safeAttrName, current: safeValue });
+                }
+                if (!attr) return false;
+                if (Utils.isFunction(attr.setWithWorker)) attr.setWithWorker({ current: safeValue });
+                else if (Utils.isFunction(attr.set)) attr.set('current', safeValue);
+                else return false;
+                return true;
+            } catch (error) {
+                Logger.debug('[resource:legacy-write]', safeAttrName, error && error.message ? error.message : String(error));
+                return false;
+            }
+        },
+
+        resolveBeaconRef(characterId, ref, suppliedRoot) {
+            const entries = this.buildBeaconResourceEntries(characterId, suppliedRoot);
+            const kind = String(ref && ref.kind || '');
+            if (kind === 'beacon-resource') {
+                const id = String(ref && ref.id || '').trim();
+                return entries.find((entry) => entry.ref && entry.ref.kind === kind && String(entry.ref.id || '').trim() === id) || null;
+            }
+            if (kind === 'beacon-spell') {
+                const level = this.toResourceInt(ref && ref.level, 0);
+                return entries.find((entry) => entry.ref && entry.ref.kind === kind && this.toResourceInt(entry.ref.level, 0) === level) || null;
+            }
+            return null;
+        },
+
+        parseBeaconStoreRoot(value) {
+            if (value && typeof value === 'object' && !Array.isArray(value)) {
+                try {
+                    return JSON.parse(JSON.stringify(value));
+                } catch (error) {
+                    return null;
+                }
+            }
+            const raw = String(value === undefined || value === null ? '' : value).trim();
+            if (!raw) return null;
+            try {
+                const parsed = JSON.parse(raw);
+                return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+            } catch (error) {
+                return null;
+            }
+        },
+
+        getBeaconStoreAttribute(characterId) {
+            const safeCharacterId = String(characterId || '').trim();
+            if (!safeCharacterId) return null;
+            return (findObjs({
+                _type: 'attribute',
+                _characterid: safeCharacterId,
+                name: 'store'
+            }) || [])[0] || null;
+        },
+
+        storeUtf8ByteLength(value) {
+            const text = String(value || '');
+            let bytes = 0;
+            for (let i = 0; i < text.length; i += 1) {
+                const code = text.charCodeAt(i);
+                if (code < 0x80) bytes += 1;
+                else if (code < 0x800) bytes += 2;
+                else if (code >= 0xD800 && code <= 0xDBFF && i + 1 < text.length) {
+                    const next = text.charCodeAt(i + 1);
+                    if (next >= 0xDC00 && next <= 0xDFFF) {
+                        bytes += 4;
+                        i += 1;
+                    } else bytes += 3;
+                } else bytes += 3;
+            }
+            return bytes;
+        },
+
+        async readFreshBeaconStore(characterId) {
+            const safeCharacterId = String(characterId || '').trim();
+            const rootAttr = this.getBeaconStoreAttribute(safeCharacterId);
+            if (!rootAttr || !Utils.isFunction(rootAttr.get)) {
+                return { ok: false, message: 'The 2024 character has no writable store attribute.' };
+            }
+
+            const attributeCurrent = rootAttr.get('current');
+            let rawCurrent = attributeCurrent;
+            let root = this.parseBeaconStoreRoot(attributeCurrent);
+
+            if (typeof getSheetItem === 'function') {
+                try {
+                    const freshValue = await getSheetItem(safeCharacterId, 'store');
+                    const freshRoot = this.parseBeaconStoreRoot(freshValue);
+                    if (freshRoot) {
+                        rawCurrent = freshValue;
+                        root = freshRoot;
+                    }
+                } catch (error) {
+                    Logger.debug('[resource:beacon-store-read]', 'Fresh store read failed; using the attribute value.');
+                }
+            }
+
+            if (!root) return { ok: false, message: 'The 2024 character store is not valid JSON.' };
+            return {
+                ok: true,
+                rootAttr,
+                root,
+                mode: rawCurrent && typeof rawCurrent === 'object' && !Array.isArray(rawCurrent) ? 'object' : 'json-string',
+                baselineJson: JSON.stringify(root)
+            };
+        },
+
+        beaconStoreIsBaselineCurrent(storeEntry) {
+            if (!storeEntry || !storeEntry.rootAttr || !Utils.isFunction(storeEntry.rootAttr.get) || !storeEntry.baselineJson) return false;
+            const currentRoot = this.parseBeaconStoreRoot(storeEntry.rootAttr.get('current'));
+            if (!currentRoot) return false;
+            try {
+                return JSON.stringify(currentRoot) === storeEntry.baselineJson;
+            } catch (error) {
+                return false;
+            }
+        },
+
+        serializeBeaconStore(storeEntry) {
+            if (!storeEntry || !storeEntry.rootAttr || !storeEntry.root || typeof storeEntry.root !== 'object') {
+                return { ok: false, message: 'The 2024 character store is invalid.' };
+            }
+            let json = '';
+            try {
+                json = JSON.stringify(storeEntry.root);
+                const parsed = JSON.parse(json);
+                if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+                    return { ok: false, message: 'The 2024 character store could not be serialized safely.' };
+                }
+            } catch (error) {
+                return { ok: false, message: 'The 2024 character store could not be serialized safely.' };
+            }
+            const bytes = this.storeUtf8ByteLength(json);
+            if (bytes > this.MAX_STORE_BYTES) {
+                return { ok: false, message: 'The 2024 character store is too large to write safely (' + String(bytes) + ' bytes).' };
+            }
+            return {
+                ok: true,
+                json,
+                bytes,
+                value: storeEntry.mode === 'object' ? storeEntry.root : json
+            };
+        },
+
+        waitForBeaconWorker(timeoutMs) {
+            const timeout = Math.max(250, this.toResourceInt(timeoutMs, this.SHEET_WORKER_TIMEOUT_MS));
+            if (typeof onSheetWorkerCompleted !== 'function') return Promise.resolve(false);
+            return new Promise((resolve) => {
+                let finished = false;
+                const finish = (value) => {
+                    if (finished) return;
+                    finished = true;
+                    resolve(value);
+                };
+                try {
+                    onSheetWorkerCompleted(() => finish(true));
+                    setTimeout(() => finish(false), timeout);
+                } catch (error) {
+                    finish(false);
+                }
+            });
+        },
+
+        applyBeaconStoreValue(root, ref, value) {
+            const kind = String(ref && ref.kind || '').trim();
+            const safeValue = this.toResourceInt(value, 0);
+            if (kind === 'beacon-resource') {
+                const integrants = this.getStoreIntegrants(root);
+                const id = String(ref && ref.id || '').trim();
+                const node = id ? integrants[id] : null;
+                if (!node || String(node.type || '').trim().toLowerCase() !== 'resource') {
+                    return { ok: false, message: 'The 2024 resource no longer exists in the character store.' };
+                }
+                node.value = safeValue;
+                return { ok: true };
+            }
+            if (kind === 'beacon-spell') {
+                const level = this.toResourceInt(ref && ref.level, 0);
+                const levelKey = String(ref && ref.levelKey || this.LEVEL_WORDS[level] || '').trim();
+                if (level < 1 || level > 9 || !levelKey) {
+                    return { ok: false, message: 'The 2024 spell slot reference is invalid.' };
+                }
+                root.spellSlots = root.spellSlots && typeof root.spellSlots === 'object' ? root.spellSlots : {};
+                root.spellSlots.currentByLevel = root.spellSlots.currentByLevel && typeof root.spellSlots.currentByLevel === 'object'
+                    ? root.spellSlots.currentByLevel
+                    : {};
+                root.spellSlots.currentByLevel[levelKey] = safeValue;
+                return { ok: true };
+            }
+            return { ok: false, message: 'The 2024 resource reference is invalid.' };
+        },
+
+        readBeaconStoreValue(root, ref) {
+            const kind = String(ref && ref.kind || '').trim();
+            if (kind === 'beacon-resource') {
+                const integrants = this.getStoreIntegrants(root);
+                const id = String(ref && ref.id || '').trim();
+                const node = id ? integrants[id] : null;
+                if (!node || String(node.type || '').trim().toLowerCase() !== 'resource') return null;
+                const value = parseInt(node.value, 10);
+                return Number.isNaN(value) ? null : Math.max(0, value);
+            }
+            if (kind === 'beacon-spell') {
+                const level = this.toResourceInt(ref && ref.level, 0);
+                const levelKey = String(ref && ref.levelKey || this.LEVEL_WORDS[level] || '').trim();
+                const currentByLevel = root && root.spellSlots && root.spellSlots.currentByLevel;
+                if (!currentByLevel || typeof currentByLevel !== 'object' || !levelKey) return null;
+                const value = parseInt(currentByLevel[levelKey], 10);
+                return Number.isNaN(value) ? null : Math.max(0, value);
+            }
+            return null;
+        },
+
+        verifyBeaconStoreValue(rootAttr, ref, expectedValue) {
+            if (!rootAttr || !Utils.isFunction(rootAttr.get)) return { ok: false, message: 'The 2024 store could not be verified after writing.' };
+            const root = this.parseBeaconStoreRoot(rootAttr.get('current'));
+            if (!root) return { ok: false, message: 'The 2024 store could not be read after writing.' };
+            const actual = this.readBeaconStoreValue(root, ref);
+            if (actual === null || actual !== this.toResourceInt(expectedValue, 0)) {
+                return { ok: false, message: 'The 2024 resource write did not match the requested value.', actual };
+            }
+            return { ok: true, actual };
+        },
+
+        async writeBeaconStoreValue(storeEntry, ref, value) {
+            if (!storeEntry || !storeEntry.ok) return storeEntry || { ok: false, message: 'The 2024 store is unavailable.' };
+            const applied = this.applyBeaconStoreValue(storeEntry.root, ref, value);
+            if (!applied.ok) return applied;
+            const serialized = this.serializeBeaconStore(storeEntry);
+            if (!serialized.ok) return serialized;
+
+            // Same defensive pattern used by Resource Quick Manager: refuse to
+            // overwrite a store that changed after the fresh read.
+            if (!this.beaconStoreIsBaselineCurrent(storeEntry)) {
+                return { ok: false, message: 'The character sheet changed during this resource update. No 2024 resource write was made; try again.' };
+            }
+
+            const attr = storeEntry.rootAttr;
+            try {
+                if (Utils.isFunction(attr.setWithWorker)) {
+                    const workerPromise = this.waitForBeaconWorker(this.SHEET_WORKER_TIMEOUT_MS);
+                    attr.setWithWorker({ current: serialized.value });
+                    await workerPromise;
+                } else if (Utils.isFunction(attr.set)) {
+                    attr.set({ current: serialized.value });
+                } else {
+                    return { ok: false, message: 'The 2024 store attribute cannot be written.' };
+                }
+            } catch (error) {
+                Logger.debug('[resource:beacon-store-write]', error && error.message ? error.message : String(error));
+                return { ok: false, message: 'Roll20 rejected the 2024 resource store update.' };
+            }
+
+            const verified = this.verifyBeaconStoreValue(attr, ref, value);
+            if (!verified.ok) return verified;
+            return { ok: true, actual: verified.actual, bytes: serialized.bytes };
+        },
+
+        calculateChange(current, max, direction, requested) {
+            const safeCurrent = this.toResourceInt(current, 0);
+            const safeMax = this.toResourceInt(max, 0);
+            const qty = Math.max(1, this.toResourceInt(requested, 1));
+            if (direction === 'use') {
+                if (safeCurrent <= 0) return { ok: false, message: 'No uses remain.' };
+                const effective = Math.min(qty, safeCurrent);
+                return { ok: true, current: safeCurrent, max: safeMax, effective, next: Math.max(0, safeCurrent - effective) };
+            }
+            if (safeMax <= 0) return { ok: false, message: 'This resource does not expose a usable maximum.' };
+            if (safeCurrent >= safeMax) return { ok: false, message: 'This resource is already at its maximum.' };
+            const effective = Math.min(qty, Math.max(0, safeMax - safeCurrent));
+            return { ok: true, current: safeCurrent, max: safeMax, effective, next: Math.min(safeMax, safeCurrent + effective) };
+        },
+
+        buildResourceUpdateCard(token, character, label, direction, quantity, current, max) {
+            const characterName = character && Utils.isFunction(character.get) ? String(character.get('name') || 'Character').trim() : 'Character';
+            const imgsrc = token && Utils.isFunction(token.get) ? String(token.get('imgsrc') || '').trim() : '';
+            const image = Utils.isSafeImageUrl(imgsrc) && imgsrc
+                ? '<img src="' + Utils.attrSafe(imgsrc) + '" style="display:block;width:28px;height:28px;object-fit:cover;border-radius:4px;" />'
+                : '<span style="display:block;width:28px;height:28px;line-height:28px;text-align:center;border-radius:4px;background:rgba(55,55,55,0.95);font-size:12px;">?</span>';
+            const titleHtml = '<table style="width:100%;border-collapse:collapse;table-layout:fixed;"><tbody><tr>' +
+                '<td style="width:34px;text-align:left;vertical-align:middle;">' + image + '</td>' +
+                '<td style="text-align:center;vertical-align:middle;font-weight:900;color:rgb(235,235,235);padding-right:34px;">Resource Update</td>' +
+                '</tr></tbody></table>';
+            const currentColor = current > 0 ? 'rgb(52,203,116)' : 'rgb(220,45,45)';
+            const verb = direction === 'use' ? 'Used' : 'Recover';
+            const body = '<div style="text-align:center;font-size:12px;line-height:17px;color:rgb(225,225,225);">' +
+                '<div style="color:' + CONFIG.DEFAULT_TEXT_CHARACTER_COLOR + ';font-weight:900;">' + Utils.escapeHtml(characterName) + '</div>' +
+                '<div>' + Utils.escapeHtml(verb) + ' <span style="color:rgb(52,203,116);font-weight:900;">' + Utils.escapeHtml(String(quantity)) + 'x</span> ' +
+                    '<span style="color:rgb(245,220,80);font-weight:900;">' + Utils.escapeHtml(label) + '</span></div>' +
+                '<div>Has <span style="color:' + currentColor + ';font-weight:900;">' + Utils.escapeHtml(String(current)) + '</span> <span style="color:rgb(225,225,225);font-weight:900;">/</span> ' +
+                    '<span style="color:rgb(52,203,116);font-weight:900;">' + Utils.escapeHtml(String(max)) + '</span> left.</div>' +
+                '</div>';
+            return Html.card({ title: 'Resource Update', body, buildOptions: { titleHtml } });
+        },
+
+        sendResourceUpdate(token, character, label, direction, quantity, current, max, ctx) {
+            const card = this.buildResourceUpdateCard(token, character, label, direction, quantity, current, max);
+            const playerInitiated = !!(ctx && ctx.isGM === false);
+            if (playerInitiated && RuntimeConfig.get('PLAYER_PUBLIC_RESOURCE_USAGE')) {
+                R20.send(card);
+                return true;
+            }
+            R20.whisper('GM', card);
+            if (R20.isPlayerControlledToken(token, character)) {
+                R20.getTokenControllerDisplayNames(token, character).forEach((recipient) => {
+                    if (recipient) R20.whisper(recipient, card);
+                });
+            }
+            return true;
+        },
+
+        async adjust(ctx, args) {
+            const direction = String(args && args[0] || '').trim().toLowerCase();
+            const tokenId = String(args && args[1] || '').trim();
+            const ref = Utils.decodeJsonPayload(args && args[2] || '', {});
+            const quantity = Math.max(1, this.toResourceInt(args && args[3], 1));
+            if (direction !== 'use' && direction !== 'recover') {
+                Render.sendWhisperMessage(ctx.who, 'Resources', 'Unknown resource adjustment.', 'failure');
+                return false;
+            }
+            const token = R20.getTokenById(tokenId);
+            if (!token) {
+                Render.sendWhisperMessage(ctx.who, 'Resources', 'The resource token was not found.', 'failure');
+                return false;
+            }
+            if (!ctx.isGM && !R20.tokenIsControlledByPlayer(token, R20.getCharacterFromToken(token), ctx.playerId)) {
+                Render.sendWhisperMessage(ctx.who, 'Permission Denied', 'You do not control this token.', 'failure');
+                return false;
+            }
+            const info = this.getCharacterContext(token);
+            if (!info.character || !info.characterId) {
+                Render.sendWhisperMessage(ctx.who, 'Resources', 'This token is not linked to a character sheet.', 'failure');
+                return false;
+            }
+            const kind = String(ref && ref.kind || '');
+            if (/^legacy-/.test(kind)) {
+                const trustedEntry = this.buildLegacyResourceEntries(info.characterId).find((entry) => {
+                    const trustedRef = entry && entry.ref || {};
+                    return String(trustedRef.kind || '') === kind &&
+                        String(trustedRef.valueAttr || '').trim().toLowerCase() === String(ref && ref.valueAttr || '').trim().toLowerCase();
+                }) || null;
+                if (!trustedEntry) {
+                    Render.sendWhisperMessage(ctx.who, 'Resources', 'Invalid or stale 2014 resource reference. Re-open !ca resource.', 'warning');
+                    return false;
+                }
+                const trustedRef = trustedEntry.ref;
+                const snapshot = this.resolveLegacyRef(info.characterId, trustedRef);
+                snapshot.label = trustedEntry.label;
+                const change = this.calculateChange(snapshot.current, snapshot.max, direction, quantity);
+                if (!change.ok) {
+                    Render.sendWhisperMessage(ctx.who, 'Resources', Utils.escapeHtml(snapshot.label + ': ' + change.message), 'warning');
+                    return false;
+                }
+                if (!this.writeLegacyCurrent(info.characterId, snapshot.valueAttrName, change.next)) {
+                    Render.sendWhisperMessage(ctx.who, 'Resources', 'The 2014 sheet resource could not be updated.', 'failure');
+                    return false;
+                }
+                const verified = this.resolveLegacyRef(info.characterId, trustedRef);
+                const finalCurrent = verified.current;
+                this.sendResourceUpdate(token, info.character, snapshot.label, direction, change.effective, finalCurrent, verified.max || change.max, ctx);
+                return true;
+            }
+
+            if (/^beacon-/.test(kind)) {
+                return CombatService.runTokenMutation(token, async () => {
+                    const storeEntry = await this.readFreshBeaconStore(info.characterId);
+                    if (!storeEntry || !storeEntry.ok) {
+                        Render.sendWhisperMessage(ctx.who, 'Resources', Utils.escapeHtml((storeEntry && storeEntry.message) || 'The 2024 character store could not be read.'), 'warning');
+                        return false;
+                    }
+                    const entry = this.resolveBeaconRef(info.characterId, ref, storeEntry.root);
+                    if (!entry) {
+                        Render.sendWhisperMessage(ctx.who, 'Resources', 'The 2024 sheet resource could not be found anymore. Re-open !ca resource.', 'warning');
+                        return false;
+                    }
+                    const change = this.calculateChange(entry.current, entry.max, direction, quantity);
+                    if (!change.ok) {
+                        Render.sendWhisperMessage(ctx.who, 'Resources', Utils.escapeHtml(entry.label + ': ' + change.message), 'warning');
+                        return false;
+                    }
+                    const writeResult = await this.writeBeaconStoreValue(storeEntry, entry.ref, change.next);
+                    if (!writeResult || !writeResult.ok) {
+                        Render.sendWhisperMessage(ctx.who, 'Resources', Utils.escapeHtml((writeResult && writeResult.message) || 'The 2024 resource store update failed.'), 'warning');
+                        return false;
+                    }
+                    this.sendResourceUpdate(token, info.character, entry.label, direction, change.effective, writeResult.actual, entry.max, ctx);
+                    return true;
+                });
+            }
+
+            Render.sendWhisperMessage(ctx.who, 'Resources', 'Invalid resource reference. Re-open !ca resource.', 'failure');
+            return false;
+        }
+    };
+
+    /** -----------------------------------------------------------------------
      * Commands
      * --------------------------------------------------------------------- */
     const CommandHandlers = {
@@ -8495,13 +10502,84 @@ const CombatAssistant = (() => {
                 const value = args.slice(2).join(' ');
                 const result = RuntimeConfig.set(key, value);
                 if (!result.ok) Render.sendWhisperMessage(ctx.who, result.title || 'Settings', result.message, 'failure');
-                else Render.showConfigMenu(ctx.who);
+                else {
+                    if (result.key === 'TURN_TRACKER' && result.value) TurnTracker.initializeFromCurrentTurnOrder();
+                    if (result.key === 'TURN_TRACKER' && !result.value) TurnTracker.resetState();
+                    if (/^TURN_MARKER|^PUBLIC_TURN_MARKER|^TURN_AUTO_FOCUS/.test(result.key || '')) TurnTracker.refreshCurrentTurnPresentation({ sendCard: false, focus: false });
+                    Render.showConfigMenu(ctx.who);
+                }
                 return;
             }
             if (action === 'toggle') {
                 const result = RuntimeConfig.toggle(args[1] || '');
                 if (!result.ok) Render.sendWhisperMessage(ctx.who, 'Settings', result.message, 'failure');
-                else Render.showConfigMenu(ctx.who);
+                else {
+                    if (result.key === 'TURN_TRACKER' && result.value) TurnTracker.initializeFromCurrentTurnOrder();
+                    if (result.key === 'TURN_TRACKER' && !result.value) TurnTracker.resetState();
+                    if (/^TURN_MARKER|^PUBLIC_TURN_MARKER|^TURN_AUTO_FOCUS/.test(result.key || '')) TurnTracker.refreshCurrentTurnPresentation({ sendCard: false, focus: false });
+                    Render.showConfigMenu(ctx.who);
+                }
+                return;
+            }
+            if (action === 'resource' || action === 'resources') {
+                ResourceService.showForContext(ctx);
+                return;
+            }
+            if (action === 'resourceadjust') {
+                await ResourceService.adjust(ctx, args.slice(1));
+                return;
+            }
+            if (action === 'turn') {
+                const turnAction = String(args[1] || '').trim().toLowerCase();
+                if (turnAction === 'next') {
+                    TurnTracker.advanceTurn(args[2] || '', ctx);
+                    return;
+                }
+                if (turnAction === 'focus') {
+                    TurnTracker.focusTokenById(args[2] || '', ctx);
+                    return;
+                }
+                if (turnAction === 'remove') {
+                    if (!ctx.isGM) {
+                        Render.sendWhisperMessage(ctx.who, 'Permission Denied', 'Only the GM can remove turns.', 'failure');
+                        return;
+                    }
+                    TurnTracker.removeCurrentTurnAfterAdvance(args[2] || '', ctx);
+                    return;
+                }
+                if (turnAction === 'stop') {
+                    if (!ctx.isGM) {
+                        Render.sendWhisperMessage(ctx.who, 'Permission Denied', 'Only the GM can stop combat.', 'failure');
+                        return;
+                    }
+                    TurnTracker.stopCombat(args[2] || '');
+                    return;
+                }
+                Render.sendWhisperMessage(ctx.who, 'Turn Tracker', 'Use !ca turn next, !ca turn focus, !ca turn remove, or !ca turn stop yes.', 'warning');
+                return;
+            }
+            if (action === 'turnnext') {
+                TurnTracker.advanceTurn(args[1] || '', ctx);
+                return;
+            }
+            if (action === 'turnfocus') {
+                TurnTracker.focusTokenById(args[1] || '', ctx);
+                return;
+            }
+            if (action === 'turnremove') {
+                if (!ctx.isGM) {
+                    Render.sendWhisperMessage(ctx.who, 'Permission Denied', 'Only the GM can remove turns.', 'failure');
+                    return;
+                }
+                TurnTracker.removeCurrentTurnAfterAdvance(args[1] || '', ctx);
+                return;
+            }
+            if (action === 'turnstop') {
+                if (!ctx.isGM) {
+                    Render.sendWhisperMessage(ctx.who, 'Permission Denied', 'Only the GM can stop combat.', 'failure');
+                    return;
+                }
+                TurnTracker.stopCombat(args[1] || '');
                 return;
             }
             if (action === 'use') {
@@ -8514,6 +10592,10 @@ const CombatAssistant = (() => {
             }
             if (action === 'conc') {
                 this.handleConcentrationRecall(ctx, args.slice(1));
+                return;
+            }
+            if (action === 'concopen') {
+                this.handleConcentrationOpen(ctx, args.slice(1));
                 return;
             }
             if (action === 'conend') {
@@ -8665,6 +10747,34 @@ const CombatAssistant = (() => {
             return true;
         },
 
+        handleConcentrationOpen(ctx, args) {
+            const entries = this.getAccessibleConcentrationEntries(ctx, args[0] || '');
+            if (!entries.length) {
+                Render.sendWhisperMessage(ctx.who, 'Concentration', 'No active concentration was found for your token.', 'warning');
+                return;
+            }
+            if (entries.length === 1) {
+                const card = this.concentrationButtonCard(entries[0]);
+                R20.whisper(ctx.who, card);
+                if (!ctx.isGM) R20.whisper('GM', card);
+                return;
+            }
+            const buttons = entries.map((entry) => {
+                const token = R20.getTokenById(entry.casterTokenId);
+                return Render.iconButtonHtml({
+                    iconHtml: '&#9201;&#65039;',
+                    label: token ? CombatService.getTokenName(token) : (entry.spellName || 'Con'),
+                    command: '!combatAssistant concopen ' + Utils.attrSafe(entry.casterTokenId),
+                    backgroundColor: 'rgba(80,80,120,0.95)',
+                    tooltip: 'Open this concentration area controls'
+                });
+            });
+            R20.whisper(ctx.who, Html.card({
+                title: 'Concentration',
+                body: Render.iconButtonTableHtml(buttons, { columns: Math.min(5, Math.max(1, buttons.length)), footer: 'Choose which active concentration area to open.' })
+            }));
+        },
+
         handleConcentrationRecall(ctx, args) {
             const entries = this.getAccessibleConcentrationEntries(ctx, args[0] || '');
             if (!entries.length) {
@@ -8672,9 +10782,19 @@ const CombatAssistant = (() => {
                 return;
             }
             if (entries.length === 1) {
-                this.rerollConcentrationDamage(entries[0]);
-                R20.whisper(ctx.who, this.concentrationButtonCard(entries[0]));
-                if (!ctx.isGM) R20.whisper('GM', this.concentrationButtonCard(entries[0]));
+                const rerolled = this.rerollConcentrationDamage(entries[0]);
+                if (!rerolled) {
+                    Render.sendWhisperMessage(
+                        ctx.who,
+                        'Concentration Damage',
+                        'Combat Assistant could not roll fresh damage for this concentration spell. The stored damage was not presented as a new roll.',
+                        'warning'
+                    );
+                    return;
+                }
+                const card = this.concentrationButtonCard(entries[0]);
+                R20.whisper(ctx.who, card);
+                if (!ctx.isGM) R20.whisper('GM', card);
                 return;
             }
             const buttons = entries.map((entry) => {
@@ -8741,6 +10861,7 @@ const CombatAssistant = (() => {
                 sourceAction: String(safeData.sourceAction || safeData.attackName || 'NPC Attack'),
                 sourceImgsrc: String(sourceToken.get('imgsrc') || safeData.sourceImgsrc || ''),
                 rangeText: String(safeData.rangeText || safeData.range || ''),
+                durationText: String(safeData.durationText || safeData.duration || ''),
                 isSpellAction: !!safeData.isSpellAction,
                 isConcentration: !!safeData.isConcentration,
                 lightInfo: safeData.lightInfo && safeData.lightInfo.hasLight ? safeData.lightInfo : { hasLight: false },
@@ -9745,6 +11866,7 @@ const CombatAssistant = (() => {
             try {
                 if (!SCRIPT_ACTIVE) return;
                 R20.syncAreaMarkerGroupForMovedToken(obj);
+                TurnTracker.handleGraphicChange(obj);
             } catch (error) {
                 Logger.debug('[change:graphic]', error && error.message ? error.message : String(error));
             }
@@ -9759,8 +11881,18 @@ const CombatAssistant = (() => {
                     CombatService.endConcentrationByTokenId(tokenId, 'caster token removed', { silent: true });
                 }
                 R20.handleAreaMarkerDestroyed(obj);
+                TurnTracker.handleGraphicDestroyed(obj);
             } catch (error) {
                 Logger.debug('[destroy:graphic]', error && error.message ? error.message : String(error));
+            }
+        },
+
+        onTurnOrderChange(campaign, previous) {
+            try {
+                if (!SCRIPT_ACTIVE) return;
+                TurnTracker.handleTurnOrderChange(campaign, previous || {});
+            } catch (error) {
+                Logger.debug('[change:campaign:turnorder]', error && error.message ? error.message : String(error));
             }
         },
 
@@ -9799,8 +11931,10 @@ const CombatAssistant = (() => {
             State.ensure();
             State.reconcilePersistentState();
             State.cleanupRuntimeQueues(true);
+            CombatService.repairConcentrationTooltips();
             R20.cleanupBatchAbilities(20, PLAYER_ACTION_TTL_MS, { noCreate: true, removeWhenEmpty: true, removeAll: true });
             SCRIPT_ACTIVE = true;
+            TurnTracker.initializeFromCurrentTurnOrder();
 
             if (!capabilities.sheetWriter) {
                 Render.sendWhisperMessage(
@@ -9827,6 +11961,7 @@ const CombatAssistant = (() => {
         on('chat:message', Events.onChatMessage);
         on('change:graphic', Events.onGraphicChange);
         on('destroy:graphic', Events.onGraphicDestroy);
+        on('change:campaign:turnorder', Events.onTurnOrderChange);
     });
 
     return Object.freeze({
@@ -9840,6 +11975,8 @@ const CombatAssistant = (() => {
         CombatEffects,
         Render,
         RollParser,
-        CombatService
+        TurnTracker,
+        CombatService,
+        ResourceService
     });
 })();
