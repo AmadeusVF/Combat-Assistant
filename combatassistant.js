@@ -4,7 +4,7 @@
  * @Project     Combat Assistant
  * @Description Lightweight Roll20 combat assistance extracted from T&T ideas.
  * @Author      AmadeusVF
- * @Version     1.2.1
+ * @Version     1.2.8
  * =========================================================
  *
  * Design goals:
@@ -39,8 +39,8 @@ const CombatAssistant = (() => {
         SHORT_NAME: 'CA',
         LOG_NAME: 'Combat Assistant',
         CHAT_NAME: 'Combat Assistant',
-        VERSION: '1.2.1',
-        SCHEMA_VERSION: 6,
+        VERSION: '1.2.8',
+        SCHEMA_VERSION: 7,
         STATE_KEY: 'COMBAT_ASSISTANT',
         LEGACY_STATE_KEY: 'COMBAT_TRACKER',
     });
@@ -65,7 +65,13 @@ const CombatAssistant = (() => {
         turnfocus: true,
         resource: true,
         resources: true,
-        resourceadjust: true
+        resourceadjust: true,
+        turnaction: true,
+        dash: true,
+        disengage: true,
+        dodge: true,
+        combat: true,
+        spells: true
     });
 
     const INITIATIVE_BATCH_TIMERS = Object.create(null);
@@ -90,6 +96,17 @@ const CombatAssistant = (() => {
     const MAX_PAYLOAD_LENGTH = 25000;
     let LAST_RUNTIME_CLEANUP_AT = 0;
     let SCRIPT_ACTIVE = false;
+    let ADVANCED_MODE = false;
+    const TEMP_RUNTIME_CONFIG_DEFAULTS = Object.freeze({
+        DEBUG: false,
+        CHAT_DEBUG_ATTACKS: false,
+        CHAT_DEBUG_SPELLS: false
+    });
+    const TEMP_RUNTIME_CONFIG = {
+        DEBUG: false,
+        CHAT_DEBUG_ATTACKS: false,
+        CHAT_DEBUG_SPELLS: false
+    };
 
     /** -----------------------------------------------------------------------
      * Config
@@ -203,7 +220,6 @@ const CombatAssistant = (() => {
     });
 
     const RUNTIME_CONFIG_DEFAULTS = Object.freeze({
-        DEBUG: false,
         CHAT_TRACKING: true,
         CONCENTRATION_TRACKING: true,
         CHAT_PROBE: false,
@@ -225,9 +241,11 @@ const CombatAssistant = (() => {
         SHEET_2014_CA_ROLLS: false,
         TURN_TRACKER: true,
         TURN_AUTO_FOCUS: false,
+        TURN_MOVEMENT_TRACKER: false,
         SHOW_PLAYER_RESOURCES: false,
         SHOW_NPC_RESOURCES: true,
         PLAYER_PUBLIC_RESOURCE_USAGE: false,
+        HANDLE_ACTIONS: false,
         CONC_TURN_TRACKER: false,
         ROUND_COUNTER: true,
         PUBLIC_ROUND_COUNTER: false,
@@ -283,6 +301,8 @@ const CombatAssistant = (() => {
         { type: 'section', label: 'Turn Tracker' },
         { key: 'TURN_TRACKER', label: 'Turn Tracker', type: 'boolean', tip: 'Track combat rounds and current turns from the Turn Order. Player Next buttons are always active while Turn Tracker is ON.' },
         { key: 'TURN_AUTO_FOCUS', label: 'Turn Auto Focus', type: 'boolean', tip: 'Ping and focus everyone on the current turn token.' },
+        { key: 'HANDLE_ACTIONS', label: 'Turn Token Action', type: 'boolean', tip: 'Show Dash, Disengage, Dodge, Combat, and Spells controls on every token Turn card.' },
+        { key: 'TURN_MOVEMENT_TRACKER', label: 'Turn Movement Tracker', type: 'boolean', tip: 'Track movement spent by the current-turn token, warn its controller and the GM when it exceeds available speed, and let Dash add another base-speed allowance.' },
         { key: 'CONC_TURN_TRACKER', label: 'Conc. Turn Tracker', type: 'boolean', tip: 'Decrease finite concentration duration once when the concentrating token reaches its turn, and end concentration automatically at 0 turns left.' },
         { key: 'ROUND_COUNTER', label: 'Round Counter', type: 'boolean', tip: 'Whisper the GM the Round Counter card with all tokens currently in combat.' },
         { key: 'PUBLIC_ROUND_COUNTER', label: 'Public Round Counter', type: 'boolean', tip: 'Also show the Round Counter card publicly. Round Counter must be ON.' },
@@ -290,14 +310,16 @@ const CombatAssistant = (() => {
         { key: 'TURN_MARKER', label: 'Turn Marker', type: 'boolean', tip: 'Spawn a marker token on the current turn token.' },
         { key: 'PUBLIC_TURN_MARKER', label: 'Turn Marker Token Public', type: 'boolean', tip: 'OFF puts the turn marker on the GM layer. ON puts it on the map layer and brings it forward.' },
         { key: 'TURN_MARKER_IMAGE_URL', label: 'Turn Marker Token Image', type: 'roll20image', tip: 'Roll20 uploaded image used for the turn marker token. Must start with https://files.d20.io/images/.' },
-        { key: 'TURN_MARKER_IMG_SIZE', label: 'Turn Marker Token Offset', type: 'number', tip: 'Pixel offset added to the current token width and height. Default 20.' },
+        { key: 'TURN_MARKER_IMG_SIZE', label: 'Turn Marker Token Size %', type: 'number', tip: 'Percentage added to the current token width and height. 20 means the marker is 20% larger than the token. Default 20.' },
         { key: 'TURN_MARKER_FOLLOW', label: 'Turn Marker Follow', type: 'boolean', tip: 'Keep the marker centered and scaled when the current turn token moves or resizes.' },
         { type: 'section', label: 'Resources' },
         { key: 'SHOW_PLAYER_RESOURCES', label: 'Show Player Resources', type: 'boolean', tip: 'Show the current player-controlled token\'s limited resources and spell slots directly on its Turn card.' },
         { key: 'SHOW_NPC_RESOURCES', label: 'Show NPC Resources', type: 'boolean', tip: 'Show limited resources and spell slots for non-player-controlled tokens on the GM Turn card only.' },
         { key: 'PLAYER_PUBLIC_RESOURCE_USAGE', label: 'Player Public Usage', type: 'boolean', tip: 'When a player uses or recovers a resource, send the Resource Update card to public chat instead of private whispers.' },
         { type: 'section', label: 'Extra' },
-        { key: 'DEBUG', label: 'Debug', type: 'boolean', tip: 'Log debug information in the Roll20 API console.' },
+        { key: 'DEBUG', label: 'Debug', type: 'boolean', temporary: true, advancedOnly: true, tip: 'Temporary API-console debug logging. Resets to OFF whenever the API sandbox restarts.' },
+        { key: 'CHAT_DEBUG_ATTACKS', label: 'Chat Debug Attacks', type: 'boolean', temporary: true, advancedOnly: true, tip: 'Temporarily print full attack diagnostics in chat after opening Combat. Resets to OFF whenever the API sandbox restarts.' },
+        { key: 'CHAT_DEBUG_SPELLS', label: 'Chat Debug Spells', type: 'boolean', temporary: true, advancedOnly: true, tip: 'Temporarily print full spell diagnostics in chat after opening Spells. Resets to OFF whenever the API sandbox restarts.' },
         //{ key: 'AREA_RADIUS_DEBUG_DRAW', label: 'Area Radius Debug Draw', type: 'boolean', tip: 'Draw temporary GM-only reference circles when resolving radius, sphere, cylinder, or emanation area markers.' },
         { key: 'CHAT_BACKGROUND_IMAGE_URL', label: 'Change Background URL', type: 'text', tip: 'Background image used by Combat Assistant cards.' },
         //{ key: 'CHAT_PROBE', label: 'Chat Probe', type: 'boolean', tip: 'Whisper raw Roll20 chat message dumps to the GM for parser testing.' },
@@ -383,10 +405,19 @@ const CombatAssistant = (() => {
                 SHEET_2014_CA_ROLLS: 'SHEET_2014_CA_ROLLS',
                 TURN: 'TURN_TRACKER',
                 TURN_TRACKER: 'TURN_TRACKER',
+                TURN_MOVEMENT_TRACKER: 'TURN_MOVEMENT_TRACKER',
+                MOVEMENT_TRACKER: 'TURN_MOVEMENT_TRACKER',
+                TURN_MOVEMENT: 'TURN_MOVEMENT_TRACKER',
                 SHOW_PLAYER_RESOURCES: 'SHOW_PLAYER_RESOURCES',
                 PLAYER_RESOURCES: 'SHOW_PLAYER_RESOURCES',
                 SHOW_NPC_RESOURCES: 'SHOW_NPC_RESOURCES',
                 NPC_RESOURCES: 'SHOW_NPC_RESOURCES',
+                HANDLE_ACTIONS: 'HANDLE_ACTIONS',
+                TURN_TOKEN_ACTION: 'HANDLE_ACTIONS',
+                TURN_TOKEN_ACTIONS: 'HANDLE_ACTIONS',
+                ACTIONS: 'HANDLE_ACTIONS',
+                TURN_ACTIONS: 'HANDLE_ACTIONS',
+                PLAYER_ACTIONS: 'HANDLE_ACTIONS',
                 PLAYER_PUBLIC_RESOURCE_USAGE: 'PLAYER_PUBLIC_RESOURCE_USAGE',
                 PLAYER_PUBLIC_USAGE: 'PLAYER_PUBLIC_RESOURCE_USAGE',
                 PUBLIC_RESOURCE_USAGE: 'PLAYER_PUBLIC_RESOURCE_USAGE',
@@ -406,6 +437,8 @@ const CombatAssistant = (() => {
                 TURN_MARKER_IMAGE_URL: 'TURN_MARKER_IMAGE_URL',
                 TURN_MARKER_TOKEN_OFFSET: 'TURN_MARKER_IMG_SIZE',
                 TURN_MARKER_SIZE: 'TURN_MARKER_IMG_SIZE',
+                TURN_MARKER_SIZE_PERCENT: 'TURN_MARKER_IMG_SIZE',
+                TURN_MARKER_PERCENT: 'TURN_MARKER_IMG_SIZE',
                 TURN_MARKER_IMG_SIZE: 'TURN_MARKER_IMG_SIZE',
                 TURN_MARKER_FOLLOW: 'TURN_MARKER_FOLLOW',
                 TURN_AUTO_FOCUS: 'TURN_AUTO_FOCUS',
@@ -418,7 +451,11 @@ const CombatAssistant = (() => {
                 BG: 'CHAT_BACKGROUND_IMAGE_URL',
                 BACKGROUND: 'CHAT_BACKGROUND_IMAGE_URL',
                 CHAT_BACKGROUND_IMAGE_URL: 'CHAT_BACKGROUND_IMAGE_URL',
-                DEBUG: 'DEBUG'
+                DEBUG: 'DEBUG',
+                CHAT_DEBUG_ATTACKS: 'CHAT_DEBUG_ATTACKS',
+                DEBUG_ATTACKS: 'CHAT_DEBUG_ATTACKS',
+                CHAT_DEBUG_SPELLS: 'CHAT_DEBUG_SPELLS',
+                DEBUG_SPELLS: 'CHAT_DEBUG_SPELLS'
     });
 
     /** -----------------------------------------------------------------------
@@ -446,6 +483,7 @@ const CombatAssistant = (() => {
                     roundProgressTokenIds: [],
                     pendingAddedTokenIds: [],
                     turnMarkerId: '',
+                    movement: { tokenId: '', baseSpeed: 0, spent: 0, dashCount: 0, dashBonus: 0, warned: false, lastLeft: null, lastTop: null },
                     active: false
                 },
                 helperCharacterId: ''
@@ -476,6 +514,11 @@ const CombatAssistant = (() => {
             state[META.STATE_KEY] = root;
             root.schemaVersion = Math.max(1, Utils.toInt(root.schemaVersion, 1));
             root.settings = this.isRecord(root.settings) ? root.settings : {};
+            // Debug controls are intentionally session-only. Remove stale values left
+            // by older releases so these options never remain persisted in state.
+            delete root.settings.DEBUG;
+            delete root.settings.CHAT_DEBUG_ATTACKS;
+            delete root.settings.CHAT_DEBUG_SPELLS;
             Object.keys(RUNTIME_CONFIG_DEFAULTS).forEach((key) => {
                 if (!Object.prototype.hasOwnProperty.call(root.settings, key)) {
                     root.settings[key] = RUNTIME_CONFIG_DEFAULTS[key];
@@ -498,6 +541,15 @@ const CombatAssistant = (() => {
             root.turnTracker.roundProgressTokenIds = Array.isArray(root.turnTracker.roundProgressTokenIds) ? root.turnTracker.roundProgressTokenIds : [];
             root.turnTracker.pendingAddedTokenIds = Array.isArray(root.turnTracker.pendingAddedTokenIds) ? root.turnTracker.pendingAddedTokenIds : [];
             root.turnTracker.turnMarkerId = String(root.turnTracker.turnMarkerId || '').trim();
+            root.turnTracker.movement = this.isRecord(root.turnTracker.movement) ? root.turnTracker.movement : {};
+            root.turnTracker.movement.tokenId = String(root.turnTracker.movement.tokenId || '').trim();
+            root.turnTracker.movement.baseSpeed = Math.max(0, Utils.toNumber(root.turnTracker.movement.baseSpeed, 0));
+            root.turnTracker.movement.spent = Math.max(0, Utils.toNumber(root.turnTracker.movement.spent, 0));
+            root.turnTracker.movement.dashCount = Math.max(0, Utils.toInt(root.turnTracker.movement.dashCount, 0));
+            root.turnTracker.movement.dashBonus = Math.max(0, Utils.toNumber(root.turnTracker.movement.dashBonus, 0));
+            root.turnTracker.movement.warned = Utils.toBoolean(root.turnTracker.movement.warned, false);
+            root.turnTracker.movement.lastLeft = root.turnTracker.movement.lastLeft === null || root.turnTracker.movement.lastLeft === undefined ? null : Utils.toNumber(root.turnTracker.movement.lastLeft, null);
+            root.turnTracker.movement.lastTop = root.turnTracker.movement.lastTop === null || root.turnTracker.movement.lastTop === undefined ? null : Utils.toNumber(root.turnTracker.movement.lastTop, null);
             root.turnTracker.active = Utils.toBoolean(root.turnTracker.active, false);
             root.helperCharacterId = String(root.helperCharacterId || '').trim();
             root.schemaVersion = META.SCHEMA_VERSION;
@@ -869,7 +921,19 @@ const CombatAssistant = (() => {
             if (value === undefined) return 'undefined';
             if (value === null) return 'null';
             if (typeof value === 'object') {
+                // Roll20 sometimes surfaces thrown/error-like objects whose enumerable
+                // JSON representation is only {}. Read their non-enumerable fields too.
                 try {
+                    const names = Object.getOwnPropertyNames(value || {});
+                    const errorLike = {};
+                    names.forEach((key) => {
+                        try { errorLike[key] = value[key]; } catch (ignored) {}
+                    });
+                    if (value.name && !errorLike.name) errorLike.name = value.name;
+                    if (value.message && !errorLike.message) errorLike.message = value.message;
+                    if (value.stack && !errorLike.stack) errorLike.stack = value.stack;
+                    const json = JSON.stringify(errorLike);
+                    if (json && json !== '{}') return json;
                     return JSON.stringify(value);
                 } catch (ignored) {
                     return String(value);
@@ -1086,6 +1150,36 @@ const CombatAssistant = (() => {
         isRoll20FileUrl(value) {
             const url = Utils.extractUrl(value);
             return !url || (Utils.isSafeImageUrl(url) && /^https:\/\/files\.d20\.io\/images\//i.test(url));
+        },
+
+        stripWrappingQuotes(value) {
+            const text = String(value || '').trim();
+            if (text.length >= 2) {
+                const first = text.charAt(0);
+                const last = text.charAt(text.length - 1);
+                if ((first === '"' && last === '"') || (first === "'" && last === "'")) return text.slice(1, -1).trim();
+            }
+            return text;
+        },
+
+        isAnimatedVideoUrl(value) {
+            const url = Utils.extractUrl(value);
+            return /\.(?:webm|mp4)(?:\?|$)/i.test(String(url || ''));
+        },
+
+        roll20StaticPreviewUrl(value) {
+            const url = Utils.extractUrl(value);
+            if (!Utils.isSafeImageUrl(url)) return '';
+            if (!Utils.isAnimatedVideoUrl(url)) return url;
+            if (!/\/images\//i.test(url)) return '';
+            // Roll20 uses sample.png as the static preview for animated library
+            // assets (including the image shown for animated tokens in Turn Order).
+            // Chat cannot render WEBM/MP4 through an <img>, so use that preview.
+            const preview = url.replace(
+                /\/(thumb|med|original|max)\.(?:webm|mp4)(?=\?|$)/i,
+                '/sample.png'
+            );
+            return preview !== url ? preview : '';
         }
     };
 
@@ -1093,9 +1187,14 @@ const CombatAssistant = (() => {
      * Runtime config
      * --------------------------------------------------------------------- */
     const RuntimeConfig = {
-        getAll() {
+        persistedSettings() {
             const root = State.get();
             root.settings = root.settings || {};
+            // Keep temporary debug flags out of persistent state even if an older
+            // schema or a manual edit left them behind.
+            delete root.settings.DEBUG;
+            delete root.settings.CHAT_DEBUG_ATTACKS;
+            delete root.settings.CHAT_DEBUG_SPELLS;
             const hadRevealTokenNames = Object.prototype.hasOwnProperty.call(root.settings, 'REVEAL_TOKEN_NAMES_IN_LOG');
             Object.keys(RUNTIME_CONFIG_DEFAULTS).forEach((key) => {
                 if (!Object.prototype.hasOwnProperty.call(root.settings, key)) root.settings[key] = RUNTIME_CONFIG_DEFAULTS[key];
@@ -1107,9 +1206,22 @@ const CombatAssistant = (() => {
             return root.settings;
         },
 
+        isTemporaryKey(key) {
+            return Object.prototype.hasOwnProperty.call(TEMP_RUNTIME_CONFIG_DEFAULTS, String(key || '').trim().toUpperCase());
+        },
+
+        getAll() {
+            return Object.assign({}, this.persistedSettings(), TEMP_RUNTIME_CONFIG);
+        },
+
         get(key) {
             const safeKey = String(key || '').trim().toUpperCase();
-            const config = this.getAll();
+            if (this.isTemporaryKey(safeKey)) {
+                return Object.prototype.hasOwnProperty.call(TEMP_RUNTIME_CONFIG, safeKey)
+                    ? TEMP_RUNTIME_CONFIG[safeKey]
+                    : TEMP_RUNTIME_CONFIG_DEFAULTS[safeKey];
+            }
+            const config = this.persistedSettings();
             return Object.prototype.hasOwnProperty.call(config, safeKey) ? config[safeKey] : RUNTIME_CONFIG_DEFAULTS[safeKey];
         },
 
@@ -1128,15 +1240,16 @@ const CombatAssistant = (() => {
 
         normalizeValue(field, value) {
             if (!field) return value;
-            if (field.type === 'boolean') return Utils.toBoolean(value, !!RUNTIME_CONFIG_DEFAULTS[field.key]);
-            if (field.type === 'bar') return Utils.clamp(Utils.toInt(value, RUNTIME_CONFIG_DEFAULTS[field.key]), 1, 4);
-            if (field.type === 'bar0') return Utils.clamp(Utils.toInt(value, RUNTIME_CONFIG_DEFAULTS[field.key]), 0, 4);
-            if (field.type === 'percent') return Utils.clamp(Utils.toInt(value, RUNTIME_CONFIG_DEFAULTS[field.key]), 0, 100);
-            if (field.type === 'number') return Math.max(0, Utils.toInt(value, RUNTIME_CONFIG_DEFAULTS[field.key]));
+            const fallback = this.isTemporaryKey(field.key) ? TEMP_RUNTIME_CONFIG_DEFAULTS[field.key] : RUNTIME_CONFIG_DEFAULTS[field.key];
+            if (field.type === 'boolean') return Utils.toBoolean(value, !!fallback);
+            if (field.type === 'bar') return Utils.clamp(Utils.toInt(value, fallback), 1, 4);
+            if (field.type === 'bar0') return Utils.clamp(Utils.toInt(value, fallback), 0, 4);
+            if (field.type === 'percent') return Utils.clamp(Utils.toInt(value, fallback), 0, 100);
+            if (field.type === 'number') return Math.max(0, Utils.toInt(value, fallback));
             if (field.type === 'roll20image') return Utils.extractUrl(value);
             if (field.type === 'image' || field.key === 'CHAT_BACKGROUND_IMAGE_URL') {
                 const url = String(value === undefined || value === null ? '' : value).trim();
-                return Utils.isSafeImageUrl(url) ? url : (RUNTIME_CONFIG_DEFAULTS[field.key] || '');
+                return Utils.isSafeImageUrl(url) ? url : (fallback || '');
             }
             return String(value === undefined || value === null ? '' : value).trim();
         },
@@ -1145,16 +1258,14 @@ const CombatAssistant = (() => {
             const safeKey = this.normalizeKey(key);
             const field = this.getField(safeKey);
             if (!field) return { ok: false, message: 'Unknown setting: ' + key + '.' };
+            if (field.advancedOnly && !ADVANCED_MODE) return { ok: false, message: 'Enable advanced mode first with !ca advancemode yes.' };
             if (field.type === 'section') return { ok: false, message: 'Setting is not editable: ' + key + '.' };
             if (field.type === 'bar' || field.type === 'bar0') {
                 const raw = String(value === undefined || value === null ? '' : value).trim();
                 const bar = Utils.toInt(raw, null);
                 const min = field.type === 'bar0' ? 0 : 1;
                 if (bar === null || String(bar) !== raw || bar < min || bar > 4) {
-                    return {
-                        ok: false,
-                        message: field.label + ' must be a whole number from ' + min + ' to 4.'
-                    };
+                    return { ok: false, message: field.label + ' must be a whole number from ' + min + ' to 4.' };
                 }
             }
             if (field.type === 'percent') {
@@ -1172,29 +1283,55 @@ const CombatAssistant = (() => {
                 }
             }
             if (field.type === 'roll20image' && !Utils.isRoll20FileUrl(value)) {
-                return {
-                    ok: false,
-                    title: 'Invalid URL',
-                    message: 'Only images uploaded to Roll20 are supported here. Use a URL that starts with https://files.d20.io/images/.'
-                };
+                return { ok: false, title: 'Invalid URL', message: 'Only images uploaded to Roll20 are supported here. Use a URL that starts with https://files.d20.io/images/.' };
             }
-            const config = this.getAll();
-            config[safeKey] = this.normalizeValue(field, value);
-            if (safeKey === 'REVEAL_TOKEN_NAMES_IN_LOG') config.HIDE_TOKEN_NAMES_IN_LOG = !Utils.toBoolean(config[safeKey], true);
-            if (safeKey === 'HIDE_TOKEN_NAMES_IN_LOG') config.REVEAL_TOKEN_NAMES_IN_LOG = !Utils.toBoolean(config[safeKey], false);
-            return { ok: true, key: safeKey, value: config[safeKey], field };
+            const normalized = this.normalizeValue(field, value);
+            if (this.isTemporaryKey(safeKey)) {
+                TEMP_RUNTIME_CONFIG[safeKey] = normalized;
+            } else {
+                const config = this.persistedSettings();
+                config[safeKey] = normalized;
+                if (safeKey === 'REVEAL_TOKEN_NAMES_IN_LOG') config.HIDE_TOKEN_NAMES_IN_LOG = !Utils.toBoolean(config[safeKey], true);
+                if (safeKey === 'HIDE_TOKEN_NAMES_IN_LOG') config.REVEAL_TOKEN_NAMES_IN_LOG = !Utils.toBoolean(config[safeKey], false);
+            }
+            return { ok: true, key: safeKey, value: normalized, field };
         },
 
         toggle(key) {
             const safeKey = this.normalizeKey(key);
             const field = this.getField(safeKey);
             if (!field) return { ok: false, message: 'Unknown setting: ' + key + '.' };
+            if (field.advancedOnly && !ADVANCED_MODE) return { ok: false, message: 'Enable advanced mode first with !ca advancemode yes.' };
             if (field.type !== 'boolean') return { ok: false, message: 'Setting is not toggleable: ' + key + '.' };
             return this.set(safeKey, !Utils.toBoolean(this.get(safeKey), false));
         },
 
         fields() {
-            return RUNTIME_CONFIG_FIELDS.slice();
+            return RUNTIME_CONFIG_FIELDS.filter((field) => !field.advancedOnly || ADVANCED_MODE);
+        },
+
+        setAdvancedMode(enabled) {
+            ADVANCED_MODE = !!enabled;
+            if (!ADVANCED_MODE) {
+                Object.keys(TEMP_RUNTIME_CONFIG_DEFAULTS).forEach((key) => {
+                    TEMP_RUNTIME_CONFIG[key] = TEMP_RUNTIME_CONFIG_DEFAULTS[key];
+                });
+            }
+            return ADVANCED_MODE;
+        },
+
+        resetDefaults() {
+            const root = State.get();
+            root.settings = Object.assign({}, RUNTIME_CONFIG_DEFAULTS);
+            Object.keys(TEMP_RUNTIME_CONFIG_DEFAULTS).forEach((key) => {
+                TEMP_RUNTIME_CONFIG[key] = TEMP_RUNTIME_CONFIG_DEFAULTS[key];
+            });
+            ADVANCED_MODE = false;
+            return this.getAll();
+        },
+
+        isAdvancedMode() {
+            return ADVANCED_MODE;
         }
     };
 
@@ -1294,9 +1431,9 @@ const CombatAssistant = (() => {
             this.send('/direct ' + html);
         },
 
-        whisper(target, html) {
+        whisper(target, html, callback) {
             const safeTarget = String(target || 'GM').replace(/["\\\r\n]/g, '').trim() || 'GM';
-            this.send('/w "' + safeTarget + '" ' + html);
+            this.send('/w "' + safeTarget + '" ' + html, callback);
         },
 
         hasSheetReader() {
@@ -1363,7 +1500,7 @@ const CombatAssistant = (() => {
         },
 
         getCharacterByName(characterName) {
-            const safeName = String(characterName || '').trim().toLowerCase();
+            const safeName = Utils.stripWrappingQuotes(characterName).toLowerCase();
             if (!safeName) return null;
             const characters = findObjs({ _type: 'character' }) || [];
             for (let i = 0; i < characters.length; i += 1) {
@@ -2825,6 +2962,34 @@ const CombatAssistant = (() => {
             }).filter(Boolean));
         },
 
+        getNonGmTokenControllerDisplayNames(token, character) {
+            const ids = [];
+            const addIds = (raw) => {
+                String(raw || '').split(',').forEach((id) => {
+                    const safeId = String(id || '').trim();
+                    if (safeId && ids.indexOf(safeId) < 0) ids.push(safeId);
+                });
+            };
+            if (token && Utils.isFunction(token.get)) addIds(token.get('controlledby'));
+            if (character && Utils.isFunction(character.get)) addIds(character.get('controlledby'));
+
+            let playerIds = ids.slice();
+            if (ids.indexOf('all') >= 0) {
+                playerIds = (findObjs({ _type: 'player' }) || []).map((player) => {
+                    if (!player) return '';
+                    return String(player.id || (Utils.isFunction(player.get) ? player.get('_id') : '') || '').trim();
+                }).filter(Boolean);
+            }
+
+            return Utils.uniqueNames(playerIds.map((id) => {
+                if (!id || id === 'all') return '';
+                if (typeof playerIsGM === 'function' && playerIsGM(id)) return '';
+                const player = getObj('player', id);
+                if (!player || !Utils.isFunction(player.get)) return '';
+                return String(player.get('_displayname') || player.get('displayname') || '').trim();
+            }).filter(Boolean));
+        },
+
         getTokenControllerIds(token, character, fallbackPlayerId) {
             const ids = [];
             const addIds = (raw) => {
@@ -3296,6 +3461,50 @@ const CombatAssistant = (() => {
             this.sendPublicMessage('Combat Log', narrative, 'success', { titleHtml: this.combatLogTitleHtml(result, title) });
         },
 
+
+        buildGmHealingSummaryCard(results, healingAmount) {
+            const list = (Array.isArray(results) ? results : []).filter((result) => result && result.ok && result.mode !== 'temp');
+            const amount = Math.max(0, Utils.toInt(healingAmount, list.length ? list[0].amount : 0));
+            const green = CONFIG.DEFAULT_TEXT_HEAL_COLOR;
+            const red = 'rgb(220,95,95)';
+            const titleHtml = '<div style="text-align:center;font-weight:900;">Healing &#128154; <span style="color:' + green + ';">' + Utils.escapeHtml(String(amount)) + '</span></div>';
+            const rows = list.map((result) => {
+                const current = Math.max(0, Utils.toInt(result.previousHp, 0));
+                const next = Math.max(0, Utils.toInt(result.currentHp, current));
+                const currentColor = current <= 0 ? red : 'rgb(255,255,255)';
+                const icon = this.titleTokenIconHtml(result.tokenImgsrc || '');
+                const name = String(result.tokenName || 'Token');
+                return (
+                    '<table style="width:100%;border-collapse:collapse;table-layout:fixed;margin:0;padding:0;"><tbody><tr>' +
+                        '<td style="width:28px;text-align:left;vertical-align:middle;padding:1px 0;">' + icon + '</td>' +
+                        '<td style="text-align:left;vertical-align:middle;padding:1px 4px 1px 2px;color:' + CONFIG.DEFAULT_TEXT_CHARACTER_COLOR + ';font-size:12px;line-height:15px;font-weight:900;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;">' + Utils.escapeHtml(name) + '</td>' +
+                        '<td style="width:116px;text-align:right;vertical-align:middle;padding:1px 0;white-space:nowrap;font-size:12px;line-height:15px;font-weight:900;">' +
+                            '<span style="color:' + currentColor + ';">' + Utils.escapeHtml(String(current)) + '</span>' +
+                            '<span style="color:rgb(205,205,205);padding:0 3px;">+</span>' +
+                            '<span style="color:' + green + ';">' + Utils.escapeHtml(String(amount)) + '</span>' +
+                            '<span style="color:rgb(205,205,205);padding:0 3px;">=</span>' +
+                            '<span style="color:' + green + ';">' + Utils.escapeHtml(String(next)) + '</span>' +
+                        '</td>' +
+                    '</tr></tbody></table>'
+                );
+            }).join('');
+            const cardStyle = this.getMessageCardStyle('success');
+            return Html.card({
+                title: 'Healing',
+                body: rows || '<div style="text-align:center;color:rgb(170,170,170);font-size:11px;">No healing was applied.</div>',
+                buildOptions: {
+                    titleColor: cardStyle.titleColor,
+                    borderColor: cardStyle.borderColor,
+                    titleHtml,
+                    bodyAlign: 'left'
+                }
+            });
+        },
+
+        sendGmHealingSummary(results, healingAmount, requestedBy) {
+            R20.whisper(requestedBy || 'GM', this.buildGmHealingSummaryCard(results, healingAmount));
+        },
+
         getDamageTypeIcon(type) {
             const key = CombatService.normalizeDamageType(type);
             return CONFIG.DAMAGE_TYPE_ICONS[key] || CONFIG.DAMAGE_TYPE_ICONS.normal;
@@ -3567,31 +3776,60 @@ const CombatAssistant = (() => {
         attackPromptTitleHtml(result) {
             result = result || {};
             const imgsrc = String(result.tokenImgsrc || '').trim();
-            const imgHtml = imgsrc
-                ? Html.img(imgsrc, 'width:24px;height:24px;object-fit:cover;border-radius:3px;vertical-align:middle;display:block;')
-                : '<span style="display:block;width:24px;height:24px;"></span>';
-            const damageType = String(result.damageType || '').trim();
-            const damageIcon = this.getDamageTypeIcon(damageType) || '&#9679;';
+            const character = R20.getCharacterByName(result.characterName || result.tokenName || '');
+            const avatar = character && Utils.isFunction(character.get) ? String(character.get('avatar') || '').trim() : '';
+            const imgHtml = this.chatTokenImageHtml(imgsrc, 24, avatar, 3) || '<span style="display:block;width:24px;height:24px;"></span>';
+            const damageRolls = Array.isArray(result.damageRolls) && result.damageRolls.length
+                ? result.damageRolls
+                : (Array.isArray(result.attackDamageRolls) && result.attackDamageRolls.length
+                    ? result.attackDamageRolls
+                    : [{ damageType: result.damageType || 'normal' }]);
+            const damageTypes = [];
+            damageRolls.forEach((roll) => {
+                const type = CombatService.normalizeDamageType(roll && roll.damageType || result.damageType || 'normal');
+                if (type && damageTypes.indexOf(type) < 0) damageTypes.push(type);
+            });
+            if (!damageTypes.length) damageTypes.push(CombatService.normalizeDamageType(result.damageType || 'normal'));
+            const visibleDamageTypes = damageTypes.slice(0, 2);
+            const firstDamageType = visibleDamageTypes[0] || 'normal';
+            const damageIconSlots = [null, null];
+            if (visibleDamageTypes.length === 1) {
+                damageIconSlots[1] = visibleDamageTypes[0];
+            } else if (visibleDamageTypes.length >= 2) {
+                damageIconSlots[0] = visibleDamageTypes[0];
+                damageIconSlots[1] = visibleDamageTypes[1];
+            }
+            const damageIconCells = damageIconSlots.map((type) => {
+                const icon = type ? (this.getDamageTypeIcon(type) || '&#9679;') : '';
+                const tooltip = type ? Utils.attrSafe(type) : '';
+                return '<td' + (tooltip ? (' title="' + tooltip + '"') : '') + ' style="width:12px;height:12px;padding:0;text-align:center;vertical-align:middle;font-size:11px;line-height:12px;font-weight:900;white-space:nowrap;">' + icon + '</td>';
+            }).join('');
             const isSaveAttack = Utils.toBoolean(result.isSaveAttack, false) || !!result.saveAbility;
-            const saveAbilityLabel = CombatService.abilityNameToShortLabel(result.saveAbility || '') || String(result.saveAbilityLabel || 'SAVE').replace(/[^A-Za-z]/g, '').slice(0, 3).toUpperCase() || 'SAV';
-            const summaryWidth = 44;
-            const summaryValueWidth = 26;
             const challengeValue = isSaveAttack ? (result.saveDc || result.attackTotal || 0) : (result.attackTotal || result.saveDc || 0);
-            const summaryHtml =
-                '<div style="font-size:11px;line-height:12px;white-space:nowrap;width:' + summaryWidth + 'px;">' +
-                    '<span style="display:inline-block;width:16px;text-align:right;color:rgb(230,80,80);font-weight:900;">' + (isSaveAttack ? '&#127922;' : '&#128165;') + '</span>' +
-                    '<strong title="' + Utils.attrSafe(isSaveAttack ? (saveAbilityLabel + ' Saving Throw DC ' + String(challengeValue)) : 'Attack Roll') + '" style="display:inline-block;width:' + summaryValueWidth + 'px;text-align:right;color:rgb(255,255,255);font-weight:900;">' + Utils.escapeHtml(String(challengeValue)) + '</strong>' +
-                '</div>' +
-                '<div style="font-size:11px;line-height:12px;white-space:nowrap;width:' + summaryWidth + 'px;">' +
-                    '<span style="display:inline-block;width:16px;text-align:left;">' + damageIcon + '</span>' +
-                    '<strong style="display:inline-block;width:' + summaryValueWidth + 'px;text-align:right;color:' + this.getDamageTypeColor(damageType) + ';font-weight:900;">' + Utils.escapeHtml(String(result.damageTotal || result.healTotal || 0)) + '</strong>' +
-                '</div>';
+            const damageValue = result.damageTotal || result.healTotal || 0;
+            const topTooltip = isSaveAttack
+                ? ((CombatService.abilityNameToShortLabel(result.saveAbility || '') || 'SAVE') + ' Saving Throw DC ' + String(challengeValue))
+                : 'Attack Roll';
             return (
                 '<table style="width:100%;border-collapse:collapse;table-layout:fixed;">' +
                     '<tbody><tr>' +
                         '<td style="width:28px;text-align:left;vertical-align:middle;padding:0;">' + imgHtml + '</td>' +
                         '<td style="text-align:center;vertical-align:middle;font-size:17px;line-height:19px;font-weight:900;white-space:normal;">' + Utils.escapeHtml(String(result.attackName || 'Attack')) + '</td>' +
-                        '<td style="width:48px;text-align:right;vertical-align:middle;padding:0;">' + summaryHtml + '</td>' +
+                        '<td style="width:28px;text-align:right;vertical-align:middle;padding:0;">' +
+                            '<table style="width:24px;height:24px;border-collapse:collapse;table-layout:fixed;margin-left:auto;"><tbody>' +
+                                '<tr>' +
+                                    '<td style="width:12px;height:12px;padding:0;"></td>' +
+                                    '<td title="' + Utils.attrSafe(topTooltip) + '" style="width:12px;height:12px;padding:0;text-align:center;vertical-align:middle;font-size:11px;line-height:12px;font-weight:900;white-space:nowrap;color:rgb(230,80,80);">&#128165;</td>' +
+                                '</tr>' +
+                                '<tr>' + damageIconCells + '</tr>' +
+                            '</tbody></table>' +
+                        '</td>' +
+                        '<td style="width:10%;text-align:right;vertical-align:middle;padding:0;">' +
+                            '<table style="width:100%;height:24px;border-collapse:collapse;table-layout:fixed;"><tbody>' +
+                                '<tr><td style="height:12px;padding:0;text-align:right;vertical-align:middle;font-size:11px;line-height:12px;font-weight:900;white-space:nowrap;color:rgb(255,255,255);">' + Utils.escapeHtml(String(challengeValue)) + '</td></tr>' +
+                                '<tr><td style="height:12px;padding:0;text-align:right;vertical-align:middle;font-size:11px;line-height:12px;font-weight:900;white-space:nowrap;color:' + this.getDamageTypeColor(firstDamageType) + ';">' + Utils.escapeHtml(String(damageValue)) + '</td></tr>' +
+                            '</tbody></table>' +
+                        '</td>' +
                     '</tr></tbody>' +
                 '</table>'
             );
@@ -3706,7 +3944,7 @@ const CombatAssistant = (() => {
                 label: 'Edit',
                 command: '!combatAssistant deal manual &#63;{Damage|' + String(Math.max(0, Utils.toInt(result.damageTotal || primaryDamage.total, 0))) + '} ' +
                     this.damageTypeQuery(primaryDamage.damageType || result.damageType || 'normal') + ' ' +
-                    '&#63;{Challenge|' + String(challenge || 0) + '} ' +
+                    '&#63;{DC|' + String(challenge || 0) + '} ' +
                     this.saveAbilityQuery(saveAbility || 'no') + ' ' +
                     this.queryOptionsWithDefault('Half on Success', result.halfOnSuccess ? 'yes' : 'no', [['No', 'no'], ['Yes', 'yes']]),
                 backgroundColor: 'rgba(45,45,45,0.95)',
@@ -3761,6 +3999,7 @@ const CombatAssistant = (() => {
             const command = this.sanitizeCommand(options.command || '#');
             const label = Utils.escapeHtml(String(options.label === undefined || options.label === null ? '' : options.label));
             const tooltip = String(options.tooltip || '').trim();
+            const fontSize = Math.max(1, Utils.toInt(options.fontSize, 10))
             return (
                 '<a href="' + command + '"' +
                 (tooltip ? (' title="' + Utils.attrSafe(tooltip) + '"') : '') +
@@ -3776,13 +4015,559 @@ const CombatAssistant = (() => {
                 'border:1px solid rgba(255,255,255,0.65);' +
                 'border-radius:4px;' +
                 'color:rgb(255,255,255);' +
-                'font-size:10px;' +
+                'font-size:' + fontSize + 'px;' +
                 'font-weight:900;' +
                 'box-sizing:border-box;' +
                 'background:' + String(options.backgroundColor || 'rgba(0,105,160,0.95)') + ';">' +
                     label +
                 '</a>'
             );
+        },
+
+        turnActionButtonHtml(tokenId, label, action, options) {
+            const opts = options || {};
+            const safeTokenId = String(tokenId || '').trim();
+            const safeAction = String(action || '').trim().toLowerCase();
+            const command = safeAction === 'combat'
+                ? ('!combatAssistant combat ' + Utils.attrSafe(safeTokenId))
+                : (safeAction === 'spells'
+                    ? ('!combatAssistant spells ' + Utils.attrSafe(safeTokenId))
+                    : ('!combatAssistant ' + safeAction));
+            return this.compactSettingButtonHtml({
+                label: String(label || ''),
+                command,
+                tooltip: String(opts.tooltip || label || '').trim(),
+                width: Math.max(24, Utils.toInt(opts.width, 38)),
+                height: Math.max(1, Utils.toInt(opts.height, 8)),
+                backgroundColor: String(opts.backgroundColor || 'rgba(45,45,45,0.95)')
+            });
+        },
+
+        buildTurnActionsHtml(info, options) {
+            if (!RuntimeConfig.get('HANDLE_ACTIONS') || !info || !info.tokenId) return '';
+            const buttons = [
+                this.turnActionButtonHtml(info.tokenId, 'Dash', 'dash', { tooltip: 'Take the Dash action', backgroundColor: 'rgba(45,45,45,0.95)' }),
+                this.turnActionButtonHtml(info.tokenId, 'Disen.', 'disengage', { tooltip: 'Take the Disengage action', backgroundColor: 'rgba(45,45,45,0.95)' }),
+                this.turnActionButtonHtml(info.tokenId, 'Dodge', 'dodge', { tooltip: 'Take the Dodge action', backgroundColor: 'rgba(45,45,45,0.95)' }),
+                this.turnActionButtonHtml(info.tokenId, 'Combat', 'combat', { tooltip: 'List attacks from this character sheet', backgroundColor: 'rgba(105,35,35,0.95)' }),
+                this.turnActionButtonHtml(info.tokenId, 'Spells', 'spells', { tooltip: 'Open combat spells', backgroundColor: 'rgba(65,55,120,0.95)' })
+            ];
+            return '<div style="text-align:center;white-space:nowrap;line-height:normal;">' +
+                buttons.map((button, index) => (index ? '<span style="display:inline-block;width:3px;height:1px;"></span>' : '') + button).join('') +
+            '</div>';
+        },
+
+        attackDamageButtonHtml(attack) {
+            const damage = attack && Array.isArray(attack.damage) && attack.damage.length ? attack.damage[0] : null;
+            if (!damage) {
+                return '<span title="No damage formula found" style="display:inline-flex;align-items:center;justify-content:center;width:40px;height:40px;box-sizing:border-box;border:1px solid rgba(255,255,255,0.45);border-radius:4px;background:rgba(55,55,55,0.75);color:rgb(165,165,165);font-size:9px;line-height:10px;text-align:center;vertical-align:middle;">-</span>';
+            }
+            const formula = String(damage.formula || '-').trim() || '-';
+            const damageType = String(damage.damageType || 'Damage').trim() || 'Damage';
+            const allDamage = (attack.damage || []).map((entry) => String(entry.formula || '-') + (entry.damageType ? (' ' + entry.damageType) : '')).join(' + ');
+            return '<span title="' + Utils.attrSafe(allDamage) + '" style="display:inline-block;width:40px;height:40px;box-sizing:border-box;border:1px solid rgba(255,255,255,0.55);border-radius:4px;background:rgba(95,45,45,0.92);color:rgb(255,255,255);text-align:center;vertical-align:middle;overflow:hidden;font-family:Arial,Helvetica,sans-serif;">' +
+                '<strong><span style="display:block;height:21px;line-height:21px;font-size:10px;white-space:nowrap;overflow:hidden;">' + Utils.escapeHtml(formula) + '</span></strong>' +
+                '<span style="display:block;height:17px;line-height:14px;padding:0 1px;font-size:8px;white-space:nowrap;overflow:hidden;">' + Utils.escapeHtml(damageType) + '</span>' +
+            '</span>';
+        },
+
+        attackRollButtonHtml(attack) {
+            const bonus = String(attack && attack.attackBonusLabel || '+0');
+            const command = this.sanitizeCommand(attack && attack.rollCommand || '#');
+            const breakdown = String(attack && attack.attackBreakdown || bonus);
+            return '<a href="' + command + '" title="' + Utils.attrSafe(breakdown) + '" style="display:inline-block;width:40px;height:40px;box-sizing:border-box;text-align:center;text-decoration:none;border:1px solid rgba(255,255,255,0.75);border-radius:4px;background:rgba(0,105,160,0.95);color:rgb(255,255,255);font-family:Arial,Helvetica,sans-serif;overflow:hidden;vertical-align:middle;">' +
+                '<strong><span style="display:block;height:27px;line-height:27px;font-size:17px;text-align:center;">' + Utils.escapeHtml(bonus) + '</span></strong>' +
+                '<strong><span style="display:block;height:12px;line-height:10px;font-size:9px;text-align:center;">Roll</span></strong>' +
+            '</a>';
+        },
+
+        combatAttackDamageEntries(attack) {
+            return attack && Array.isArray(attack.damage)
+                ? attack.damage.filter((entry) => {
+                    if (!entry) return false;
+                    const formula = String(entry.formula || '').trim();
+                    if (!formula) return false;
+                    const compact = formula.replace(/\s+/g, '').toLowerCase();
+                    if (compact === '-' || compact === '0' || /^0(?:\.0+)?$/.test(compact) || /^0d\d+(?:[+-]0+)?$/.test(compact)) return false;
+                    return true;
+                })
+                : [];
+        },
+
+        combatAttackHasDamage(attack) {
+            return !!(this.combatAttackDamageEntries(attack).length && String(attack && attack.damageCommand || '').trim());
+        },
+
+        combatAttackDamageButtonHtml(attack) {
+            const damageEntries = this.combatAttackDamageEntries(attack);
+            const command = String(attack && attack.damageCommand || '').trim();
+            if (!damageEntries.length || !command) return '';
+            const allDamage = damageEntries.map((entry) => {
+                const formula = String(entry.formula || '').trim();
+                const damageType = String(entry.damageType || 'Damage').trim() || 'Damage';
+                return formula + ' ' + damageType;
+            }).join(' | ');
+            const visible = damageEntries.slice(0, 2);
+            const multiple = visible.length > 1;
+            const rows = visible.map((entry) => {
+                const formula = String(entry.formula || '').trim();
+                const damageType = String(entry.damageType || 'Damage').trim() || 'Damage';
+                const icon = this.getDamageTypeIcon(damageType) || '&#128171;';
+                return '<span style="display:block;width:48px;height:' + (multiple ? '12px' : '23px') + ';line-height:' + (multiple ? '12px' : '21px') + ';padding-top:' + (multiple ? '0' : '2px') + ';font-size:10px;font-weight:900;white-space:nowrap;overflow:hidden;text-align:center;box-sizing:border-box;">' +
+                    '<b>' + Utils.escapeHtml(formula) + '&nbsp;' + icon + '</b>' +
+                '</span>';
+            }).join('');
+            const style = 'display:block;width:50px;height:25px;min-width:50px;min-height:25px;padding:0;margin:0;box-sizing:border-box;border:1px solid rgba(255,255,255,0.55);border-radius:4px;background:rgba(85,20,20,0.70);color:rgb(255,255,255);text-align:center;vertical-align:middle;overflow:hidden;font-family:Arial,Helvetica,sans-serif;text-decoration:none;';
+            return '<a href="' + Utils.attrSafe(command) + '" title="' + Utils.attrSafe('Roll damage: ' + allDamage) + '" style="' + style + '">' + rows + '</a>';
+        },
+
+        combatAttackRollButtonHtml(attack) {
+            const bonus = String(attack && attack.attackBonusLabel || '+0');
+            const numericBonus = Math.abs(Utils.toInt(attack && attack.attackBonus, Utils.toInt(bonus, 0)));
+            const bonusFontSize = numericBonus > 9 ? 14 : 16;
+            const saveDc = Math.max(0, Utils.toInt(attack && attack.saveDc, 0));
+            const saveAbility = CombatService.normalizeAbilityName(attack && attack.saveAbility || '');
+            const saveAbilityLabel = CombatService.abilityNameToShortLabel(saveAbility) || (saveAbility ? saveAbility.slice(0, 3).toUpperCase() : '');
+            const isSave = saveDc > 0 && !!saveAbilityLabel;
+            const command = String(attack && attack.rollCommand || '').trim();
+            const breakdown = isSave
+                ? ('DC ' + String(saveDc) + ' ' + saveAbilityLabel + ' Saving Throw')
+                : (String(attack && attack.attackBreakdown || bonus).trim() || bonus);
+            const tag = command ? 'a' : 'span';
+            const href = command ? (' href="' + Utils.attrSafe(command) + '"') : '';
+            const disabledTitle = command ? breakdown : (breakdown + ' - Roll unavailable');
+            const topText = isSave ? String(saveDc) : bonus;
+            const bottomText = isSave ? saveAbilityLabel : 'Roll';
+            const topFontSize = isSave ? 15 : bonusFontSize;
+            const bottomFontSize = isSave ? 10 : 10;
+            return '<' + tag + href + ' title="' + Utils.attrSafe(disabledTitle) + '" style="' +
+                'display:inline-flex;flex-direction:column;align-items:center;justify-content:center;' +
+                'width:25px;height:25px;min-width:25px;min-height:25px;padding:0;margin:0;' +
+                'box-sizing:border-box;border:1px solid rgba(255,255,255,0.70);border-radius:4px;' +
+                'background:rgba(54,54,54,0.50);color:rgb(255,255,255);text-decoration:none;' +
+                'text-align:center;vertical-align:middle;overflow:hidden;font-family:Arial,Helvetica,sans-serif;">' +
+                    '<b><span style="display:block;height:15px;line-height:15px;font-size:' + String(topFontSize) + 'px;font-weight:900;white-space:nowrap;color:rgb(255,255,255);">' + Utils.escapeHtml(topText) + '</span></b>' +
+                    '<b><span style="display:block;height:9px;line-height:9px;font-size:' + String(bottomFontSize) + 'px;font-weight:900;white-space:nowrap;color:rgb(255,255,255);">' + Utils.escapeHtml(bottomText) + '</span></b>' +
+            '</' + tag + '>';
+        },
+
+        buildCombatAttacksCard(characterName, attacks) {
+            const safeName = String(characterName || 'Character').trim() || 'Character';
+            const safeAttacks = (Array.isArray(attacks) ? attacks : [])
+                .filter((attack) => attack && String(attack.name || '').trim());
+            const rows = safeAttacks.map((attack, index) => {
+                const name = String(attack.name || '').trim();
+                const ability = String(attack.abilityLabel || '').trim();
+                const attackType = String(attack.attackTypeLabel || attack.attackType || 'Attack').trim() || 'Attack';
+                const rangeLabel = /^(?:Ranged Attack|Ranged Save)$/i.test(attackType) ? String(attack.rangeLabel || '').trim() : '';
+                const separator = index < safeAttacks.length - 1
+                    ? 'border-bottom:1px solid rgba(255,255,255,0.12);'
+                    : '';
+                const hasDamage = this.combatAttackHasDamage(attack);
+                const controlsWidth = hasDamage ? 79 : 25;
+                const controlsCellWidth = hasDamage ? 83 : 29;
+                return '<table style="width:100%;border-collapse:collapse;table-layout:fixed;' + separator + '"><tbody><tr>' +
+                    '<td style="text-align:left;vertical-align:middle;padding:4px 3px 4px 0;white-space:normal;overflow-wrap:normal;word-break:normal;">' +
+                        '<div style="color:rgb(232,220,180);font-size:11px;line-height:13px;font-weight:700;white-space:normal;overflow-wrap:normal;word-break:normal;">' +
+                            Utils.escapeHtml(name) +
+                        '</div>' +
+                        '<div style="padding-top:1px;color:rgb(255,255,255);font-size:9px;line-height:11px;font-weight:400;white-space:normal;">' +
+                            Utils.escapeHtml(attackType) +
+                            (ability ? (' <span style="color:rgb(155,155,155);font-weight:700;">[' + Utils.escapeHtml(ability) + ']</span>') : '') +
+                            (rangeLabel ? (' <span style="color:rgb(155,155,155);font-weight:700;">[' + Utils.escapeHtml(rangeLabel) + ']</span>') : '') +
+                        '</div>' +
+                    '</td>' +
+                    '<td style="width:' + String(controlsCellWidth) + 'px;text-align:right;vertical-align:middle;padding:0 0 0 4px;">' +
+                        '<table style="width:' + String(controlsWidth) + 'px;border-collapse:collapse;table-layout:fixed;margin-left:auto;"><tbody><tr>' +
+                            (hasDamage ? ('<td style="width:50px;height:25px;padding:0;text-align:center;vertical-align:middle;">' + this.combatAttackDamageButtonHtml(attack) + '</td><td style="width:4px;height:25px;padding:0;"></td>') : '') +
+                            '<td style="width:25px;height:25px;padding:0;text-align:center;vertical-align:middle;">' + this.combatAttackRollButtonHtml(attack) + '</td>' +
+                        '</tr></tbody></table>' +
+                    '</td>' +
+                '</tr></tbody></table>';
+            }).join('');
+            const body = rows || '<div style="text-align:center;color:rgb(170,170,170);font-size:11px;line-height:14px;padding:5px 0;">No usable attacks were found on this character sheet.</div>';
+            return Html.card({
+                title: safeName + ' Combat',
+                body,
+                buildOptions: {
+                    titleHtml: Html.span(Utils.escapeHtml(safeName), 'color:' + CONFIG.DEFAULT_TEXT_CHARACTER_COLOR + ';font-weight:900;') + Html.span(' Combat', 'color:rgb(235,235,235);font-weight:900;'),
+                    titleColor: 'rgb(235,235,235)',
+                    bodyAlign: 'left'
+                }
+            });
+        },
+
+        spellLevelTitle(level) {
+            const safeLevel = Math.max(0, Math.min(9, Utils.toInt(level, 0)));
+            return safeLevel === 0 ? 'CANTRIPS' : ('LEVEL ' + String(safeLevel));
+        },
+
+        spellSlotValueHtml(current, max) {
+            const safeCurrent = Math.max(0, Utils.toInt(current, 0));
+            const safeMax = Math.max(0, Utils.toInt(max, 0));
+            const currentColor = safeCurrent <= 0
+                ? 'rgb(220,45,45)'
+                : (safeMax > 0 && safeCurrent >= safeMax ? 'rgb(52,203,116)' : 'rgb(235,205,75)');
+            return '<span style="font-weight:900;white-space:nowrap;">' +
+                '<span style="color:' + currentColor + ';">' + Utils.escapeHtml(String(safeCurrent)) + '</span> ' +
+                '<span style="color:rgb(225,225,225);">/</span> ' +
+                '<span style="color:rgb(52,203,116);">' + Utils.escapeHtml(String(safeMax)) + '</span>' +
+            '</span>';
+        },
+
+        spellCastingTimeLabel(value) {
+            const raw = String(value || '').trim();
+            if (!raw) return '';
+            if (/\bbonus\s+action\b/i.test(raw)) return 'Bonus';
+            if (/\breaction\b/i.test(raw)) return 'Reaction';
+            if (/^(?:1\s+)?action\b/i.test(raw) || /^action\b/i.test(raw)) return 'Action';
+            return raw.replace(/\s+or\s+ritual\b/ig, '').trim();
+        },
+
+        spellDurationLabel(value, concentration) {
+            const raw = String(value || '').trim();
+            const compact = (text) => String(text || '')
+                .replace(/\bminutes?\b/ig, 'min')
+                .replace(/\bhours?\b/ig, 'hr')
+                .replace(/\b1\s+round\b/ig, '1 Round')
+                .replace(/\b(\d+)\s+rounds?\b/ig, (match, count) => String(count) + (String(count) === '1' ? ' Round' : ' Rounds'))
+                .replace(/^instantaneous$/i, 'Instant')
+                .replace(/\s+/g, ' ')
+                .trim();
+            const isConcentration = Utils.toBoolean(concentration, false) || /\bconcentration\b/i.test(raw);
+            if (isConcentration) {
+                const remainder = compact(raw
+                    .replace(/^\s*concentration\s*,?\s*/i, '')
+                    .replace(/^\s*up\s+to\s+/i, ''));
+                return remainder ? ('Conc. ' + remainder) : 'Conc.';
+            }
+            return compact(raw);
+        },
+
+        spellComponentsHtml(spell) {
+            const source = spell || {};
+            const v = Utils.toBoolean(source.verbal, false);
+            const s = Utils.toBoolean(source.somatic, false);
+            const m = Utils.toBoolean(source.material, false);
+            if (!v && !s && !m) return '';
+            const parts = [];
+            if (v) parts.push('<span style="color:rgb(52,203,116);font-weight:900;">V</span>');
+            if (s) parts.push('<span style="color:rgb(75,160,235);font-weight:900;">S</span>');
+            if (m) {
+                const material = String(source.materialDescription || '').trim() || 'Material component';
+                parts.push('<span title="' + Utils.attrSafe(material) + '" style="color:rgb(225,70,70);font-weight:900;cursor:help;">M</span>');
+            }
+            return '<span style="color:rgb(175,175,175);">[</span>' + parts.join('<span style="display:inline-block;width:3px;"></span>') + '<span style="color:rgb(175,175,175);">]</span>';
+        },
+
+        spellCastingTimeHtml(value) {
+            const label = this.spellCastingTimeLabel(value);
+            if (!label) return '';
+            let color = 'rgb(210,210,210)';
+            if (/^action$/i.test(label)) color = 'rgb(52,203,116)';
+            else if (/^bonus$/i.test(label)) color = 'rgb(105,185,235)';
+            else if (/^reaction$/i.test(label)) color = 'rgb(235,110,110)';
+            return '<span style="color:' + color + ';font-size:9px;font-weight:800;">' + Utils.escapeHtml(label) + '</span>';
+        },
+
+        spellCastButtonHtml(spell) {
+            const command = String(spell && spell.castCommand || '').trim();
+            const tag = command ? 'a' : 'span';
+            const href = command ? (' href="' + Utils.attrSafe(command) + '"') : '';
+            const name = String(spell && spell.name || 'Spell').trim() || 'Spell';
+            const title = command ? ('Cast ' + name) : ('Cast ' + name + ' - unavailable');
+            return '<' + tag + href + ' title="' + Utils.attrSafe(title) + '" style="' +
+                'display:inline-flex;flex-direction:column;align-items:center;justify-content:center;' +
+                'width:25px;height:25px;min-width:25px;min-height:25px;padding:0;margin:0;' +
+                'box-sizing:border-box;border:1px solid rgba(205,190,255,0.80);border-radius:4px;' +
+                'background:rgba(76,58,125,0.72);color:rgb(255,255,255);text-decoration:none;' +
+                'text-align:center;vertical-align:middle;overflow:hidden;font-family:Arial,Helvetica,sans-serif;">' +
+                    '<b><span style="display:block;height:15px;line-height:15px;font-size:13px;font-weight:900;white-space:nowrap;">&#129668;</span></b>' +
+                    '<b><span style="display:block;height:9px;line-height:9px;font-size:8px;font-weight:900;white-space:nowrap;">Cast</span></b>' +
+            '</' + tag + '>';
+        },
+
+        spellCombatControlsWidth() {
+            // Keep a fixed spell-control column so Damage occupies the left 50px
+            // only when present and Roll/Save/Cast always lands in the same
+            // right-most 25px column.
+            return 79;
+        },
+
+        spellCombatControlsHtml(spell) {
+            const action = spell && spell.combat && typeof spell.combat === 'object' ? spell.combat : null;
+            const hasDamage = !!(action && this.combatAttackHasDamage(action));
+            const rightControl = action ? this.combatAttackRollButtonHtml(action) : this.spellCastButtonHtml(spell);
+            return '<table style="width:79px;border-collapse:collapse;table-layout:fixed;margin-left:auto;"><tbody><tr>' +
+                '<td style="width:50px;height:25px;padding:0;text-align:center;vertical-align:middle;">' + (hasDamage ? this.combatAttackDamageButtonHtml(action) : '') + '</td>' +
+                '<td style="width:4px;height:25px;padding:0;"></td>' +
+                '<td style="width:25px;height:25px;padding:0;text-align:center;vertical-align:middle;">' + rightControl + '</td>' +
+            '</tr></tbody></table>';
+        },
+
+
+        buildSpellsCard(characterName, spellData) {
+            const safeName = String(characterName || 'Character').trim() || 'Character';
+            const data = spellData || {};
+            const spells = (Array.isArray(data.spells) ? data.spells : [])
+                .filter((spell) => spell && String(spell.name || '').trim());
+            const profile = data.profile || {};
+            const abilityLabel = String(profile.abilityLabel || '').trim();
+            const abilityModifier = Utils.toInt(profile.abilityModifier, 0);
+            const attackBonus = Utils.toInt(profile.spellAttackBonus, 0);
+            const saveDc = Math.max(0, Utils.toInt(profile.spellSaveDc, 0));
+            const signed = (value) => value >= 0 ? ('+' + String(value)) : String(value);
+            const profileBits = [];
+            if (abilityLabel) profileBits.push('<span style="color:rgb(160,160,160);">' + Utils.escapeHtml(abilityLabel) + '</span> <b style="color:rgb(235,235,235);">' + Utils.escapeHtml(signed(abilityModifier)) + '</b>');
+            if (abilityLabel || attackBonus) profileBits.push('<span style="color:rgb(160,160,160);">ATK</span> <b style="color:rgb(235,235,235);">' + Utils.escapeHtml(signed(attackBonus)) + '</b>');
+            if (saveDc > 0) profileBits.push('<span style="color:rgb(160,160,160);">DC</span> <b style="color:rgb(235,235,235);">' + Utils.escapeHtml(String(saveDc)) + '</b>');
+            const profileHtml = profileBits.length
+                ? '<div style="padding:0 0 5px 0;text-align:center;font-size:10px;line-height:13px;">' + profileBits.join('<span style="display:inline-block;width:8px;"></span>') + '</div>'
+                : '';
+
+            let pactHtml = '';
+            if (data.isPact) {
+                const pactCurrent = Math.max(0, Utils.toInt(data.pactSlotsCurrent, 0));
+                const pactMax = Math.max(0, Utils.toInt(data.pactSlotMax, 0));
+                const pactLevel = Math.max(0, Utils.toInt(data.pactSlotLevel, 0));
+                pactHtml = '<div style="margin:0 0 5px 0;padding:4px 6px;border:1px solid rgba(145,120,210,0.55);border-radius:4px;background:rgba(65,55,120,0.35);font-size:10px;line-height:13px;">' +
+                    '<table style="width:100%;border-collapse:collapse;table-layout:fixed;"><tbody><tr>' +
+                        '<td style="text-align:left;color:rgb(205,190,235);font-weight:900;">PACT MAGIC</td>' +
+                        '<td style="text-align:center;">' + this.spellSlotValueHtml(pactCurrent, pactMax) + '</td>' +
+                        '<td style="text-align:right;color:rgb(205,190,235);font-weight:900;white-space:nowrap;">CAST LV. ' + Utils.escapeHtml(String(pactLevel || '-')) + '</td>' +
+                    '</tr></tbody></table>' +
+                '</div>';
+            }
+
+            const slotByLevel = Object.create(null);
+            (Array.isArray(data.slots) ? data.slots : []).forEach((slot) => {
+                const level = Math.max(1, Math.min(9, Utils.toInt(slot && slot.level, 0)));
+                if (!level) return;
+                slotByLevel[level] = slot;
+            });
+            const grouped = Object.create(null);
+            spells.forEach((spell) => {
+                const level = Math.max(0, Math.min(9, Utils.toInt(spell.level, 0)));
+                grouped[level] = grouped[level] || [];
+                grouped[level].push(spell);
+            });
+            const levels = Object.keys(grouped).map((value) => Utils.toInt(value, 0)).sort((a, b) => a - b);
+            const groupsHtml = levels.map((level) => {
+                const slot = !data.isPact && level > 0 ? slotByLevel[level] : null;
+                const slotHtml = slot
+                    ? this.spellSlotValueHtml(slot.current, slot.max)
+                    : '';
+                const heading = '<div style="margin-top:' + (level === levels[0] ? '0' : '5px') + ';padding:2px 4px;border-bottom:1px solid rgba(155,130,215,0.45);color:rgb(205,190,235);font-size:9px;line-height:12px;font-weight:900;">' +
+                    '<span>' + Utils.escapeHtml(this.spellLevelTitle(level)) + '</span>' +
+                    (slotHtml ? ('<span style="float:right;">' + slotHtml + '</span>') : '') +
+                '</div>';
+                const rows = grouped[level].map((spell, index) => {
+                    const range = String(spell.range || '').trim();
+                    const ritual = Utils.toBoolean(spell.ritual, false);
+                    const castingTime = this.spellCastingTimeLabel(spell.castingTime);
+                    const duration = this.spellDurationLabel(spell.duration, spell.concentration);
+                    const schoolRaw = String(spell.school || '').trim();
+                    const school = schoolRaw ? (schoolRaw.charAt(0).toUpperCase() + schoolRaw.slice(1).toLowerCase()) : '';
+                    const components = this.spellComponentsHtml(spell);
+                    // Shared two-row spell layout:
+                    //   Spellname - [V S M] - Action/Bonus/Reaction - Ritual
+                    //   Range - Instant/Conc./Duration - School
+                    const dot = '<span style="color:rgb(95,95,95);padding:0 3px;">&middot;</span>';
+                    const row1 = Utils.escapeHtml(String(spell.name || 'Spell')) +
+                        (components ? (dot + '<span style="font-size:9px;">' + components + '</span>') : '') +
+                        (castingTime ? (dot + this.spellCastingTimeHtml(spell.castingTime)) : '') +
+                        (ritual ? (dot + '<span style="color:rgb(75,160,235);font-size:9px;font-weight:900;">Ritual</span>') : '');
+                    const row2Parts = [];
+                    if (range) row2Parts.push('<span style="color:rgb(155,155,155);font-weight:600;">' + Utils.escapeHtml(range) + '</span>');
+                    if (duration) row2Parts.push('<span style="color:rgb(145,145,145);">' + Utils.escapeHtml(duration) + '</span>');
+                    if (school) row2Parts.push('<span style="color:rgb(145,145,145);">' + Utils.escapeHtml(school) + '</span>');
+                    const separator = index < grouped[level].length - 1 ? 'border-bottom:1px solid rgba(255,255,255,0.10);' : '';
+                    const metaTitle = [
+                        range ? ('Range: ' + range) : '',
+                        ritual ? 'Ritual' : '',
+                        castingTime ? ('Casting: ' + castingTime) : '',
+                        duration ? ('Duration: ' + duration) : '',
+                        school ? ('School: ' + school) : ''
+                    ].filter(Boolean).join(' | ');
+                    return '<table style="width:100%;border-collapse:collapse;table-layout:fixed;' + separator + '"><tbody><tr>' +
+                        '<td style="text-align:left;vertical-align:middle;padding:4px 3px 4px 0;overflow:hidden;">' +
+                            '<div style="color:rgb(232,220,180);font-size:11px;line-height:13px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + row1 + '</div>' +
+                            '<div title="' + Utils.attrSafe(metaTitle) + '" style="padding-top:1px;font-size:8px;line-height:10px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + row2Parts.join(dot) + '</div>' +
+                        '</td>' +
+                        '<td style="width:' + String(this.spellCombatControlsWidth(spell) + 4) + 'px;text-align:right;vertical-align:middle;padding:0 0 0 4px;">' + this.spellCombatControlsHtml(spell) + '</td>' +
+                    '</tr></tbody></table>';
+                }).join('');
+                return heading + rows;
+            }).join('');
+            const emptyHtml = '<div style="text-align:center;color:rgb(170,170,170);font-size:11px;line-height:14px;padding:5px 0;">No usable spells were found on this character sheet.</div>';
+            const body = profileHtml + pactHtml + (groupsHtml || emptyHtml);
+            return Html.card({
+                title: safeName + ' Spells',
+                body,
+                buildOptions: {
+                    titleHtml: Html.span(Utils.escapeHtml(safeName), 'color:' + CONFIG.DEFAULT_TEXT_CHARACTER_COLOR + ';font-weight:900;') + Html.span(' Spells', 'color:rgb(235,235,235);font-weight:900;'),
+                    titleColor: 'rgb(235,235,235)',
+                    bodyAlign: 'left'
+                }
+            });
+        },
+
+        buildSpellRenderProbeCard(characterName, spellData, probe) {
+            const safeName = String(characterName || 'Character').trim() || 'Character';
+            const data = spellData || {};
+            const info = probe || {};
+            const spells = (Array.isArray(data.spells) ? data.spells : []).filter((spell) => spell && String(spell.name || '').trim());
+            const levelGroups = Object.create(null);
+            spells.forEach((spell) => {
+                const level = Math.max(0, Math.min(9, Utils.toInt(spell && spell.level, 0)));
+                levelGroups[level] = levelGroups[level] || [];
+                levelGroups[level].push(String(spell.name || 'Spell').trim() || 'Spell');
+            });
+            const namesHtml = Object.keys(levelGroups)
+                .map((value) => Utils.toInt(value, 0))
+                .sort((a, b) => a - b)
+                .map((level) => '<div style="padding:1px 0;"><b style="color:rgb(205,190,235);">' + Utils.escapeHtml(this.spellLevelTitle(level)) + ':</b> ' + Utils.escapeHtml(levelGroups[level].join(', ')) + '</div>')
+                .join('');
+            const levelChars = Array.isArray(info.levelCards)
+                ? info.levelCards.map((entry) => 'Lv' + String(entry.level) + '=' + String(entry.chars)).join(' | ')
+                : '';
+            const body =
+                '<div style="font-size:9px;line-height:12px;text-align:left;">' +
+                    '<div><b style="color:rgb(190,165,225);">Probe:</b> 2024-style compact 2014 list with Roll only.</div>' +
+                    '<div><b style="color:rgb(190,165,225);">Spells:</b> ' + Utils.escapeHtml(String(spells.length)) + '</div>' +
+                    '<div><b style="color:rgb(190,165,225);">Test card chars:</b> ' + Utils.escapeHtml(String(info.fullCardChars || 0)) + '</div>' +
+                    (info.originalFullCardChars ? '<div><b style="color:rgb(190,165,225);">Original 2024 renderer chars:</b> ' + Utils.escapeHtml(String(info.originalFullCardChars)) + '</div>' : '') +
+                    (typeof info.chunkCount === 'number' ? '<div><b style="color:rgb(190,165,225);">Split cards:</b> ' + Utils.escapeHtml(String(info.chunkCount)) + '</div>' : '') +
+                    (Array.isArray(info.chunkCards) && info.chunkCards.length ? '<div><b style="color:rgb(190,165,225);">Split chars:</b> ' + Utils.escapeHtml(info.chunkCards.map((entry) => String(entry.chars || 0)).join(' | ')) + '</div>' : '') +
+                    (info.fullCardError ? '<div><b style="color:rgb(220,75,75);">Render error:</b> ' + Utils.escapeHtml(String(info.fullCardError)) + '</div>' : '') +
+                    (levelChars ? '<div><b style="color:rgb(190,165,225);">Level card chars:</b> ' + Utils.escapeHtml(levelChars) + '</div>' : '') +
+                    '<div style="height:1px;background:rgba(255,255,255,0.15);margin:4px 0;"></div>' +
+                    (namesHtml || '<div>No spell names.</div>') +
+                '</div>';
+            return Html.card({
+                title: safeName + ' Spell Probe',
+                body,
+                buildOptions: { titleColor: 'rgb(235,235,235)', bodyAlign: 'left' }
+            });
+        },
+
+        diagnosticValueText(value) {
+            if (value === undefined) return 'undefined';
+            if (value === null) return 'null';
+            if (typeof value === 'string') return value;
+            if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+            try { return JSON.stringify(value); } catch (ignored) { return String(value); }
+        },
+
+        combatDiagnosticFieldsHtml(fields) {
+            const safeFields = Array.isArray(fields) ? fields : [];
+            const lines = safeFields.map((entry) => {
+                const key = String(entry && entry.key || '').trim() || '(value)';
+                let value = this.diagnosticValueText(entry && entry.value);
+                const originalLength = value.length;
+                if (value.length > 280) value = value.slice(0, 280) + ' ... [truncated ' + String(originalLength - 280) + ' chars]';
+                return '<strong>' + Utils.escapeHtml(key) + '</strong> = ' + Utils.escapeHtml(value) + '<br>';
+            }).join('');
+            return '<div style="color:rgb(235,235,235);font-size:9px;line-height:12px;text-align:left;white-space:normal;overflow-wrap:anywhere;word-break:break-word;">' + lines + '</div>';
+        },
+
+        buildCombatAttackDiagnosticCard(characterName, diagnostic, index, total) {
+            const safeName = String(characterName || 'Character').trim() || 'Character';
+            const attackName = String(diagnostic && diagnostic.name || ('Attack ' + String(index + 1))).trim();
+            const version = String(diagnostic && diagnostic.sheetVersion || 'unknown');
+            const fields = diagnostic && Array.isArray(diagnostic.fields) ? diagnostic.fields : [];
+            const body =
+                '<div style="padding-bottom:4px;border-bottom:1px solid rgba(255,255,255,0.18);margin-bottom:4px;">' +
+                    '<span style="color:rgb(232,220,180);font-size:11px;font-weight:900;">' + Utils.escapeHtml(attackName) + '</span>' +
+                    '<span style="color:rgb(145,145,145);font-size:9px;"> [' + Utils.escapeHtml(version) + ']</span>' +
+                    '<span style="float:right;color:rgb(145,145,145);font-size:9px;">' + Utils.escapeHtml(String(index + 1)) + '/' + Utils.escapeHtml(String(total)) + '</span>' +
+                '</div>' +
+                this.combatDiagnosticFieldsHtml(fields);
+            return Html.card({
+                title: safeName + ' Attack Data',
+                body,
+                buildOptions: {
+                    titleHtml: Html.span(Utils.escapeHtml(safeName), 'color:' + CONFIG.DEFAULT_TEXT_CHARACTER_COLOR + ';font-weight:900;') + Html.span(' Attack Data', 'color:rgb(235,235,235);font-weight:900;'),
+                    titleColor: 'rgb(235,235,235)',
+                    bodyAlign: 'left'
+                }
+            });
+        },
+
+        buildCombatDiagnosticSummaryCard(characterName, diagnosticSet) {
+            const safeName = String(characterName || 'Character').trim() || 'Character';
+            const data = diagnosticSet || {};
+            const body =
+                '<div style="font-size:10px;line-height:14px;text-align:left;">' +
+                    '<div><span style="color:rgb(205,185,120);font-weight:700;">Sheet:</span> ' + Utils.escapeHtml(String(data.sheetVersion || 'unknown')) + '</div>' +
+                    '<div><span style="color:rgb(205,185,120);font-weight:700;">Attacks:</span> ' + Utils.escapeHtml(String((data.attacks || []).length)) + '</div>' +
+                    '<div><span style="color:rgb(205,185,120);font-weight:700;">Read/parse:</span> ' + Utils.escapeHtml(String(data.readMs || 0)) + ' ms</div>' +
+                    '<div><span style="color:rgb(205,185,120);font-weight:700;">Collect:</span> ' + Utils.escapeHtml(String(data.collectMs || 0)) + ' ms</div>' +
+                    (typeof data.liveReadMs === 'number' && data.liveReadMs > 0 ? '<div><span style="color:rgb(205,185,120);font-weight:700;">Live ability diagnostic:</span> ' + Utils.escapeHtml(String(data.liveReadMs)) + ' ms</div>' : '') +
+                    (typeof data.sheetApiReads === 'number' && data.sheetApiReads > 0 ? '<div><span style="color:rgb(205,185,120);font-weight:700;">getSheetItem reads:</span> ' + Utils.escapeHtml(String(data.sheetApiReads)) + '</div>' : '') +
+                    (typeof data.storeChars === 'number' && data.storeChars > 0 ? '<div><span style="color:rgb(205,185,120);font-weight:700;">Store chars:</span> ' + Utils.escapeHtml(String(data.storeChars)) + '</div>' : '') +
+                    '<div style="padding-top:4px;color:rgb(160,160,160);">Combat is rendered from the store first. getSheetItem reads shown here are diagnostic-only and run after the Combat card is sent.</div>' +
+                '</div>';
+            return Html.card({
+                title: safeName + ' Combat Diagnostic',
+                body,
+                buildOptions: { titleColor: 'rgb(235,235,235)', bodyAlign: 'left' }
+            });
+        },
+
+        buildSpellDiagnosticCard(characterName, diagnostic, index, total) {
+            const safeName = String(characterName || 'Character').trim() || 'Character';
+            const spellName = String(diagnostic && diagnostic.name || ('Spell ' + String(index + 1))).trim();
+            const version = String(diagnostic && diagnostic.sheetVersion || 'unknown');
+            const fields = diagnostic && Array.isArray(diagnostic.fields) ? diagnostic.fields : [];
+            const isContext = !!(diagnostic && diagnostic.isContext);
+            const counter = isContext || !(Utils.toInt(total, 0) > 0)
+                ? ''
+                : ('<span style="float:right;color:rgb(145,145,145);font-size:9px;">' + Utils.escapeHtml(String(index + 1)) + '/' + Utils.escapeHtml(String(total)) + '</span>');
+            const body =
+                '<div style="padding-bottom:4px;border-bottom:1px solid rgba(255,255,255,0.18);margin-bottom:4px;">' +
+                    '<span style="color:rgb(205,190,235);font-size:11px;font-weight:900;">' + Utils.escapeHtml(spellName) + '</span>' +
+                    '<span style="color:rgb(145,145,145);font-size:9px;"> [' + Utils.escapeHtml(version) + ']</span>' +
+                    counter +
+                '</div>' +
+                this.combatDiagnosticFieldsHtml(fields);
+            return Html.card({
+                title: safeName + ' Spell Data',
+                body,
+                buildOptions: {
+                    titleHtml: Html.span(Utils.escapeHtml(safeName), 'color:' + CONFIG.DEFAULT_TEXT_CHARACTER_COLOR + ';font-weight:900;') + Html.span(' Spell Data', 'color:rgb(235,235,235);font-weight:900;'),
+                    titleColor: 'rgb(235,235,235)',
+                    bodyAlign: 'left'
+                }
+            });
+        },
+
+        buildSpellDiagnosticSummaryCard(characterName, diagnosticSet) {
+            const safeName = String(characterName || 'Character').trim() || 'Character';
+            const data = diagnosticSet || {};
+            const body =
+                '<div style="font-size:10px;line-height:14px;text-align:left;">' +
+                    '<div><span style="color:rgb(190,165,225);font-weight:700;">Sheet:</span> ' + Utils.escapeHtml(String(data.sheetVersion || 'unknown')) + '</div>' +
+                    '<div><span style="color:rgb(190,165,225);font-weight:700;">Spells:</span> ' + Utils.escapeHtml(String((data.spells || []).length)) + '</div>' +
+                    (typeof data.spellAttackRows === 'number' && data.spellAttackRows > 0 ? '<div><span style="color:rgb(190,165,225);font-weight:700;">Spell attack rows:</span> ' + Utils.escapeHtml(String(data.spellAttackRows)) + '</div>' : '') +
+                    '<div><span style="color:rgb(190,165,225);font-weight:700;">Read/parse:</span> ' + Utils.escapeHtml(String(data.readMs || 0)) + ' ms</div>' +
+                    '<div><span style="color:rgb(190,165,225);font-weight:700;">Collect:</span> ' + Utils.escapeHtml(String(data.collectMs || 0)) + ' ms</div>' +
+                    (typeof data.fullCardChars === 'number' ? '<div><span style="color:rgb(190,165,225);font-weight:700;">Full card chars:</span> ' + Utils.escapeHtml(String(data.fullCardChars)) + '</div>' : '') +
+                    (data.levelCardChars ? '<div><span style="color:rgb(190,165,225);font-weight:700;">Level card chars:</span> ' + Utils.escapeHtml(String(data.levelCardChars)) + '</div>' : '') +
+                    (data.singleSpellMaxChars ? '<div><span style="color:rgb(190,165,225);font-weight:700;">Largest single spell card:</span> ' + Utils.escapeHtml(String(data.singleSpellMaxChars)) + '</div>' : '') +
+                    (data.chunkCount ? '<div><span style="color:rgb(190,165,225);font-weight:700;">Split cards:</span> ' + Utils.escapeHtml(String(data.chunkCount)) + '</div>' : '') +
+                    (data.chunkCardChars ? '<div><span style="color:rgb(190,165,225);font-weight:700;">Split chars:</span> ' + Utils.escapeHtml(String(data.chunkCardChars)) + '</div>' : '') +
+                    (data.renderError ? '<div><span style="color:rgb(220,75,75);font-weight:700;">Render error:</span> ' + Utils.escapeHtml(String(data.renderError)) + '</div>' : '') +
+                    (typeof data.liveReadMs === 'number' && data.liveReadMs > 0 ? '<div><span style="color:rgb(190,165,225);font-weight:700;">Live Sheet API:</span> ' + Utils.escapeHtml(String(data.liveReadMs)) + ' ms</div>' : '') +
+                    (typeof data.sheetApiReads === 'number' && data.sheetApiReads > 0 ? '<div><span style="color:rgb(190,165,225);font-weight:700;">getSheetItem reads:</span> ' + Utils.escapeHtml(String(data.sheetApiReads)) + '</div>' : '') +
+                    (typeof data.storeChars === 'number' && data.storeChars > 0 ? '<div><span style="color:rgb(190,165,225);font-weight:700;">Store chars:</span> ' + Utils.escapeHtml(String(data.storeChars)) + '</div>' : '') +
+                    '<div style="padding-top:4px;color:rgb(160,160,160);">Store-only diagnostic. No getSheetItem reads are performed; 2024 spell attack/DC values are derived from the active Spellcasting, Ability Score, proficiency, and Pact Magic data.</div>' +
+                '</div>';
+            return Html.card({
+                title: safeName + ' Spell Diagnostic',
+                body,
+                buildOptions: { titleColor: 'rgb(235,235,235)', bodyAlign: 'left' }
+            });
         },
 
         combatMenuTitleHtml() {
@@ -3873,8 +4658,18 @@ const CombatAssistant = (() => {
                     '</tr>'
                 );
             }).join('');
+            const defaultButton = this.compactSettingButtonHtml({
+                label: 'Default',
+                width: 54,
+                height: 14,
+                command: '!combatAssistant defaults &#63;{Reset all Combat Assistant settings to default?|No,no|Yes,yes}',
+                tooltip: 'Restore every persistent setting to its default value',
+                backgroundColor: 'rgba(70,70,70,0.95)'
+            });
             const body =
-                '<table style="width:100%;border-collapse:collapse;"><tbody>' + rows + '</tbody></table>';
+                '<table style="width:100%;border-collapse:collapse;"><tbody>' + rows + '</tbody></table>' +
+                '<div style="height:1px;background:rgba(125,125,125,0.65);margin:7px 0 6px 0;"></div>' +
+                '<div style="text-align:center;padding:0 0 2px 0;">' + defaultButton + '</div>';
             R20.whisper(target || 'GM', Html.card({ title: META.NAME + ' Settings', body }));
         },
 
@@ -3884,7 +4679,7 @@ const CombatAssistant = (() => {
             const dmgButton = this.iconButtonHtml({
                 iconHtml: '&#128165;',
                 label: 'Dmg',
-                command: '!combatAssistant deal manual &#63;{Damage|0} &#63;{Type|' + damageTypes + '} &#63;{Challenge|0} &#63;{Save|' + abilities + '} &#63;{Half on Success|no|yes}' +
+                command: '!combatAssistant deal manual &#63;{Damage|0} &#63;{Type|' + damageTypes + '} &#63;{DC|0} &#63;{Save|' + abilities + '} &#63;{Half on Success|no|yes}' +
                     (RuntimeConfig.get('SHEET_2014_CA_ROLLS') ? ' &#63;{2014 Roll Mode|Normal,normal|Advantage,advantage|Disadvantage,disadvantage}' : ''),
                 backgroundColor: 'rgba(135,35,35,0.95)',
                 tooltip: 'Deal damage to selected token(s)'
@@ -3931,39 +4726,71 @@ const CombatAssistant = (() => {
         },
 
         showHelp(target) {
+            const separator = '<div style="height:1px;background:rgba(125,125,125,0.55);margin:7px 0 6px 0;"></div>';
+            const sectionTitle = (title) => '<b style="color:rgb(245,220,80);font-size:12px;">' + Utils.escapeHtml(title) + '</b><br>';
+            const commandHtml = (command) => '<code style="font-size:12px;line-height:15px;">' + command + '</code>';
+            const descriptionHtml = (text) => '<span style="font-size:10px;line-height:13px;color:rgb(190,190,190);">' + Utils.escapeHtml(text) + '</span>';
+            const helpLine = (command, description) => commandHtml(command) + (description ? (' <span style="font-size:10px;line-height:13px;color:rgb(190,190,190);">- ' + Utils.escapeHtml(description) + '</span>') : '') + '<br>';
             const body =
                 '<div style="text-align:left;font-size:12px;line-height:16px;color:rgb(225,225,225);">' +
-                    '<b>Commands</b><br>' +
-                    '<code>!ca menu</code> open the main menu<br>' +
-                    '<code>!ca help</code> show this help card<br>' +
-                    '<code>!ca config</code> open settings<br>' +
-                    '<code>!ca conc</code> reroll active concentration damage and recall its area buttons<br>' +
-                    '<code>!ca resource</code> show resources and spell slots for selected linked token(s)<br><br>' +
+                    sectionTitle('Main Commands') +
+                    helpLine('!ca menu', 'Opens the main Combat Assistant menu.') +
+                    helpLine('!ca help', 'Shows this help card.') +
+                    helpLine('!ca settings', 'Opens the Combat Assistant settings.') +
+                    helpLine('!ca deal manual &lt;dmg&gt; &lt;type&gt; &lt;DC&gt; &lt;Attr&gt; &lt;half&gt;', 'Applies manual damage to the selected target. Damage type, attack/DC value, saving throw ability, and half damage are optional.') +
+                    helpLine('!ca heal manual &lt;hp/temp&gt; &lt;value&gt;', 'Restores Hit Points or grants Temporary Hit Points to the selected target.') +
+                    helpLine('!ca save &lt;ability&gt;', 'Rolls the selected token\'s saving throw using the specified ability.') +
+                    helpLine('!ca init', 'Rolls initiative for the selected token.') +
 
-                    '<b>Turn Tracker</b><br>' +
-                    '<code>!ca turn next &lt;token_id&gt;</code> end the current turn<br>' +
-                    '<code>!ca turn focus &lt;token_id&gt;</code> focus the token on the map<br>' +
-                    '<code>!ca turn remove &lt;token_id&gt;</code> advance, then remove that turn (GM)<br>' +
-                    '<code>!ca turn stop yes</code> stop combat and clear the tracker (GM)<br><br>' +
+                    separator +
+                    sectionTitle('Combat') +
+                    '<div style="padding-bottom:2px;">' + descriptionHtml('Combat and Spells list the attacks and spells available on a character sheet.') + '</div>' +
+                    helpLine('!ca combat', 'Shows the attack list for the selected token.') +
+                    helpLine('!ca combat &lt;sheet name&gt;', 'Shows the attack list for the named character sheet.') +
+                    helpLine('!ca spells', 'Shows the spell list for the selected token.') +
+                    helpLine('!ca spells &lt;sheet name&gt;', 'Shows the spell list for the named character sheet.') +
+                    helpLine('!ca dash / !ca disengage / !ca dodge', 'Declares the chosen action for the token currently in turn.') +
 
-                    '<b>Examples</b><br>' +
-                    'with token(s) selected<br>'+
-                    '<code>!ca deal manual 8 fire</code><br>' +
-                    '<code>!ca heal manual hp 10</code><br>' +
-                    '<code>!ca save dexterity</code><br>' +
-                    '<code>!ca init</code><br><br>' +
+                    separator +
+                    sectionTitle('Turn Tracker') +
+                    helpLine('!ca turn', 'Shows the Turn card for the token currently in turn.') +
+                    helpLine('!ca turnnext', 'Ends the current turn and advances to the next token.') +
+                    helpLine('!ca turnfocus', 'Focuses the view on the token currently in turn. Players can use it only during a turn they control.') +
+                    helpLine('!ca turnstop yes', 'Ends the active combat and stops the Turn Tracker.') +
 
-                    '<b>Bar setup</b><br>' +
-                    'HP Bar: ' + Utils.escapeHtml(String(RuntimeConfig.get('HP_BAR'))) + '<br>' +
-                    'AC Bar: ' + Utils.escapeHtml(String(RuntimeConfig.get('AC_BAR'))) + '<br>' +
-                    'Temp HP Bar: ' + Utils.escapeHtml(String(RuntimeConfig.get('TEMP_HP_BAR'))) + '<br><br>' +
+                    separator +
+                    sectionTitle('Resources') +
+                    helpLine('!ca resources', 'Shows resources for the selected token.') +
+                    helpLine('!ca resources &lt;sheet name&gt;', 'Shows resources for the named character sheet.') +
 
-                    '<div style="text-align:center;font-size:11px;line-height:14px;color:rgb(190,190,190);padding:4px 0 6px 0;">' +
-                        'This is a lightweight version extracted from the original code. Try <a href="https://app.roll20.net/forum/post/12758022/t-and-t-chat-based-inventory-dynamic-shops-auto-healing-loot-and-item-automation-for-roll20-d-and-d-2024" target="_blank" style="color:rgb(0,180,180);text-decoration:none;font-weight:700;"><b>Trinkets and Trackers</b></a> for the full immersive experience.' +
+                    separator +
+                    sectionTitle('Examples') +
+                    helpLine('!ca deal manual 10', 'Deals 10 untyped damage directly.') +
+                    helpLine('!ca deal manual 10 Fire', 'Deals 10 Fire damage directly.') +
+                    helpLine('!ca deal manual 10 Fire 13', 'Deals 10 Fire damage if an attack total of 13 meets the target\'s AC.') +
+                    helpLine('!ca deal manual 10 Fire 13 Dexterity', 'Requests a DC 13 Dexterity saving throw; a successful save prevents the damage.') +
+                    helpLine('!ca deal manual 10 Fire 13 Dexterity yes', 'Requests a DC 13 Dexterity saving throw; a successful save takes half damage.') +
+
+                    separator +
+                    sectionTitle('Bar Configuration') +
+                    '<div style="font-size:10px;line-height:13px;color:rgb(190,190,190);padding-bottom:2px;text-align:center;">' +
+                        'HP Bar: <b style="color:rgb(70,190,115);">' + Utils.escapeHtml(String(RuntimeConfig.get('HP_BAR'))) + '</b> &nbsp; ' +
+                        'AC Bar: <b style="color:rgb(70,190,115);">' + Utils.escapeHtml(String(RuntimeConfig.get('AC_BAR'))) + '</b> &nbsp; ' +
+                        'Temp HP Bar: <b style="color:rgb(70,190,115);">' + Utils.escapeHtml(String(RuntimeConfig.get('TEMP_HP_BAR'))) + '</b>' +
+                    '</div>'+
+                    
+                    helpLine('!ca set hpbar &lt;1-4&gt;', 'Sets the token bar used for Hit Points.') +
+                    helpLine('!ca set acbar &lt;1-4&gt;', 'Sets the token bar used for Armor Class.') +
+                    helpLine('!ca set tempbar &lt;0-4&gt;', 'Sets the token bar used for Temporary Hit Points. Use 0 to disable it.') +
+
+                    separator +
+                    sectionTitle('Extra') +
+                    '<div style="font-size:10px;line-height:13px;color:rgb(190,190,190);padding:1px 4px 5px 4px;text-align:center;">' +
+                        'This was extracted from the original T&amp;T V1.3.8 codebase, which is now abandoned. Combat Assistant is designed as a companion to the new <a href="https://app.roll20.net/forum/post/12758022/t-and-t-chat-based-inventory-dynamic-shops-auto-healing-loot-and-item-automation-for-roll20-d-and-d-2024" target="_blank" style="color:rgb(0,180,180);text-decoration:none;font-weight:700;"><b>Trinkets and Trackers V2.3.0</b></a>. Use both together for a more immersive Roll20 experience.' +
                     '</div>' +
-                    '<div style="display:table;width:100%;font-size:11px;line-height:13px;color:rgb(160,160,160);padding-top:4px;">' +
-                        '<div style="display:table-cell;text-align:left;">Created by <a href="' + Utils.attrSafe(META.DEVELOPER_URL) + '" target="_blank" style="color:rgb(0,180,180);text-decoration:none;font-weight:700;"><b>' + Utils.escapeHtml(META.DEVELOPER) + '</b></a></div>' +
-                        '<div style="display:table-cell;text-align:right;">Version <span style="color:rgb(255,220,0);font-weight:700;">' + Utils.escapeHtml(META.VERSION) + '</span></div>' +
+                    '<div style="font-size:10px;line-height:13px;color:rgb(160,160,160);padding-top:3px;text-align:center;">' +
+                        'Created by <a href="' + Utils.attrSafe(META.DEVELOPER_URL) + '" target="_blank" style="color:rgb(0,180,180);text-decoration:none;font-weight:700;"><b>' + Utils.escapeHtml(META.DEVELOPER) + '</b></a>' +
+                        ' &nbsp;&middot;&nbsp; Version <span style="color:rgb(255,220,0);font-weight:700;">' + Utils.escapeHtml(META.VERSION) + '</span>' +
                     '</div>' +
                 '</div>';
             const configButton = this.iconButtonHtml({ iconHtml: '&#9881;&#65039;', label: 'Config', command: '!combatAssistant config', width: 52, tooltip: 'Open settings' });
@@ -4023,11 +4850,60 @@ const CombatAssistant = (() => {
             return targetName + ' takes ' + (damageParts || '0 damage') + joinedSourcePhrase + (result.fainted ? ' and falls unconscious' : '') + '.' + tempLine;
         },
 
-        titleTokenIconHtml(imgsrc) {
-            const safeImg = String(imgsrc || '').trim();
-            return Utils.isSafeImageUrl(safeImg)
-                ? Html.img(safeImg, 'width:24px;height:24px;object-fit:cover;border-radius:3px;vertical-align:middle;display:block;')
+        chatTokenImageHtml(imgsrc, size, fallbackImgsrc, radius) {
+            const raw = String(imgsrc || '').trim();
+            const fallbackRaw = String(fallbackImgsrc || '').trim();
+            const safeSize = Math.max(1, Utils.toInt(size, 24));
+            const safeRadius = Math.max(0, Utils.toInt(radius, 3));
+            const primary = Utils.roll20StaticPreviewUrl(raw);
+            const fallback = Utils.roll20StaticPreviewUrl(fallbackRaw);
+            if (!primary && !fallback) return '';
+
+            if (Utils.isAnimatedVideoUrl(raw)) {
+                // Animated Roll20 tokens have a static sample.png preview.
+                // Do not layer the character avatar behind it: sample.png can contain
+                // transparency, which would make both images visible at the same time.
+                const chosenAnimated = primary || fallback;
+                return chosenAnimated
+                    ? '<span style="display:block;width:' + safeSize + 'px;height:' + safeSize + 'px;' +
+                        'border-radius:' + safeRadius + 'px;background-color:transparent;' +
+                        'background-image:url(\'' + Utils.attrSafe(chosenAnimated) + '\');' +
+                        'background-size:cover;background-position:center;background-repeat:no-repeat;"></span>'
+                    : '';
+            }
+
+            const chosen = primary || fallback;
+            return chosen
+                ? Html.img(chosen, 'width:' + safeSize + 'px;height:' + safeSize + 'px;object-fit:cover;border-radius:' + safeRadius + 'px;vertical-align:middle;display:block;')
                 : '';
+        },
+
+        titleTokenIconHtml(imgsrc, fallbackImgsrc) {
+            return this.chatTokenImageHtml(imgsrc, 24, fallbackImgsrc || '', 3);
+        },
+
+        turnActionTitleHtml(token, character) {
+            const imgsrc = token && Utils.isFunction(token.get) ? String(token.get('imgsrc') || '').trim() : '';
+            const avatar = character && Utils.isFunction(character.get) ? String(character.get('avatar') || '').trim() : '';
+            return (
+                '<table style="width:100%;border-collapse:collapse;table-layout:fixed;"><tbody><tr>' +
+                    '<td style="width:28px;text-align:left;vertical-align:middle;padding:0;">' + this.titleTokenIconHtml(imgsrc, avatar) + '</td>' +
+                    '<td style="text-align:center;vertical-align:middle;">Turn Action</td>' +
+                    '<td style="width:28px;text-align:right;vertical-align:middle;padding:0;"></td>' +
+                '</tr></tbody></table>'
+            );
+        },
+
+        movementTitleHtml(token, character) {
+            const imgsrc = token && Utils.isFunction(token.get) ? String(token.get('imgsrc') || '').trim() : '';
+            const avatar = character && Utils.isFunction(character.get) ? String(character.get('avatar') || '').trim() : '';
+            return (
+                '<table style="width:100%;border-collapse:collapse;table-layout:fixed;"><tbody><tr>' +
+                    '<td style="width:28px;text-align:left;vertical-align:middle;padding:0;">' + this.titleTokenIconHtml(imgsrc, avatar) + '</td>' +
+                    '<td style="text-align:center;vertical-align:middle;">Movement Exceeded</td>' +
+                    '<td style="width:28px;text-align:right;vertical-align:middle;padding:0;"></td>' +
+                '</tr></tbody></table>'
+            );
         },
 
         combatLogTitleHtml(result, title) {
@@ -6549,11 +7425,249 @@ const CombatAssistant = (() => {
             root.turnTracker.roundProgressTokenIds = Array.isArray(root.turnTracker.roundProgressTokenIds) ? root.turnTracker.roundProgressTokenIds : [];
             root.turnTracker.pendingAddedTokenIds = Array.isArray(root.turnTracker.pendingAddedTokenIds) ? root.turnTracker.pendingAddedTokenIds : [];
             root.turnTracker.turnMarkerId = String(root.turnTracker.turnMarkerId || '').trim();
+            root.turnTracker.movement = root.turnTracker.movement && typeof root.turnTracker.movement === 'object' && !Array.isArray(root.turnTracker.movement)
+                ? root.turnTracker.movement
+                : {};
+            root.turnTracker.movement.tokenId = String(root.turnTracker.movement.tokenId || '').trim();
+            root.turnTracker.movement.baseSpeed = Math.max(0, Utils.toNumber(root.turnTracker.movement.baseSpeed, 0));
+            root.turnTracker.movement.spent = Math.max(0, Utils.toNumber(root.turnTracker.movement.spent, 0));
+            root.turnTracker.movement.dashCount = Math.max(0, Utils.toInt(root.turnTracker.movement.dashCount, 0));
+            root.turnTracker.movement.dashBonus = Math.max(0, Utils.toNumber(root.turnTracker.movement.dashBonus, 0));
+            root.turnTracker.movement.warned = Utils.toBoolean(root.turnTracker.movement.warned, false);
+            root.turnTracker.movement.lastLeft = root.turnTracker.movement.lastLeft === null || root.turnTracker.movement.lastLeft === undefined ? null : Utils.toNumber(root.turnTracker.movement.lastLeft, null);
+            root.turnTracker.movement.lastTop = root.turnTracker.movement.lastTop === null || root.turnTracker.movement.lastTop === undefined ? null : Utils.toNumber(root.turnTracker.movement.lastTop, null);
             return root.turnTracker;
         },
 
         isEnabled() {
             return RuntimeConfig.get('TURN_TRACKER');
+        },
+
+        isMovementEnabled() {
+            return this.isEnabled() && RuntimeConfig.get('TURN_MOVEMENT_TRACKER');
+        },
+
+        getMovementState() {
+            return this.getState().movement;
+        },
+
+        clearMovementState() {
+            const movement = this.getMovementState();
+            movement.tokenId = '';
+            movement.baseSpeed = 0;
+            movement.spent = 0;
+            movement.dashCount = 0;
+            movement.dashBonus = 0;
+            movement.warned = false;
+            movement.lastLeft = null;
+            movement.lastTop = null;
+            return movement;
+        },
+
+        movementAvailable(movement) {
+            const data = movement || this.getMovementState();
+            return Math.max(0, Utils.toNumber(data.baseSpeed, 0) + Utils.toNumber(data.dashBonus, 0));
+        },
+
+        movementRemaining(movement) {
+            const data = movement || this.getMovementState();
+            return this.movementAvailable(data) - Math.max(0, Utils.toNumber(data.spent, 0));
+        },
+
+        formatMovementFeet(value) {
+            const n = Utils.toNumber(value, 0);
+            const rounded = Math.round(n * 10) / 10;
+            return Math.abs(rounded - Math.round(rounded)) < 0.001 ? String(Math.round(rounded)) : String(rounded);
+        },
+
+        resetMovementForEntry(entry, options) {
+            if (!this.isMovementEnabled() || !entry) return this.clearMovementState();
+            const opts = options || {};
+            const info = this.getTokenInfo(entry);
+            if (!info || !info.tokenId || !info.token) return this.clearMovementState();
+            const movement = this.getMovementState();
+            movement.tokenId = String(info.tokenId || '').trim();
+            movement.baseSpeed = Math.max(0, Utils.toNumber(info.speed, 30));
+            movement.spent = 0;
+            movement.dashCount = 0;
+            movement.dashBonus = 0;
+            movement.warned = false;
+            movement.lastLeft = Utils.toNumber(info.token.get('left'), 0);
+            movement.lastTop = Utils.toNumber(info.token.get('top'), 0);
+
+            const characterId = info.character
+                ? String(info.character.id || (Utils.isFunction(info.character.get) ? info.character.get('_id') : '') || '').trim()
+                : '';
+            if (opts.resolveAsync && characterId && R20.detectSheetVersion(characterId) === '2024') {
+                this.resolveTurnCardSpeed(Object.assign({}, info)).then((resolvedInfo) => {
+                    const live = this.getMovementState();
+                    if (!this.isMovementEnabled() || String(live.tokenId || '') !== String(info.tokenId || '')) return;
+                    this.syncMovementBaseSpeed(resolvedInfo || info);
+                }).catch((error) => {
+                    Logger.debug('[turn-movement:speed]', error && error.message ? error.message : String(error));
+                });
+            }
+            return movement;
+        },
+
+        resetMovementForCurrentTurn(options) {
+            const current = this.tokenEntries(this.getCurrentTurnOrder())[0] || null;
+            return current ? this.resetMovementForEntry(current, options || {}) : this.clearMovementState();
+        },
+
+        syncMovementBaseSpeed(info) {
+            if (!this.isMovementEnabled() || !info || !info.tokenId) return null;
+            const movement = this.getMovementState();
+            if (String(movement.tokenId || '') !== String(info.tokenId || '')) {
+                const entry = info.entry || { id: info.tokenId, pr: info.initiative || '' };
+                return this.resetMovementForEntry(entry);
+            }
+            const resolvedBase = Math.max(0, Utils.toNumber(info.speed, movement.baseSpeed || 30));
+            movement.baseSpeed = resolvedBase;
+            movement.dashBonus = resolvedBase * Math.max(0, Utils.toInt(movement.dashCount, 0));
+            if (movement.spent <= this.movementAvailable(movement) + 0.001) movement.warned = false;
+            return movement;
+        },
+
+        movementDisplay(info) {
+            const base = Math.max(0, Utils.toNumber(info && info.speed, 0));
+            if (!this.isMovementEnabled() || !info || !info.tokenId) return { value: base, dashed: false, dashCount: 0 };
+            const movement = this.getMovementState();
+            if (String(movement.tokenId || '') !== String(info.tokenId || '')) return { value: base, dashed: false, dashCount: 0 };
+            return {
+                value: this.movementRemaining(movement),
+                dashed: Math.max(0, Utils.toInt(movement.dashCount, 0)) > 0,
+                dashCount: Math.max(0, Utils.toInt(movement.dashCount, 0)),
+                spent: Math.max(0, Utils.toNumber(movement.spent, 0)),
+                available: this.movementAvailable(movement)
+            };
+        },
+
+        turnSpeedHtml(info) {
+            const display = this.movementDisplay(info);
+            const isNegative = Utils.toNumber(display.value, 0) < -0.001;
+            const color = isNegative ? 'rgb(220,95,95)' : (display.dashed ? 'rgb(52,203,116)' : 'rgb(235,205,75)');
+            const dashMarker = display.dashed
+                ? '<sup title="Dash +' + Utils.attrSafe(this.formatMovementFeet(Math.max(0, Utils.toNumber(info && info.speed, 0))) + ' ft. x' + String(display.dashCount)) + '" style="color:rgb(52,203,116);font-size:8px;line-height:8px;font-weight:900;padding-left:1px;">&#9650;</sup>'
+                : '';
+            return '<span style="color:' + color + ';font-weight:900;">&#127939; ' + Utils.escapeHtml(this.formatMovementFeet(display.value)) + dashMarker + '</span>';
+        },
+
+        movementPathPoints(token, previous) {
+            if (!token || !Utils.isFunction(token.get)) return [];
+            const current = { left: Utils.toNumber(token.get('left'), 0), top: Utils.toNumber(token.get('top'), 0) };
+            const movement = this.getMovementState();
+            const start = {
+                left: previous && previous.left !== undefined ? Utils.toNumber(previous.left, current.left) : (movement.lastLeft === null ? current.left : Utils.toNumber(movement.lastLeft, current.left)),
+                top: previous && previous.top !== undefined ? Utils.toNumber(previous.top, current.top) : (movement.lastTop === null ? current.top : Utils.toNumber(movement.lastTop, current.top))
+            };
+            const points = [start];
+            if (Math.abs(start.left - current.left) <= 0.01 && Math.abs(start.top - current.top) <= 0.01) return points;
+            const raw = String(token.get('lastmove') || '').trim();
+            if (raw) {
+                const parts = raw.split(',').map((value) => Utils.toNumber(value, null));
+                for (let i = 0; i + 1 < parts.length; i += 2) {
+                    if (parts[i] === null || parts[i + 1] === null) continue;
+                    const last = points[points.length - 1];
+                    if (!last || Math.abs(last.left - parts[i]) > 0.01 || Math.abs(last.top - parts[i + 1]) > 0.01) {
+                        points.push({ left: parts[i], top: parts[i + 1] });
+                    }
+                }
+            }
+            const last = points[points.length - 1];
+            if (!last || Math.abs(last.left - current.left) > 0.01 || Math.abs(last.top - current.top) > 0.01) points.push(current);
+            return points;
+        },
+
+        movementDistanceFeet(token, previous) {
+            const points = this.movementPathPoints(token, previous);
+            if (points.length < 2) return 0;
+            const pageId = R20.getTokenPageId(token);
+            const geometry = R20.getPageGeometry(pageId);
+            let total = 0;
+            for (let i = 1; i < points.length; i += 1) {
+                const dx = Math.abs(points[i].left - points[i - 1].left);
+                const dy = Math.abs(points[i].top - points[i - 1].top);
+                // D&D square-grid movement: one diagonal square consumes one square,
+                // matching the common 5e grid interpretation and the user's requested
+                // "count squares moved" behavior.
+                const squares = Math.max(dx, dy) / Math.max(1, geometry.pixelsPerUnit);
+                total += squares * Math.max(0, geometry.scaleFeet);
+            }
+            return Math.round(total * 100) / 100;
+        },
+
+        sendMovementExceededWarning(token) {
+            if (!token) return false;
+            const character = R20.getCharacterFromToken(token);
+            const movement = this.getMovementState();
+            const available = this.movementAvailable(movement);
+            const spent = Math.max(0, Utils.toNumber(movement.spent, 0));
+            const exceeded = Math.max(0, spent - available);
+            const characterName = character && Utils.isFunction(character.get)
+                ? (String(character.get('name') || '').trim() || CombatService.getTokenName(token))
+                : CombatService.getTokenName(token);
+            const nameHtml = '<strong style="color:' + CONFIG.DEFAULT_TEXT_CHARACTER_COLOR + ';">' + Utils.escapeHtml(characterName || 'Character') + '</strong>';
+            const body = nameHtml + ' has used all movement available for this turn and is still moving. ' +
+                '<span style="color:rgb(235,205,75);font-weight:900;">' + Utils.escapeHtml(this.formatMovementFeet(spent)) + ' / ' + Utils.escapeHtml(this.formatMovementFeet(available)) + ' ft.</span>' +
+                (exceeded > 0 ? (' <span style="color:rgb(220,95,95);font-weight:900;">(' + Utils.escapeHtml(this.formatMovementFeet(exceeded)) + ' ft. over)</span>') : '');
+            const card = Html.card({
+                title: 'Movement Exceeded',
+                body,
+                buildOptions: { titleHtml: Render.movementTitleHtml(token, character), titleColor: 'rgb(235,235,235)' }
+            });
+            R20.whisper('GM', card);
+            R20.getNonGmTokenControllerDisplayNames(token, character).forEach((recipient) => {
+                if (recipient) R20.whisper(recipient, card);
+            });
+            return true;
+        },
+
+        trackCurrentTurnMovement(token, previous) {
+            if (!this.isMovementEnabled() || !token || this.isTurnMarkerGraphic(token)) return false;
+            const tokenId = R20.getTokenId(token);
+            const currentId = String(this.getState().currentTokenId || '').trim();
+            if (!tokenId || tokenId !== currentId) return false;
+            let movement = this.getMovementState();
+            if (String(movement.tokenId || '') !== tokenId) {
+                const current = this.tokenEntries(this.getCurrentTurnOrder())[0] || null;
+                movement = current ? this.resetMovementForEntry(current) : movement;
+            }
+            const distance = this.movementDistanceFeet(token, previous);
+            movement.lastLeft = Utils.toNumber(token.get('left'), movement.lastLeft === null ? 0 : movement.lastLeft);
+            movement.lastTop = Utils.toNumber(token.get('top'), movement.lastTop === null ? 0 : movement.lastTop);
+            if (!(distance > 0)) return false;
+            movement.spent = Math.max(0, Utils.toNumber(movement.spent, 0)) + distance;
+            const exceeded = movement.spent > this.movementAvailable(movement) + 0.001;
+            if (exceeded && !movement.warned) {
+                movement.warned = true;
+                this.sendMovementExceededWarning(token);
+                const current = this.tokenEntries(this.getCurrentTurnOrder())[0] || null;
+                if (current) this.sendTurnCard(current);
+            }
+            return true;
+        },
+
+        applyDashToCurrentTurn(tokenId) {
+            if (!this.isMovementEnabled()) return { ok: false, enabled: false };
+            const current = this.tokenEntries(this.getCurrentTurnOrder())[0] || null;
+            const currentId = String(current && current.id || '').trim();
+            if (!current || !currentId) return { ok: false, enabled: true };
+            if (tokenId && String(tokenId || '').trim() !== currentId) return { ok: false, enabled: true };
+            let movement = this.getMovementState();
+            if (String(movement.tokenId || '') !== currentId) movement = this.resetMovementForEntry(current);
+            movement.dashCount = Math.max(0, Utils.toInt(movement.dashCount, 0)) + 1;
+            movement.dashBonus = Math.max(0, Utils.toNumber(movement.baseSpeed, 0)) * movement.dashCount;
+            if (movement.spent <= this.movementAvailable(movement) + 0.001) movement.warned = false;
+            return {
+                ok: true,
+                enabled: true,
+                baseSpeed: movement.baseSpeed,
+                spent: movement.spent,
+                available: this.movementAvailable(movement),
+                remaining: this.movementRemaining(movement),
+                dashCount: movement.dashCount
+            };
         },
 
         parseTurnOrder(raw) {
@@ -6650,6 +7764,8 @@ const CombatAssistant = (() => {
             state.currentTokenId = this.firstTokenId(entries);
             state.knownTokenIds = this.idsFromOrder(entries);
             state.roundProgressTokenIds = this.unique([state.currentTokenId]);
+            if (this.isMovementEnabled()) this.resetMovementForEntry(this.tokenEntries(entries)[0] || null, { resolveAsync: true });
+            else this.clearMovementState();
             this.updateCurrentTurnPresentation(this.tokenEntries(entries)[0] || null, { sendCard: false, focus: false });
             return true;
         },
@@ -6664,6 +7780,7 @@ const CombatAssistant = (() => {
             state.roundProgressTokenIds = [];
             state.pendingAddedTokenIds = [];
             state.active = false;
+            this.clearMovementState();
             this.removeTurnMarker();
             if (TURN_TRACKER_TIMERS.additions) {
                 clearTimeout(TURN_TRACKER_TIMERS.additions);
@@ -6676,9 +7793,9 @@ const CombatAssistant = (() => {
             const imgsrc = String(info && info.imgsrc || '').trim();
             const dead = !!(info && info.dead);
             const tooltip = String(label || (info && info.name) || 'Token').trim();
-            const image = Utils.isSafeImageUrl(imgsrc)
-                ? '<img src="' + Utils.attrSafe(imgsrc) + '" style="display:block;width:' + size + 'px;height:' + size + 'px;object-fit:cover;border-radius:4px;" />'
-                : '<span style="display:block;width:' + size + 'px;height:' + size + 'px;line-height:' + size + 'px;text-align:center;border-radius:4px;background:rgba(55,55,55,0.95);color:rgb(210,210,210);font-size:14px;font-weight:900;">?</span>';
+            const avatar = info && info.character && Utils.isFunction(info.character.get) ? String(info.character.get('avatar') || '').trim() : '';
+            const renderedImage = Render.chatTokenImageHtml(imgsrc, size, avatar, 4);
+            const image = renderedImage || '<span style="display:block;width:' + size + 'px;height:' + size + 'px;line-height:' + size + 'px;text-align:center;border-radius:4px;background:rgba(55,55,55,0.95);color:rgb(210,210,210);font-size:14px;font-weight:900;">?</span>';
             const deadOverlay = dead
                 ? '<span style="position:absolute;left:0;top:0;width:' + size + 'px;height:' + size + 'px;border-radius:4px;background:rgba(220,0,0,0.42);z-index:1;"></span>'
                 : '';
@@ -6938,12 +8055,13 @@ const CombatAssistant = (() => {
                 ? Render.compactSettingButtonHtml({
                     label: 'Remove',
                     command: '!combatAssistant turnremove ' + Utils.attrSafe(info.tokenId),
-                    width: 38,
+                    width: 32,
+                    fontSize: 8,
                     tooltip: 'Advance to the next turn, then remove this defeated token from the Turn Order',
                     backgroundColor: 'rgba(120,40,40,0.95)'
                 })
                 : '';
-            const mainTurnButtons = (concentrationButton ? (concentrationButton + '<span style="display:inline-block;width:4px;height:1px;vertical-align:middle;"></span>') : '') + nextButton;
+            const mainTurnButtons = (concentrationButton ? (concentrationButton + '<span style="display:inline-block;width:2px;height:1px;vertical-align:middle;"></span>') : '') + nextButton;
             const turnButtons = '<div style="white-space:nowrap;text-align:right;line-height:0;">' + mainTurnButtons + '</div>' +
                 (removeButton ? ('<div style="padding-top:3px;text-align:right;">' + removeButton + '</div>') : '');
             const markers = String(info && info.markers || '').trim() || '-';
@@ -6963,28 +8081,32 @@ const CombatAssistant = (() => {
             }
             const mainTurnRow =
                 '<table style="width:100%;border-collapse:collapse;table-layout:fixed;"><tbody><tr>' +
-                    '<td style="width:64%;text-align:left;vertical-align:middle;padding:0 6px 0 0;">' +
+                    '<td style="width:66%;text-align:left;vertical-align:middle;padding:0 6px 0 0;">' +
                         '<table style="width:100%;border-collapse:collapse;table-layout:auto;"><tbody><tr>' +
                             '<td rowspan="3" style="width:44px;text-align:left;vertical-align:top;padding:0 6px 0 0;">' + tokenFocusButton + '</td>' +
                             '<td style="text-align:left;vertical-align:top;color:' + CONFIG.DEFAULT_TEXT_CHARACTER_COLOR + ';font-size:13px;line-height:15px;font-weight:900;">' + Utils.escapeHtml(displayName) + '</td>' +
                         '</tr><tr>' +
-                            '<td style="text-align:left;vertical-align:top;font-size:11px;line-height:14px;color:rgb(220,220,220);">' +
+                            '<td style="text-align:left;vertical-align:top;font-size:11px;line-height:14px;color:rgb(220,220,220);white-space:nowrap;">' +
                                 '<span style="color:' + hpColor + ';font-weight:900;">&#10084;&#65039; ' + Utils.escapeHtml(String(info && info.hp !== undefined ? info.hp : 0)) + '</span>' +
                                 ' | <span style="color:rgb(84,186,255);font-weight:900;">&#128737;&#65039; ' + Utils.escapeHtml(String(info && info.ac || 0)) + '</span>' +
-                                ' | <span style="color:rgb(235,205,75);font-weight:900;">&#127939; ' + Utils.escapeHtml(String(info && info.speed || 0)) + '</span>' +
+                                ' | ' + this.turnSpeedHtml(info) +
                             '</td>' +
                         '</tr><tr>' +
                             '<td style="text-align:left;vertical-align:top;color:rgb(170,170,170);font-size:10px;line-height:12px;">' + Utils.escapeHtml(markers) + '</td>' +
                         '</tr></tbody></table>' +
                     '</td>' +
-                    '<td style="width:36%;text-align:right;vertical-align:middle;padding:0;">' + turnButtons + '</td>' +
+                    '<td style="width:34%;text-align:right;vertical-align:middle;padding:0;">' + turnButtons + '</td>' +
                 '</tr></tbody></table>';
+            const turnActions = Render.buildTurnActionsHtml(info, opts);
+            const actionSection = turnActions
+                ? '<div style="height:1px;background:rgb(105,105,105);margin:7px 0 5px 0;"></div>' + turnActions
+                : '';
             const resourceSection = turnResourceList
                 ? '<div style="height:1px;background:rgb(105,105,105);margin:7px 0 4px 0;"></div>' + turnResourceList
                 : '';
             return Html.card({
                 title: tokenName + '\'s Turn',
-                body: mainTurnRow + resourceSection,
+                body: mainTurnRow + actionSection + resourceSection,
                 buildOptions: { titleColor: CONFIG.DEFAULT_TEXT_CHARACTER_COLOR, borderColor: 'rgb(127,127,127)', bodyAlign: 'left' }
             });
         },
@@ -7088,9 +8210,12 @@ const CombatAssistant = (() => {
                 this.removeTurnMarker();
                 return false;
             }
-            const offset = Math.max(0, Utils.toInt(RuntimeConfig.get('TURN_MARKER_IMG_SIZE'), 20));
-            const width = Math.max(1, Utils.toNumber(token.get('width'), 70) + offset);
-            const height = Math.max(1, Utils.toNumber(token.get('height'), 70) + offset);
+            const sizePercent = Math.max(0, Utils.toNumber(RuntimeConfig.get('TURN_MARKER_IMG_SIZE'), 20));
+            const markerScale = 1 + (sizePercent / 100);
+            const tokenWidth = Math.max(1, Utils.toNumber(token.get('width'), 70));
+            const tokenHeight = Math.max(1, Utils.toNumber(token.get('height'), 70));
+            const width = Math.max(1, Math.round(tokenWidth * markerScale));
+            const height = Math.max(1, Math.round(tokenHeight * markerScale));
             const layer = this.getTurnMarkerLayer();
             const markerData = {
                 _pageid: pageId,
@@ -7130,13 +8255,10 @@ const CombatAssistant = (() => {
             return !!marker;
         },
 
-        focusTurnToken(entry, force) {
-            if (!force && !RuntimeConfig.get('TURN_AUTO_FOCUS')) return false;
-            if (typeof sendPing !== 'function') return false;
-            const info = this.getTokenInfo(entry);
-            const token = info && info.token;
-            const pageId = token ? R20.getTokenPageId(token) : '';
-            if (!token || !pageId || !Utils.isFunction(token.get)) return false;
+        focusMapToken(token) {
+            if (typeof sendPing !== 'function' || !token || !Utils.isFunction(token.get)) return false;
+            const pageId = R20.getTokenPageId(token);
+            if (!pageId) return false;
             try {
                 sendPing(Utils.toNumber(token.get('left'), 0), Utils.toNumber(token.get('top'), 0), pageId, null, true);
                 return true;
@@ -7146,17 +8268,122 @@ const CombatAssistant = (() => {
             }
         },
 
-        focusTokenById(tokenId, ctx) {
-            const safeTokenId = String(tokenId || '').trim();
-            if (!safeTokenId) return false;
-            const token = R20.getTokenById(safeTokenId);
-            if (!token) return false;
-            if (ctx && !ctx.isGM && !CommandHandlers.canUseTokenButton(ctx, token)) {
-                Render.sendWhisperMessage(ctx.who, 'Permission Denied', 'You do not control this token.', 'failure');
+        focusTurnToken(entry, force) {
+            if (!force && !RuntimeConfig.get('TURN_AUTO_FOCUS')) return false;
+            const info = this.getTokenInfo(entry);
+            return this.focusMapToken(info && info.token);
+        },
+
+        sendCurrentTurnCardToContext(ctx) {
+            if (!this.isEnabled()) {
+                Render.sendWhisperMessage(ctx && ctx.who || 'GM', 'Turn Tracker', 'Turn Tracker is disabled.', 'warning');
                 return false;
             }
-            const entry = this.tokenEntries(this.getCurrentTurnOrder()).filter((turn) => String(turn.id || '').trim() === safeTokenId)[0] || { id: safeTokenId, pr: '' };
-            return this.focusTurnToken(entry, true);
+            const current = this.tokenEntries(this.getCurrentTurnOrder())[0] || null;
+            const currentId = String(current && current.id || '').trim();
+            if (!current || !currentId) {
+                Render.sendWhisperMessage(ctx && ctx.who || 'GM', 'Turn Tracker', 'There is no current turn.', 'warning');
+                return false;
+            }
+            // GM replays the normal Turn-card delivery: GM always receives it,
+            // and a player-controlled current turn also reaches its controllers.
+            if (ctx && ctx.isGM) return this.sendTurnCard(current);
+
+            const info = this.getTokenInfo(current);
+            if (!info || !info.token) {
+                Render.sendWhisperMessage(ctx && ctx.who || 'GM', 'Turn Tracker', 'The current turn token was not found.', 'warning');
+                return false;
+            }
+            const character = info.character || R20.getCharacterFromToken(info.token);
+            if (!R20.tokenIsControlledByPlayer(info.token, character, ctx && ctx.playerId || '')) {
+                Render.sendWhisperMessage(ctx && ctx.who || 'GM', 'Turn Tracker', 'It is not your turn.', 'warning');
+                return false;
+            }
+
+            const expectedTokenId = String(info.tokenId || currentId).trim();
+            const deliver = (resolvedInfo) => {
+                const live = this.tokenEntries(this.getCurrentTurnOrder())[0] || null;
+                if (expectedTokenId && live && String(live.id || '').trim() !== expectedTokenId) return false;
+                const finalInfo = resolvedInfo || info;
+                this.syncMovementBaseSpeed(finalInfo);
+                const isGmCard = !!(ctx && ctx.isGM);
+                const showRemove = isGmCard && !RuntimeConfig.get('REMOVE_NPC_DEAD_TOKENS') && this.isDeadNpcInfo(finalInfo);
+                const card = this.buildTurnCard(finalInfo, true, showRemove, {
+                    gmCard: isGmCard,
+                    playerCard: !isGmCard
+                });
+                R20.whisper(ctx && ctx.who || 'GM', card);
+                return true;
+            };
+
+            const characterId = info.character
+                ? String(info.character.id || (Utils.isFunction(info.character.get) ? info.character.get('_id') : '') || '').trim()
+                : '';
+            if (characterId && R20.detectSheetVersion(characterId) === '2024') {
+                this.resolveTurnCardSpeed(info)
+                    .then(deliver)
+                    .catch((error) => {
+                        Logger.debug('[turn-card:manual]', error && error.message ? error.message : String(error));
+                        deliver(info);
+                    });
+                return true;
+            }
+            return deliver(info);
+        },
+
+        focusTokenById(tokenId, ctx) {
+            const requestContext = ctx || {};
+            let playerCurrentToken = null;
+
+            // Players may use Turn Focus only while the live current-turn token
+            // is under their control. This prevents players from repeatedly
+            // forcing map focus during another creature's turn. The GM bypasses
+            // this restriction and keeps the existing unrestricted behavior.
+            if (!requestContext.isGM) {
+                const playerCurrent = this.tokenEntries(this.getCurrentTurnOrder())[0] || null;
+                const playerCurrentId = String(playerCurrent && playerCurrent.id || '').trim();
+                if (!playerCurrent || !playerCurrentId) {
+                    Render.sendWhisperMessage(requestContext.who || 'GM', 'Turn Tracker', 'There is no current turn to focus.', 'warning');
+                    return false;
+                }
+                playerCurrentToken = R20.getTokenById(playerCurrentId);
+                if (!playerCurrentToken) {
+                    Render.sendWhisperMessage(requestContext.who || 'GM', 'Turn Tracker', 'The current turn token was not found.', 'warning');
+                    return false;
+                }
+                const playerCurrentCharacter = R20.getCharacterFromToken(playerCurrentToken);
+                if (!R20.tokenIsControlledByPlayer(playerCurrentToken, playerCurrentCharacter, requestContext.playerId || '')) {
+                    Render.sendWhisperMessage(requestContext.who || 'GM', 'Turn Tracker', 'It is not your turn.', 'warning');
+                    return false;
+                }
+            }
+
+            const requestedId = String(tokenId || '').trim();
+            if (requestedId) {
+                const requestedToken = R20.getTokenById(requestedId);
+                if (!requestedToken || !R20.getTokenPageId(requestedToken)) {
+                    Render.sendWhisperMessage(requestContext.who || 'GM', 'Turn Tracker', 'The requested token was not found on a map.', 'warning');
+                    return false;
+                }
+                return this.focusMapToken(requestedToken);
+            }
+
+            // For an authorized player, the current token was already resolved
+            // above. Reuse it instead of reading the Turn Order a second time.
+            if (playerCurrentToken) return this.focusMapToken(playerCurrentToken);
+
+            const current = this.tokenEntries(this.getCurrentTurnOrder())[0] || null;
+            const currentId = String(current && current.id || '').trim();
+            if (!current || !currentId) {
+                Render.sendWhisperMessage(requestContext.who || 'GM', 'Turn Tracker', 'There is no current turn to focus.', 'warning');
+                return false;
+            }
+            const token = R20.getTokenById(currentId);
+            if (!token) {
+                Render.sendWhisperMessage(requestContext.who || 'GM', 'Turn Tracker', 'The current turn token was not found.', 'warning');
+                return false;
+            }
+            return this.focusMapToken(token);
         },
 
         updateCurrentTurnPresentation(entry, options) {
@@ -7173,12 +8400,14 @@ const CombatAssistant = (() => {
             return current ? this.updateCurrentTurnPresentation(current, options || { sendCard: false, focus: false }) : false;
         },
 
-        handleGraphicChange(token) {
-            if (!this.isEnabled() || !RuntimeConfig.get('TURN_MARKER_FOLLOW')) return false;
-            if (this.isTurnMarkerGraphic(token)) return false;
+        handleGraphicChange(token, previous) {
+            if (!this.isEnabled() || !token || this.isTurnMarkerGraphic(token)) return false;
             const tokenId = R20.getTokenId(token);
             if (!tokenId || tokenId !== String(this.getState().currentTokenId || '').trim()) return false;
-            return this.refreshCurrentTurnPresentation({ sendCard: false, focus: false });
+            let handled = false;
+            if (this.isMovementEnabled()) handled = this.trackCurrentTurnMovement(token, previous) || handled;
+            if (RuntimeConfig.get('TURN_MARKER_FOLLOW')) handled = this.refreshCurrentTurnPresentation({ sendCard: false, focus: false }) || handled;
+            return handled;
         },
 
         handleGraphicDestroyed(token) {
@@ -7207,14 +8436,18 @@ const CombatAssistant = (() => {
                 const current = this.tokenEntries(this.getCurrentTurnOrder())[0] || null;
                 if (expectedTokenId && current && String(current.id || '').trim() !== expectedTokenId) return false;
                 const finalInfo = resolvedInfo || info;
+                this.syncMovementBaseSpeed(finalInfo);
                 const showRemove = !RuntimeConfig.get('REMOVE_NPC_DEAD_TOKENS') && this.isDeadNpcInfo(finalInfo);
-                const gmCard = this.buildTurnCard(finalInfo, true, showRemove, { gmCard: true });
+                const gmCard = this.buildTurnCard(finalInfo, true, showRemove, { gmCard: true, playerCard: false });
                 R20.whisper('GM', gmCard);
-                if (finalInfo.playerControlled) {
-                    // Player Next is intrinsic to Turn Tracker: there is no separate
-                    // PLAYER_END_TURNS setting anymore. Only the GM receives Remove.
-                    const playerCard = this.buildTurnCard(finalInfo, true, false, { gmCard: false });
-                    finalInfo.recipients.forEach((recipient) => {
+                const playerRecipients = finalInfo.playerControlled
+                    ? R20.getNonGmTokenControllerDisplayNames(finalInfo.token, finalInfo.character)
+                    : [];
+                if (playerRecipients.length) {
+                    // Player-character action controls are rendered in both the GM copy
+                    // and the copy delivered to actual non-GM controllers.
+                    const playerCard = this.buildTurnCard(finalInfo, true, false, { gmCard: false, playerCard: true });
+                    playerRecipients.forEach((recipient) => {
                         if (recipient) R20.whisper(recipient, playerCard);
                     });
                 }
@@ -7303,21 +8536,32 @@ const CombatAssistant = (() => {
             const order = this.getCurrentTurnOrder();
             const entries = this.tokenEntries(order);
             const current = entries[0] || null;
-            const safeTokenId = String(tokenId || '').trim();
-            if (!current || !safeTokenId || String(current.id || '').trim() !== safeTokenId) {
-                Render.sendWhisperMessage(ctx && ctx.who || 'GM', 'Turn Tracker', 'That token is not the current turn.', 'warning');
+            // turnnext is intentionally generic. The optional tokenId is retained
+            // only so old Turn-card buttons remain valid; the live current entry is
+            // always authoritative.
+            const safeTokenId = String(current && current.id || '').trim();
+            if (!current || !safeTokenId) {
+                Render.sendWhisperMessage(ctx && ctx.who || 'GM', 'Turn Tracker', 'There is no current turn to advance.', 'warning');
                 return false;
             }
             const token = R20.getTokenById(safeTokenId);
-            if (!ctx.isGM && !CommandHandlers.canUseTokenButton(ctx, token)) {
-                Render.sendWhisperMessage(ctx.who, 'Permission Denied', 'You do not control this token.', 'failure');
+            if (!token) {
+                Render.sendWhisperMessage(ctx && ctx.who || 'GM', 'Turn Tracker', 'The current turn token was not found.', 'warning');
                 return false;
+            }
+            if (ctx && !ctx.isGM) {
+                const character = R20.getCharacterFromToken(token);
+                if (!R20.tokenIsControlledByPlayer(token, character, ctx.playerId)) {
+                    Render.sendWhisperMessage(ctx.who, 'Turn Tracker', 'It is not your turn.', 'warning');
+                    return false;
+                }
             }
             const state = this.getState();
             if (order.length <= 1) {
                 state.round = Math.max(1, Utils.toInt(state.round, 1)) + 1;
                 state.currentTokenId = safeTokenId;
                 state.roundProgressTokenIds = [safeTokenId];
+                if (this.isMovementEnabled()) this.resetMovementForEntry(current);
                 this.processConcentrationTurnStart(current);
                 this.sendRoundCounter({ order, includeStop: true, round: state.round });
                 this.updateCurrentTurnPresentation(current, { sendCard: true, focus: true });
@@ -7345,7 +8589,10 @@ const CombatAssistant = (() => {
                 }
             }
 
-            if (next) this.processConcentrationTurnStart(next);
+            if (next) {
+                if (this.isMovementEnabled()) this.resetMovementForEntry(next);
+                this.processConcentrationTurnStart(next);
+            }
             Campaign().set('turnorder', JSON.stringify(rotated));
 
             if (startsNewRound) {
@@ -7506,7 +8753,11 @@ const CombatAssistant = (() => {
             state.currentTokenId = currentFirst;
             state.knownTokenIds = currentIds.slice();
 
-            if ((firstChanged || showRound) && currentFirst) this.processConcentrationTurnStart(this.tokenEntries(currentOrder)[0]);
+            if ((firstChanged || showRound) && currentFirst) {
+                const currentEntry = this.tokenEntries(currentOrder)[0] || null;
+                if (this.isMovementEnabled()) this.resetMovementForEntry(currentEntry);
+                this.processConcentrationTurnStart(currentEntry);
+            }
             if (showRound) this.sendRoundCounter({ order: currentOrder, includeStop: true, round: state.round });
             if (addedIds.length && previousIds.length) this.scheduleAddedTokensRender(addedIds);
             if (firstChanged || showRound) {
@@ -9366,6 +10617,2443 @@ const CombatAssistant = (() => {
     /** -----------------------------------------------------------------------
      * Resources
      * --------------------------------------------------------------------- */
+    const ActionService = {
+        normalizeSigned(value) {
+            const n = Utils.toInt(value, 0);
+            return (n >= 0 ? '+' : '') + String(n);
+        },
+
+        parseSignedNumber(value, fallback) {
+            const text = String(value === undefined || value === null ? '' : value).trim();
+            const match = text.match(/[+-]?\d+/);
+            return match ? Utils.toInt(match[0], fallback === undefined ? 0 : fallback) : (fallback === undefined ? 0 : fallback);
+        },
+
+        parseJsonList(value) {
+            if (Array.isArray(value)) return value.slice();
+            const raw = String(value || '').trim();
+            if (!raw) return [];
+            try {
+                const parsed = JSON.parse(raw);
+                return Array.isArray(parsed) ? parsed : [];
+            } catch (ignored) {
+                return [];
+            }
+        },
+
+        normalizeAbilityName(value) {
+            const text = String(value || '').trim().toLowerCase();
+            const aliases = {
+                str: 'strength', strength: 'strength',
+                dex: 'dexterity', dexterity: 'dexterity',
+                con: 'constitution', constitution: 'constitution',
+                int: 'intelligence', intelligence: 'intelligence',
+                wis: 'wisdom', wisdom: 'wisdom',
+                cha: 'charisma', charisma: 'charisma'
+            };
+            return aliases[text] || '';
+        },
+
+        abilityLabel(value) {
+            const normalized = this.normalizeAbilityName(value);
+            return normalized ? normalized.slice(0, 3).toUpperCase() : '';
+        },
+
+        parseSaveInfoText(value) {
+            const text = String(value === undefined || value === null ? '' : value).trim();
+            if (!text) return { saveDc: 0, saveAbility: '' };
+            const dcMatch = text.match(/\bDC\s*(\d+)\b/i) || text.match(/\b(\d+)\s*DC\b/i);
+            const abilityMatch = text.match(/\b(strength|dexterity|constitution|intelligence|wisdom|charisma|str|dex|con|int|wis|cha)\b/i);
+            return {
+                saveDc: dcMatch ? Math.max(0, Utils.toInt(dcMatch[1], 0)) : 0,
+                saveAbility: abilityMatch ? this.normalizeAbilityName(abilityMatch[1]) : ''
+            };
+        },
+
+        structuredSaveInfo(record, relatedRecords) {
+            const source = record && typeof record === 'object' ? record : {};
+            const related = Array.isArray(relatedRecords) ? relatedRecords.filter(Boolean) : [];
+            const nested = [source.save, source.savingThrow, source.saving_throw, source.savingThrowData, source.saveData]
+                .filter((value) => value !== undefined && value !== null);
+            let saveDc = 0;
+            let saveAbility = '';
+            const takeObject = (obj) => {
+                if (!obj || typeof obj !== 'object') return;
+                if (!saveDc) saveDc = Math.max(0, Utils.toInt(obj.dc !== undefined ? obj.dc : (obj.saveDc !== undefined ? obj.saveDc : obj.difficultyClass), 0));
+                if (!saveAbility) saveAbility = this.normalizeAbilityName(obj.ability || obj.saveAbility || obj.attribute || obj.stat || '');
+            };
+            if (!saveDc) saveDc = Math.max(0, Utils.toInt(source.saveDc !== undefined ? source.saveDc : (source.save_dc !== undefined ? source.save_dc : source.dc), 0));
+            saveAbility = this.normalizeAbilityName(source.saveAbility || source.save_ability || source.saveattr || source.saveAttribute || '');
+            nested.forEach((entry) => {
+                if (typeof entry === 'object') takeObject(entry);
+                else {
+                    const parsed = this.parseSaveInfoText(entry);
+                    if (!saveDc) saveDc = parsed.saveDc;
+                    if (!saveAbility) saveAbility = parsed.saveAbility;
+                }
+            });
+            if ((!saveDc || !saveAbility) && source.description) {
+                const parsed = this.parseSaveInfoText(source.description);
+                if (!saveDc) saveDc = parsed.saveDc;
+                if (!saveAbility) saveAbility = parsed.saveAbility;
+            }
+            related.forEach((entry) => {
+                if (!entry || typeof entry !== 'object') return;
+                const relatedNested = [entry.save, entry.savingThrow, entry.saving_throw, entry.savingThrowData, entry.saveData]
+                    .filter((value) => value !== undefined && value !== null);
+                relatedNested.forEach((value) => {
+                    if (typeof value === 'object') takeObject(value);
+                    else {
+                        const parsed = this.parseSaveInfoText(value);
+                        if (!saveDc) saveDc = parsed.saveDc;
+                        if (!saveAbility) saveAbility = parsed.saveAbility;
+                    }
+                });
+                const relatedText = [entry.type, entry.recordName, entry.name, entry.label]
+                    .map((value) => String(value || ''))
+                    .join(' ')
+                    .toLowerCase();
+                if (!/(save|saving)/.test(relatedText)) return;
+                takeObject(entry);
+                if ((!saveDc || !saveAbility) && entry.description) {
+                    const parsed = this.parseSaveInfoText(entry.description);
+                    if (!saveDc) saveDc = parsed.saveDc;
+                    if (!saveAbility) saveAbility = parsed.saveAbility;
+                }
+            });
+            return { saveDc, saveAbility };
+        },
+
+        legacyRowSaveInfo(row) {
+            const source = row || {};
+            const rawSaveAbility = String(source.saveattr || source.saveability || source.save_ability || source.savetype || source.spellsave || source.save || '').trim();
+            const saveDc = Math.max(0, Utils.toInt(source.savedc || source.save_dc || source.spelldc || source.spell_dc || source.dc, 0));
+            let saveAbility = this.normalizeAbilityName(rawSaveAbility);
+            if (!saveAbility && rawSaveAbility) saveAbility = this.legacyAttrAbility(rawSaveAbility) || this.parseSaveInfoText(rawSaveAbility).saveAbility;
+            if ((!saveDc || !saveAbility) && (source.description || source.atk_desc || source.spelldescription || source.spelldesc)) {
+                const parsed = this.parseSaveInfoText(source.description || source.atk_desc || source.spelldescription || source.spelldesc);
+                saveAbility = saveAbility || parsed.saveAbility;
+                return { saveDc: saveDc || parsed.saveDc, saveAbility };
+            }
+            return { saveDc, saveAbility };
+        },
+
+        async readSheetNumber(characterId, names, fallback) {
+            const safeCharacterId = String(characterId || '').trim();
+            const candidates = Array.isArray(names) ? names : [names];
+            if (typeof getSheetItem === 'function') {
+                for (let i = 0; i < candidates.length; i += 1) {
+                    const name = String(candidates[i] || '').trim();
+                    if (!name) continue;
+                    try {
+                        const value = await getSheetItem(safeCharacterId, name, 'current');
+                        const number = this.parseSignedNumber(value, null);
+                        if (number !== null) return number;
+                    } catch (ignored) {}
+                }
+            }
+            if (typeof getAttrByName === 'function') {
+                for (let i = 0; i < candidates.length; i += 1) {
+                    const name = String(candidates[i] || '').trim();
+                    if (!name) continue;
+                    try {
+                        const value = getAttrByName(safeCharacterId, name);
+                        const number = this.parseSignedNumber(value, null);
+                        if (number !== null) return number;
+                    } catch (ignored) {}
+                }
+            }
+            return fallback === undefined ? 0 : fallback;
+        },
+
+        async readAbilityMod(characterId, ability) {
+            const normalized = this.normalizeAbilityName(ability);
+            if (!normalized) return 0;
+            return this.readSheetNumber(characterId, [normalized + '_mod', normalized + '_modifier'], 0);
+        },
+
+        diagnosticCandidateNamesForAbility(ability) {
+            const normalized = this.normalizeAbilityName(ability);
+            if (!normalized) return { score: [], modifier: [], all: [] };
+            const short = this.abilityLabel(normalized).toLowerCase();
+            const score = [normalized, short];
+            const modifier = [normalized + '_mod', normalized + '_modifier', short + '_mod', short + '_modifier'];
+            return { score, modifier, all: score.concat(modifier) };
+        },
+
+        diagnosticRawAttributeCandidates(attrs, names) {
+            const wanted = Object.create(null);
+            (Array.isArray(names) ? names : []).forEach((name) => { wanted[String(name || '').toLowerCase()] = true; });
+            const out = Object.create(null);
+            (Array.isArray(attrs) ? attrs : []).forEach((attr) => {
+                if (!attr || !Utils.isFunction(attr.get)) return;
+                const name = String(attr.get('name') || '').trim();
+                if (!name || !wanted[name.toLowerCase()]) return;
+                out[name] = attr.get('current');
+            });
+            (Array.isArray(names) ? names : []).forEach((name) => {
+                const safe = String(name || '').trim();
+                if (safe && !Object.prototype.hasOwnProperty.call(out, safe)) out[safe] = '(missing)';
+            });
+            return out;
+        },
+
+        diagnosticGetAttrByNameCandidates(characterId, names) {
+            const out = Object.create(null);
+            (Array.isArray(names) ? names : []).forEach((name) => {
+                const safe = String(name || '').trim();
+                if (!safe) return;
+                if (typeof getAttrByName !== 'function') {
+                    out[safe] = '(unavailable)';
+                    return;
+                }
+                try {
+                    const value = getAttrByName(String(characterId || '').trim(), safe);
+                    out[safe] = value === undefined ? '(undefined)' : value;
+                } catch (error) {
+                    out[safe] = '(error: ' + String(error && error.message || error || 'unknown') + ')';
+                }
+            });
+            return out;
+        },
+
+        async diagnosticGetSheetItemCandidates(characterId, names) {
+            const safeCharacterId = String(characterId || '').trim();
+            const list = (Array.isArray(names) ? names : []).map((name) => String(name || '').trim()).filter(Boolean);
+            if (typeof getSheetItem !== 'function') {
+                const unavailable = Object.create(null);
+                list.forEach((name) => { unavailable[name] = '(unavailable)'; });
+                return { values: unavailable, reads: 0 };
+            }
+            const pairs = await Promise.all(list.map(async (name) => {
+                try {
+                    const value = await getSheetItem(safeCharacterId, name, 'current');
+                    return [name, value === undefined ? '(undefined)' : value];
+                } catch (error) {
+                    return [name, '(error: ' + String(error && error.message || error || 'unknown') + ')'];
+                }
+            }));
+            const values = Object.create(null);
+            pairs.forEach((pair) => { values[pair[0]] = pair[1]; });
+            return { values, reads: list.length };
+        },
+
+        diagnosticFirstNumber(values, names) {
+            const source = values && typeof values === 'object' ? values : {};
+            const list = Array.isArray(names) ? names : [];
+            for (let i = 0; i < list.length; i += 1) {
+                const key = String(list[i] || '').trim();
+                if (!key || !Object.prototype.hasOwnProperty.call(source, key)) continue;
+                const number = this.parseSignedNumber(source[key], null);
+                if (number !== null) return number;
+            }
+            return null;
+        },
+
+        diagnosticAbilityDerived(values, candidates) {
+            const score = this.diagnosticFirstNumber(values, candidates && candidates.score);
+            const directModifier = this.diagnosticFirstNumber(values, candidates && candidates.modifier);
+            const modifierFromScore = score === null ? null : Math.floor((score - 10) / 2);
+            return { score, directModifier, modifierFromScore };
+        },
+
+        async collectBeaconLiveAbilityDiagnostics(characterId, attrs, attacks, root) {
+            const started = Date.now();
+            const context = this.beaconCombatContext(root || {});
+            const abilities = [];
+            (Array.isArray(attacks) ? attacks : []).forEach((attack) => {
+                const ability = this.normalizeAbilityName(attack && attack.ability);
+                if (ability && abilities.indexOf(ability) < 0) abilities.push(ability);
+            });
+            const requests = abilities.map(async (ability) => {
+                const candidates = this.diagnosticCandidateNamesForAbility(ability);
+                const rawAttributes = this.diagnosticRawAttributeCandidates(attrs, candidates.all);
+                const attrByName = this.diagnosticGetAttrByNameCandidates(characterId, candidates.all);
+                const sheetItems = await this.diagnosticGetSheetItemCandidates(characterId, candidates.all);
+                const storeAbility = context.abilities && context.abilities[ability] ? context.abilities[ability] : { score: null, modifier: null };
+                return {
+                    ability,
+                    reads: sheetItems.reads,
+                    data: {
+                        store: { score: storeAbility.score, modifier: storeAbility.modifier },
+                        rawAttributeCandidates: rawAttributes,
+                        rawAttributeDerived: this.diagnosticAbilityDerived(rawAttributes, candidates),
+                        getAttrByNameCandidates: attrByName,
+                        getAttrByNameDerived: this.diagnosticAbilityDerived(attrByName, candidates),
+                        getSheetItemCandidates: sheetItems.values,
+                        getSheetItemDerived: this.diagnosticAbilityDerived(sheetItems.values, candidates)
+                    }
+                };
+            });
+            const results = await Promise.all(requests);
+            const proficiencyNames = ['pb', 'proficiency_bonus', 'proficiencyBonus'];
+            const rawPb = this.diagnosticRawAttributeCandidates(attrs, proficiencyNames);
+            const attrPb = this.diagnosticGetAttrByNameCandidates(characterId, proficiencyNames);
+            const sheetPb = await this.diagnosticGetSheetItemCandidates(characterId, proficiencyNames);
+            const out = { abilities: Object.create(null), proficiency: {
+                store: context.proficiency || { value: 0, source: 'unknown' },
+                rawAttributeCandidates: rawPb,
+                getAttrByNameCandidates: attrPb,
+                getSheetItemCandidates: sheetPb.values
+            }, sheetApiReads: sheetPb.reads, readMs: 0 };
+            results.forEach((entry) => {
+                out.abilities[entry.ability] = entry.data;
+                out.sheetApiReads += entry.reads;
+            });
+            out.readMs = Date.now() - started;
+            return out;
+        },
+
+        getActionToken(tokenId, ctx, options) {
+            const opts = options || {};
+            const safeTokenId = String(tokenId || '').trim();
+            if (!safeTokenId) return { ok: false, message: 'The action token was not specified.' };
+            const token = R20.getTokenById(safeTokenId);
+            if (!token) return { ok: false, message: 'The action token was not found.' };
+            const character = R20.getCharacterFromToken(token);
+            if (!character && opts.requireCharacter !== false) return { ok: false, message: 'This token is not linked to a character sheet.' };
+            // Turn Action buttons are allowed at any time. Players still need to
+            // control the referenced token/character; the GM is unrestricted.
+            if (ctx && !ctx.isGM && !R20.tokenIsControlledByPlayer(token, character, ctx.playerId)) {
+                return { ok: false, message: 'You do not control this token.' };
+            }
+            const characterId = character ? String(character.id || (Utils.isFunction(character.get) ? character.get('_id') : '') || '').trim() : '';
+            const characterName = character && Utils.isFunction(character.get)
+                ? String(character.get('name') || '').trim()
+                : '';
+            return {
+                ok: true,
+                token,
+                tokenId: safeTokenId,
+                character,
+                characterId,
+                characterName: characterName || CombatService.getTokenName(token)
+            };
+        },
+
+        getCurrentTurnActionToken(ctx) {
+            if (!TurnTracker.isEnabled()) return { ok: false, message: 'Turn Tracker is disabled.' };
+            const current = TurnTracker.tokenEntries(TurnTracker.getCurrentTurnOrder())[0] || null;
+            const currentId = String(current && current.id || '').trim();
+            if (!current || !currentId) return { ok: false, message: 'There is no current turn.' };
+            const token = R20.getTokenById(currentId);
+            if (!token) return { ok: false, message: 'The current turn token was not found.' };
+            const character = R20.getCharacterFromToken(token);
+            if (ctx && !ctx.isGM && !R20.tokenIsControlledByPlayer(token, character, ctx.playerId)) {
+                return { ok: false, message: 'It is not your turn.' };
+            }
+            const characterId = character ? String(character.id || (Utils.isFunction(character.get) ? character.get('_id') : '') || '').trim() : '';
+            const characterName = character && Utils.isFunction(character.get)
+                ? String(character.get('name') || '').trim()
+                : '';
+            return {
+                ok: true,
+                entry: current,
+                token,
+                tokenId: currentId,
+                character,
+                characterId,
+                characterName: characterName || CombatService.getTokenName(token)
+            };
+        },
+
+        narrativeAction(ctx, action, tokenId) {
+            // Dash / Disengage / Dodge are generic current-turn commands now. The
+            // tokenId remains in old rendered buttons only for backward compatibility.
+            const info = this.getCurrentTurnActionToken(ctx);
+            if (!info.ok) {
+                Render.sendWhisperMessage(ctx && ctx.who || 'GM', 'Turn Action', info.message, 'warning');
+                return false;
+            }
+            const normalized = String(action || '').trim().toLowerCase();
+            const labels = { dash: 'Dash', disengage: 'Disengage', dodge: 'Dodge' };
+            if (!labels[normalized]) {
+                Render.sendWhisperMessage(ctx && ctx.who || 'GM', 'Turn Action', 'Unknown turn action.', 'warning');
+                return false;
+            }
+            const revealNames = RuntimeConfig.get('REVEAL_TOKEN_NAMES_IN_LOG');
+            const displayName = revealNames ? info.characterName : 'Character';
+            const nameHtml = '<strong style="color:' + CONFIG.DEFAULT_TEXT_CHARACTER_COLOR + ';">' + Utils.escapeHtml(displayName) + '</strong>';
+            Render.sendPublicMessage(
+                'Turn Action',
+                nameHtml + ' takes the <strong>' + labels[normalized] + '</strong> action.',
+                'normal',
+                { titleHtml: Render.turnActionTitleHtml(info.token, info.character) }
+            );
+            if (normalized === 'dash' && TurnTracker.isMovementEnabled()) {
+                const result = TurnTracker.applyDashToCurrentTurn(info.tokenId);
+                if (result && result.ok) TurnTracker.sendTurnCard(info.entry);
+            }
+            return true;
+        },
+
+        getLegacyAttackRows(characterId, sourceAttrs) {
+            const safeCharacterId = String(characterId || '').trim();
+            const attrs = Array.isArray(sourceAttrs)
+                ? sourceAttrs
+                : (findObjs({ _type: 'attribute', _characterid: safeCharacterId }) || []);
+            const rows = Object.create(null);
+            attrs.forEach((attr) => {
+                if (!attr || !Utils.isFunction(attr.get)) return;
+                const name = String(attr.get('name') || '');
+                const match = name.match(/^repeating_attack_([^_]+)_(.+)$/i);
+                if (!match) return;
+                const rowId = match[1];
+                const key = String(match[2] || '').toLowerCase();
+                rows[rowId] = rows[rowId] || { rowId };
+                rows[rowId][key] = attr.get('current');
+            });
+            return Object.keys(rows).map((id) => rows[id]);
+        },
+
+        getLegacyNpcActionRows(characterId, sourceAttrs) {
+            const safeCharacterId = String(characterId || '').trim();
+            const attrs = Array.isArray(sourceAttrs)
+                ? sourceAttrs
+                : (findObjs({ _type: 'attribute', _characterid: safeCharacterId }) || []);
+            const rows = Object.create(null);
+            attrs.forEach((attr) => {
+                if (!attr || !Utils.isFunction(attr.get)) return;
+                const name = String(attr.get('name') || '');
+                const match = name.match(/^repeating_npcaction_([^_]+)_(.+)$/i);
+                if (!match) return;
+                const rowId = match[1];
+                const key = String(match[2] || '').toLowerCase();
+                rows[rowId] = rows[rowId] || { rowId };
+                rows[rowId][key] = attr.get('current');
+            });
+            return Object.keys(rows).map((id) => rows[id]);
+        },
+
+        legacyNpcActionIsAttack(row) {
+            const name = String(row && row.name || '').trim();
+            if (!name) return false;
+            const attackFlag = String(row && row.attack_flag || '').trim().toLowerCase();
+            const displayFlag = String(row && row.attack_display_flag || '');
+            const attackOptions = String(row && row.attack_options || '');
+            const toHit = String(row && row.attack_tohit || '').trim();
+            return attackFlag === 'on' || /attack=1/i.test(displayFlag) || /attack=1/i.test(attackOptions) || !!toHit;
+        },
+
+        legacyNpcDamageSummaries(row) {
+            const out = [];
+            const add = (formulaKey, typeKey) => {
+                const rawFormula = String(row && row[formulaKey] || '').trim();
+                const damageType = String(row && row[typeKey] || '').trim();
+                if (!rawFormula && !damageType) return;
+                const formula = rawFormula.replace(/\s+/g, '');
+                out.push({
+                    formula: formula || '-',
+                    damageType: damageType || 'Damage',
+                    ability: '',
+                    abilityLabel: '',
+                    abilityModifier: 0,
+                    flatBonus: 0
+                });
+            };
+            add('attack_damage', 'attack_damagetype');
+            add('attack_damage2', 'attack_damagetype2');
+            return out;
+        },
+
+        getLegacyNpcAttackSummaries(characterId, sourceAttrs) {
+            const attrs = Array.isArray(sourceAttrs)
+                ? sourceAttrs
+                : (findObjs({ _type: 'attribute', _characterid: String(characterId || '').trim() }) || []);
+            return this.getLegacyNpcActionRows(characterId, attrs)
+                .filter((row) => this.legacyNpcActionIsAttack(row))
+                .map((row) => {
+                    const rowId = String(row && row.rowId || '').trim();
+                    const attackBonus = this.parseSignedNumber(row && row.attack_tohit, 0);
+                    const attackType = String(row && row.attack_type || '').trim();
+                    const range = String(row && row.attack_range || '').trim();
+                    return {
+                        id: rowId,
+                        name: String(row && row.name || '').trim(),
+                        sheetVersion: '2014 NPC',
+                        ability: '',
+                        abilityLabel: '',
+                        abilityModifier: 0,
+                        proficiencyBonus: 0,
+                        extraBonus: 0,
+                        attackType: attackType || 'Attack',
+                        attackTypeLabel: this.attackTypeLabel(attackType, range),
+                        range,
+                        rangeLabel: this.combatRangeLabel(range),
+                        description: String(row && row.description || '').trim(),
+                        saveDc: this.legacyRowSaveInfo(row).saveDc,
+                        saveAbility: this.legacyRowSaveInfo(row).saveAbility,
+                        attackBonus,
+                        attackBonusLabel: this.normalizeSigned(attackBonus),
+                        attackBreakdown: this.normalizeSigned(attackBonus) + ' (NPC sheet)',
+                        damage: this.legacyNpcDamageSummaries(row),
+                        rollCommand: rowId ? R20.buttonAbilityCommand(characterId, 'repeating_npcaction_' + rowId + '_npc_action') : '',
+                        damageCommand: rowId ? R20.buttonAbilityCommand(characterId, 'repeating_npcaction_' + rowId + '_npc_dmg') : ''
+                    };
+                });
+        },
+
+        legacyAttrAbility(value) {
+            const raw = String(value || '').toLowerCase();
+            const match = raw.match(/@\{(strength|dexterity|constitution|intelligence|wisdom|charisma)_mod\}/i);
+            return match ? String(match[1]).toLowerCase() : '';
+        },
+
+        async buildLegacyAttack(characterId, row) {
+            const name = String(row && row.atkname || '').trim();
+            const rowId = String(row && row.rowId || '').trim();
+            if (!name || !rowId) return null;
+            const spellLevel = String(row.spelllevel || '').trim();
+            const spellInnate = String(row.spell_innate || '').trim();
+            if (spellLevel || spellInnate) return null;
+            if (String(row.atkflag || '').trim() && String(row.atkflag).indexOf('attack=1') < 0) return null;
+
+            const ability = this.legacyAttrAbility(row.atkattr_base);
+            const abilityMod = ability ? await this.readAbilityMod(characterId, ability) : 0;
+            const profEnabled = /pb/i.test(String(row.atkprofflag || ''));
+            const pb = profEnabled ? await this.readSheetNumber(characterId, 'pb', 0) : 0;
+            const extra = this.parseSignedNumber(row.atkmod, 0) + this.parseSignedNumber(row.atkmagic, 0);
+            const finalFromSheet = this.parseSignedNumber(row.atkbonus, null);
+            const computed = abilityMod + pb + extra;
+            const attackBonus = finalFromSheet !== null ? finalFromSheet : computed;
+            const breakdownParts = [];
+            if (ability) breakdownParts.push(this.normalizeSigned(abilityMod) + ' ' + this.abilityLabel(ability));
+            if (profEnabled) breakdownParts.push(this.normalizeSigned(pb) + ' PB');
+            if (extra) breakdownParts.push(this.normalizeSigned(extra) + ' Bonus');
+
+            const damageAbility = this.legacyAttrAbility(row.dmgattr);
+            const damageAbilityMod = damageAbility ? await this.readAbilityMod(characterId, damageAbility) : 0;
+            const damageMod = this.parseSignedNumber(row.dmgmod, 0);
+            const damageBase = String(row.dmgbase || '').trim();
+            const damageFormula = damageBase ? (damageBase + (damageAbilityMod || damageMod ? this.normalizeSigned(damageAbilityMod + damageMod) : '')) : '';
+            const damage = damageFormula ? [{ formula: damageFormula, damageType: String(row.dmgtype || 'Damage').trim() || 'Damage' }] : [];
+            return {
+                id: rowId,
+                name,
+                sheetVersion: '2014',
+                attackType: 'Attack',
+                range: String(row.atkrange || '').trim(),
+                attackBonus,
+                attackBonusLabel: this.normalizeSigned(attackBonus),
+                attackBreakdown: this.normalizeSigned(attackBonus) + (breakdownParts.length ? (' (' + breakdownParts.join(' ') + ')') : ''),
+                damage,
+                rollCommand: '%{' + characterId + '|repeating_attack_' + rowId + '_attack}',
+                damageCommand: R20.buttonAbilityCommand(characterId, 'repeating_attack_' + rowId + '_attack_dmg')
+            };
+        },
+
+        async getLegacyAttacks(characterId) {
+            const attacks = [];
+            const rows = this.getLegacyAttackRows(characterId);
+            for (let i = 0; i < rows.length; i += 1) {
+                const attack = await this.buildLegacyAttack(characterId, rows[i]);
+                if (attack) attacks.push(attack);
+            }
+            return attacks.concat(this.getLegacyNpcAttackSummaries(characterId));
+        },
+
+        getBeaconStore(characterId) {
+            const roots = R20.getCharacterStoreDumpRoots(characterId);
+            return roots.length ? roots[0] : null;
+        },
+
+        beaconIntegrants(root) {
+            return root && root.integrants && root.integrants.integrants && typeof root.integrants.integrants === 'object'
+                ? root.integrants.integrants
+                : {};
+        },
+
+        beaconFlatFormulaValue(record) {
+            const formula = record && record.valueFormula;
+            if (formula && typeof formula === 'object' && formula.flatValue !== undefined) {
+                return this.parseSignedNumber(formula.flatValue, 0);
+            }
+            if (formula !== undefined && formula !== null && typeof formula !== 'object') {
+                return this.parseSignedNumber(formula, 0);
+            }
+            if (record && record.flatValue !== undefined) return this.parseSignedNumber(record.flatValue, 0);
+            return 0;
+        },
+
+        beaconAbilityContext(integrants) {
+            const groups = Object.create(null);
+            Object.keys(integrants || {}).forEach((key) => {
+                const record = integrants[key];
+                if (!record || record.type !== 'Ability Score' || record._enabled === false || record.parentDisabled === true) return;
+                const parentId = String(record.parentID || '').trim();
+                const parent = parentId ? integrants[parentId] : null;
+                if (parent && (parent._enabled === false || parent.parentDisabled === true)) return;
+                if (parent && parent.equipData && parent.equipData.equippable === true && parent.equipData.equipped !== true) return;
+                const ability = this.normalizeAbilityName(record.ability);
+                if (!ability) return;
+                groups[ability] = groups[ability] || [];
+                groups[ability].push({
+                    calculation: String(record.calculation || '').trim().toLowerCase(),
+                    value: this.beaconFlatFormulaValue(record),
+                    createdTime: Utils.toNumber(record.createdTime, 0)
+                });
+            });
+            const out = Object.create(null);
+            Object.keys(groups).forEach((ability) => {
+                const entries = groups[ability].slice().sort((a, b) => a.createdTime - b.createdTime);
+                let base = 10;
+                let hasBase = false;
+                let modifiers = 0;
+                const setValues = [];
+                entries.forEach((entry) => {
+                    if (/set\s*base|^set$/.test(entry.calculation)) {
+                        base = entry.value;
+                        hasBase = true;
+                    } else if (/set\s*value|override/.test(entry.calculation)) {
+                        setValues.push(entry.value);
+                    } else if (/modify|bonus|add/.test(entry.calculation)) {
+                        modifiers += entry.value;
+                    }
+                });
+                const calculated = (hasBase ? base : 10) + modifiers;
+                // Ability-score Set Value effects (for example a magic item that sets
+                // Strength to 21) are final score floors in the Beacon sheet. Choosing
+                // the highest active value matches D&D's "score becomes X" item behavior
+                // without needing slow Sheet API reads for ordinary Combat menus.
+                const score = setValues.length ? Math.max.apply(null, [calculated].concat(setValues)) : calculated;
+                out[ability] = {
+                    score,
+                    modifier: Math.floor((score - 10) / 2)
+                };
+            });
+            return out;
+        },
+
+        beaconCharacterLevel(integrants) {
+            const byClass = Object.create(null);
+            Object.keys(integrants || {}).forEach((key) => {
+                const record = integrants[key];
+                if (!record || record.type !== 'Class Level' || record._enabled === false || record.parentDisabled === true) return;
+                const classId = String(record.classID || record.sourceID || record.name || '').trim();
+                const level = Math.max(0, Utils.toInt(record.level, 0));
+                if (!classId || level <= 0) return;
+                byClass[classId] = Math.max(byClass[classId] || 0, level);
+            });
+            return Object.keys(byClass).reduce((sum, key) => sum + Math.max(0, Utils.toInt(byClass[key], 0)), 0);
+        },
+
+        parseChallengeRating(value) {
+            const text = String(value === undefined || value === null ? '' : value).trim();
+            if (!text) return null;
+            const fraction = text.match(/^(\d+)\s*\/\s*(\d+)$/);
+            if (fraction) {
+                const denominator = Utils.toNumber(fraction[2], 0);
+                return denominator ? Utils.toNumber(fraction[1], 0) / denominator : null;
+            }
+            const numeric = Number(text);
+            return Number.isFinite(numeric) ? numeric : null;
+        },
+
+        proficiencyBonusFromLevel(level) {
+            const safeLevel = Math.max(0, Utils.toInt(level, 0));
+            if (!safeLevel) return 0;
+            return Math.min(6, 2 + Math.floor((safeLevel - 1) / 4));
+        },
+
+        proficiencyBonusFromCr(cr) {
+            const value = Utils.toNumber(cr, -1);
+            if (value < 0) return 0;
+            if (value <= 4) return 2;
+            if (value <= 8) return 3;
+            if (value <= 12) return 4;
+            if (value <= 16) return 5;
+            if (value <= 20) return 6;
+            if (value <= 24) return 7;
+            if (value <= 28) return 8;
+            return 9;
+        },
+
+        beaconProficiencyBonus(root, integrants) {
+            const level = this.beaconCharacterLevel(integrants);
+            if (level > 0) return { value: this.proficiencyBonusFromLevel(level), source: 'level', level };
+            const cr = this.parseChallengeRating(root && root.npc && root.npc.challengeRating);
+            if (cr !== null) return { value: this.proficiencyBonusFromCr(cr), source: 'cr', cr };
+            return { value: 0, source: 'unknown' };
+        },
+
+        proficiencyMultiplier(value) {
+            const text = String(value || '').trim().toLowerCase();
+            if (!text || /not\s*proficient|untrained|none/.test(text)) return 0;
+            if (/expert|double/.test(text)) return 2;
+            if (/half/.test(text)) return 0.5;
+            if (/proficient/.test(text)) return 1;
+            return 0;
+        },
+
+        normalizeWeaponProficiencyName(value) {
+            return String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
+        },
+
+        beaconWeaponProficiencyMultiplier(record, parent, integrants) {
+            const explicit = String(record && record.attack && record.attack.proficiencyLevel || '').trim();
+            if (explicit) return this.proficiencyMultiplier(explicit);
+            const weaponType = this.normalizeWeaponProficiencyName(parent && parent.weaponData && parent.weaponData.type);
+            const training = this.normalizeWeaponProficiencyName(parent && parent.weaponData && parent.weaponData.training);
+            if (!weaponType && !training) return 0;
+            let best = 0;
+            Object.keys(integrants || {}).forEach((key) => {
+                const prof = integrants[key];
+                if (!prof || prof.type !== 'Proficiency' || prof._enabled === false || prof.parentDisabled === true) return;
+                if (!/weapon/i.test(String(prof.category || ''))) return;
+                const name = this.normalizeWeaponProficiencyName(prof.proficiency || prof.name);
+                if (!name) return;
+                const exactWeapon = weaponType && name === weaponType;
+                const allWeapons = /^(all )?weapons?$/.test(name);
+                const categoryMatch = training && (name === training || name === training + ' weapon' || name === training + ' weapons');
+                if (!exactWeapon && !allWeapons && !categoryMatch) return;
+                best = Math.max(best, this.proficiencyMultiplier(prof.proficiencyLevel || 'Proficient'));
+            });
+            return best;
+        },
+
+        beaconCombatContext(root) {
+            const integrants = this.beaconIntegrants(root);
+            const abilities = this.beaconAbilityContext(integrants);
+            const proficiency = this.beaconProficiencyBonus(root, integrants);
+            return { integrants, abilities, proficiency };
+        },
+
+        beaconDamageSummaries(record, context, attackAbility) {
+            const integrants = context && context.integrants || {};
+            const abilities = context && context.abilities || {};
+            const childIds = this.parseJsonList(record && record.childIDs);
+            return childIds.map((id) => integrants[id]).filter((entry) => entry && entry.type === 'Damage' && entry._enabled !== false)
+                .map((damage) => {
+                    const diceSize = String(damage.diceSize || '').trim();
+                    const diceCountRaw = damage._diceCount !== undefined ? damage._diceCount : damage.diceCount;
+                    const diceCount = diceSize ? Math.max(1, Utils.toInt(diceCountRaw, 1)) : 0;
+                    const abilitySetting = String(damage.ability || '').trim().toLowerCase();
+                    const damageAbility = abilitySetting === 'auto'
+                        ? attackAbility
+                        : (abilitySetting === 'none' ? '' : this.normalizeAbilityName(abilitySetting));
+                    const abilityMod = damageAbility && abilities[damageAbility] ? Utils.toInt(abilities[damageAbility].modifier, 0) : 0;
+                    const rawFlatBonus = damage._bonus !== undefined ? damage._bonus : damage.bonus;
+                    const flatBonus = this.parseSignedNumber(rawFlatBonus, 0);
+                    const hasFlatComponent = rawFlatBonus !== undefined && rawFlatBonus !== null && String(rawFlatBonus).trim() !== '';
+                    const hasAbilityComponent = !!damageAbility;
+                    const totalFlat = abilityMod + flatBonus;
+                    let formula = diceSize && diceCount ? (String(diceCount) + diceSize) : '';
+                    if (formula && totalFlat) formula += this.normalizeSigned(totalFlat);
+                    else if (!formula && (hasFlatComponent || hasAbilityComponent)) formula = String(totalFlat);
+                    return {
+                        formula: formula || '-',
+                        damageType: String(damage.damageType || 'Damage').trim() || 'Damage',
+                        ability: damageAbility,
+                        abilityLabel: this.abilityLabel(damageAbility),
+                        abilityModifier: abilityMod,
+                        flatBonus
+                    };
+                });
+        },
+
+        beaconSaveFormula(record) {
+            const source = record && typeof record === 'object' ? record : {};
+            const save = source.save && typeof source.save === 'object' ? source.save : {};
+            const candidates = [
+                save.saveFormula,
+                save.saveFlat,
+                save.formula,
+                source.saveFormula,
+                source.saveFlat
+            ];
+            for (let i = 0; i < candidates.length; i += 1) {
+                if (candidates[i] && typeof candidates[i] === 'object') return candidates[i];
+            }
+            return null;
+        },
+
+        beaconCalculatedSaveDc(record, context, saveInfo) {
+            const direct = Math.max(0, Utils.toInt(saveInfo && saveInfo.saveDc, 0));
+            const formula = this.beaconSaveFormula(record);
+            // Structured formulas are authoritative when present. This matters for
+            // records such as Oil, whose description contains the base text "DC 8"
+            // while the actual DC is 8 + ability modifier + proficiency bonus.
+            if (!formula) return direct;
+            let dc = this.parseSignedNumber(formula.flatValue, 0);
+            const abilitySpec = formula.ability && typeof formula.ability === 'object' ? formula.ability : null;
+            const ability = this.normalizeAbilityName(
+                abilitySpec && abilitySpec.ability || saveInfo && saveInfo.saveAbility || ''
+            );
+            if (abilitySpec && Utils.toBoolean(abilitySpec.add, false) && ability) {
+                const abilityData = context && context.abilities && context.abilities[ability];
+                dc += abilityData ? Utils.toInt(abilityData.modifier, 0) : 0;
+            }
+            const proficiencySpec = formula.proficiency && typeof formula.proficiency === 'object' ? formula.proficiency : null;
+            if (proficiencySpec && Utils.toBoolean(proficiencySpec.add, false)) {
+                dc += Math.max(0, Utils.toInt(context && context.proficiency && context.proficiency.value, 0));
+            }
+            return Math.max(0, dc);
+        },
+
+        beaconLinkedSpellcastingProfile(record, context) {
+            const source = record && typeof record === 'object' ? record : {};
+            const integrants = context && context.integrants || {};
+            const abilities = context && context.abilities || {};
+            let relations = source.relations;
+            if (typeof relations === 'string') {
+                try { relations = JSON.parse(relations); } catch (ignored) { relations = null; }
+            }
+            if (!relations || typeof relations !== 'object' || Array.isArray(relations)) return null;
+            const linkedId = Object.keys(relations).find((id) => {
+                const linked = integrants[id];
+                return linked && String(linked.type || '').trim().toLowerCase() === 'spellcasting' && linked._enabled !== false && linked.parentDisabled !== true;
+            });
+            if (!linkedId) return null;
+            const linked = integrants[linkedId];
+            const ability = this.normalizeAbilityName(linked.ability || linked.spellcastingAbility || '');
+            if (!ability) return null;
+            const abilityData = abilities[ability] || null;
+            const abilityModifier = abilityData ? Utils.toInt(abilityData.modifier, 0) : 0;
+            const proficiencyBonus = Math.max(0, Utils.toInt(context && context.proficiency && context.proficiency.value, 0));
+            return {
+                integrantKey: linkedId,
+                ability,
+                abilityLabel: this.abilityLabel(ability),
+                abilityModifier,
+                proficiencyBonus,
+                spellAttackBonus: abilityModifier + proficiencyBonus,
+                spellSaveDc: 8 + abilityModifier + proficiencyBonus
+            };
+        },
+
+        buildBeaconAttackSummary(characterId, record, context) {
+            const integrants = context && context.integrants || {};
+            const abilities = context && context.abilities || {};
+            const parentKey = String(record && (record.parentID || record.sourceID) || '').trim();
+            const parent = parentKey ? (integrants[parentKey] || null) : null;
+            const relatedSaveRecords = this.parseJsonList(record && record.childIDs).map((id) => integrants[id]).filter(Boolean);
+            const saveInfo = this.structuredSaveInfo(record, relatedSaveRecords);
+            const attackType = String(record && record.attack && record.attack.type || 'Attack').trim();
+            const isSaveAttack = /save/i.test(attackType) && !!saveInfo.saveAbility;
+            const linkedSpellcasting = this.beaconLinkedSpellcastingProfile(record, context);
+            // For a save attack linked to Spellcasting, the save ability belongs to
+            // the target. Use the linked spellcasting ability/DC for the source instead.
+            const ability = this.beaconAttackAbility(record) || (linkedSpellcasting ? linkedSpellcasting.ability : saveInfo.saveAbility);
+            const abilityMod = ability && abilities[ability] ? Utils.toInt(abilities[ability].modifier, 0) : 0;
+            const proficiencyBase = Math.max(0, Utils.toInt(context && context.proficiency && context.proficiency.value, 0));
+            const proficiencyMultiplier = linkedSpellcasting ? 1 : this.beaconWeaponProficiencyMultiplier(record, parent, integrants);
+            const proficiencyBonus = linkedSpellcasting ? linkedSpellcasting.proficiencyBonus : Math.floor(proficiencyBase * proficiencyMultiplier);
+            const extraBonus = this.parseSignedNumber(record && record.attack && record.attack.bonus, 0);
+            const attackBonus = abilityMod + proficiencyBonus + extraBonus;
+            const parts = [];
+            if (ability) parts.push(this.normalizeSigned(abilityMod) + ' ' + this.abilityLabel(ability));
+            if (proficiencyBonus) parts.push(this.normalizeSigned(proficiencyBonus) + ' PB');
+            if (extraBonus) parts.push(this.normalizeSigned(extraBonus) + ' Bonus');
+            const shortID = String(record && record.shortID || '').trim();
+            const range = this.beaconAttackRangeRaw(record, parent);
+            let saveDc = this.beaconCalculatedSaveDc(record, context, saveInfo);
+            if (!saveDc && isSaveAttack && linkedSpellcasting) saveDc = linkedSpellcasting.spellSaveDc;
+            return {
+                id: shortID,
+                name: String(record && (record.name || record.recordName) || 'Attack').trim() || 'Attack',
+                sheetVersion: '2024',
+                ability,
+                abilityLabel: this.abilityLabel(ability),
+                abilityModifier: abilityMod,
+                proficiencyBonus,
+                proficiencyMultiplier,
+                extraBonus,
+                attackType,
+                attackTypeLabel: this.attackTypeLabel(record && record.attack && record.attack.type, range),
+                range,
+                rangeLabel: this.combatRangeLabel(range),
+                description: this.attackDescription(record, parent),
+                saveDc,
+                saveAbility: saveInfo.saveAbility,
+                attackBonus,
+                attackBonusLabel: this.normalizeSigned(attackBonus),
+                attackBreakdown: this.normalizeSigned(attackBonus) + (parts.length ? (' (' + parts.join(' ') + ')') : ''),
+                damage: this.beaconDamageSummaries(record, context, ability),
+                rollCommand: shortID ? R20.buttonAbilityCommand(characterId, 'repeating_attack_' + shortID + '_attack') : '',
+                damageCommand: shortID ? R20.buttonAbilityCommand(characterId, 'repeating_attack_' + shortID + '_attack_dmg') : ''
+            };
+        },
+
+        getBeaconAttackSummariesFromRoot(characterId, root) {
+            const context = this.beaconCombatContext(root);
+            const records = Object.keys(context.integrants)
+                .map((key) => context.integrants[key])
+                .filter((record) => this.beaconAttackIsUsable(record, context.integrants));
+            const seen = Object.create(null);
+            return records.map((record) => this.buildBeaconAttackSummary(characterId, record, context)).filter((attack) => {
+                const key = String(attack.name || '').toLowerCase() + '|' + String(attack.id || '');
+                if (seen[key]) return false;
+                seen[key] = true;
+                return true;
+            });
+        },
+
+        beaconAttackIsUsable(record, integrants) {
+            if (!record || record.type !== 'Attack' || record._enabled === false || !record.shortID) return false;
+            const attackType = String(record.attack && record.attack.type || '').trim();
+            const hasStructuredSave = !!(record.save || record.savingThrow || record.saving_throw || record.saveData || record.savingThrowData);
+            if (!attackType && !hasStructuredSave) return false;
+            // Spell attacks belong in the Spells menu, but non-spell save attacks
+            // (Oil, special item attacks, etc.) are valid Combat actions.
+            if (/spell/i.test(attackType)) return false;
+            if (String(record.source || '').toLowerCase() === 'item') {
+                const parent = integrants && integrants[String(record.parentID || record.sourceID || '')];
+                if (!parent) return false;
+                if (parent.equipData && parent.equipData.equippable === true && parent.equipData.equipped !== true) return false;
+            }
+            return true;
+        },
+
+        async readBeaconAttackBonus(characterId, record, abilityMod, pb, extraBonus) {
+            const shortID = String(record && record.shortID || '').trim();
+            if (shortID && typeof getSheetItem === 'function') {
+                const candidates = [
+                    'repeating_attack_' + shortID + '_atkbonus',
+                    'repeating_attack("' + shortID + '", "atkbonus")'
+                ];
+                for (let i = 0; i < candidates.length; i += 1) {
+                    try {
+                        const value = await getSheetItem(characterId, candidates[i], 'current');
+                        const parsed = this.parseSignedNumber(value, null);
+                        if (parsed !== null) return parsed;
+                    } catch (ignored) {}
+                }
+            }
+            return abilityMod + pb + extraBonus;
+        },
+
+        async beaconDamageEntries(characterId, record, integrants, attackAbility, parent) {
+            const childIds = this.parseJsonList(record && record.childIDs);
+            const damageRecords = childIds.map((id) => integrants && integrants[id]).filter((entry) => entry && entry.type === 'Damage' && entry._enabled !== false);
+            const out = [];
+            for (let i = 0; i < damageRecords.length; i += 1) {
+                const damage = damageRecords[i];
+                const diceSize = String(damage.diceSize || '').trim();
+                const diceCountRaw = damage._diceCount !== undefined ? damage._diceCount : damage.diceCount;
+                const diceCount = diceSize ? Math.max(1, Utils.toInt(diceCountRaw, 1)) : 0;
+                const abilitySetting = String(damage.ability || '').trim().toLowerCase();
+                const damageAbility = abilitySetting === 'auto'
+                    ? attackAbility
+                    : (abilitySetting === 'none' ? '' : this.normalizeAbilityName(abilitySetting));
+                const abilityMod = damageAbility ? await this.readAbilityMod(characterId, damageAbility) : 0;
+                let flatBonus = this.parseSignedNumber(damage.bonus, 0);
+                const attackMagicBonus = this.parseSignedNumber(record && record.attack && record.attack.bonus, 0);
+                const parentDescription = String(parent && parent.description || '');
+                if (attackMagicBonus && /bonus\s+to\s+attack\s+rolls?\s+and\s+damage\s+rolls?/i.test(parentDescription)) flatBonus += attackMagicBonus;
+                const totalFlat = abilityMod + flatBonus;
+                let formula = diceSize && diceCount ? (String(diceCount) + diceSize) : '';
+                if (totalFlat) formula += this.normalizeSigned(totalFlat);
+                if (!formula && totalFlat) formula = String(totalFlat);
+                out.push({
+                    formula: formula || '-',
+                    damageType: String(damage.damageType || 'Damage').trim() || 'Damage'
+                });
+            }
+            return out;
+        },
+
+        async buildBeaconAttack(characterId, record, integrants) {
+            const attackAbility = this.normalizeAbilityName(record && record.attack && record.attack.abilityBonus) || (/ranged/i.test(String(record && record.attack && record.attack.type || '')) ? 'dexterity' : 'strength');
+            const abilityMod = await this.readAbilityMod(characterId, attackAbility);
+            const proficiencyLevel = String(record && record.attack && record.attack.proficiencyLevel || '').trim().toLowerCase();
+            const explicitlyNotProficient = /not\s*proficient|untrained|none/.test(proficiencyLevel);
+            const pb = explicitlyNotProficient ? 0 : await this.readSheetNumber(characterId, 'pb', 0);
+            const extraBonus = this.parseSignedNumber(record && record.attack && record.attack.bonus, 0);
+            const attackBonus = await this.readBeaconAttackBonus(characterId, record, abilityMod, pb, extraBonus);
+            const parts = [this.normalizeSigned(abilityMod) + ' ' + this.abilityLabel(attackAbility)];
+            if (!explicitlyNotProficient && pb) parts.push(this.normalizeSigned(pb) + ' PB');
+            if (extraBonus) parts.push(this.normalizeSigned(extraBonus) + ' Bonus');
+            const parent = integrants && integrants[String(record.parentID || record.sourceID || '')] || null;
+            const damage = await this.beaconDamageEntries(characterId, record, integrants, attackAbility, parent);
+            const shortID = String(record.shortID || '').trim();
+            return {
+                id: shortID,
+                name: String(record.name || record.recordName || 'Attack').trim() || 'Attack',
+                sheetVersion: '2024',
+                attackType: String(record.attack && record.attack.type || 'Attack').trim(),
+                range: String(record.range || '').trim(),
+                attackBonus,
+                attackBonusLabel: this.normalizeSigned(attackBonus),
+                attackBreakdown: this.normalizeSigned(attackBonus) + ' (' + parts.join(' ') + ')',
+                damage,
+                rollCommand: '%{' + characterId + '|repeating_attack_' + shortID + '_attack}'
+            };
+        },
+
+        async getBeaconAttacks(characterId) {
+            const root = this.getBeaconStore(characterId);
+            const integrants = root && root.integrants && root.integrants.integrants && typeof root.integrants.integrants === 'object'
+                ? root.integrants.integrants
+                : {};
+            const records = Object.keys(integrants).map((key) => integrants[key]).filter((record) => this.beaconAttackIsUsable(record, integrants));
+            const attacks = [];
+            for (let i = 0; i < records.length; i += 1) {
+                attacks.push(await this.buildBeaconAttack(characterId, records[i], integrants));
+            }
+            const seen = Object.create(null);
+            return attacks.filter((attack) => {
+                const key = String(attack.name || '').toLowerCase() + '|' + String(attack.id || '');
+                if (seen[key]) return false;
+                seen[key] = true;
+                return true;
+            });
+        },
+
+        legacyAttackTypeLabel(row) {
+            const range = String(row && row.atkrange || '').trim().toLowerCase();
+            if (!range) return 'Melee Attack';
+            if (/\b(?:melee|reach|touch)\b/i.test(range)) return 'Melee Attack';
+            if (/\d+(?:\.\d+)?\s*\/\s*\d+(?:\.\d+)?/.test(range)) return 'Ranged Attack';
+            if (/\b(?:arrow|bolt|ranged|thrown)\b/i.test(range)) return 'Ranged Attack';
+            const distance = range.match(/(\d+(?:\.\d+)?)\s*(?:ft|feet|foot)\b/i);
+            if (distance) {
+                const feet = Utils.toNumber(distance[1], 0);
+                if (feet <= 10) return 'Melee Attack';
+                if (feet > 10) return 'Ranged Attack';
+            }
+            return 'Attack';
+        },
+
+        beaconAttackAbility(record) {
+            const explicit = this.normalizeAbilityName(record && record.attack && record.attack.abilityBonus);
+            if (explicit) return explicit;
+            const recordName = String(record && record.recordName || '');
+            const named = recordName.match(/\b(STR|DEX|CON|INT|WIS|CHA)\b/i);
+            if (named) return this.normalizeAbilityName(named[1]);
+            const type = String(record && record.attack && record.attack.type || '');
+            if (/ranged/i.test(type)) return 'dexterity';
+            if (/melee/i.test(type)) return 'strength';
+            return '';
+        },
+
+        combatRangeLabel(value) {
+            const raw = String(value || '').trim();
+            if (!raw) return '';
+            const slash = raw.match(/(\d+(?:\.\d+)?)\s*\/\s*(\d+(?:\.\d+)?)/);
+            if (slash) return slash[1] + '/' + slash[2];
+            const distance = raw.match(/(\d+(?:\.\d+)?)\s*(?:ft\.?|feet|foot)\b/i);
+            if (distance) return distance[1];
+            return raw.replace(/;[\s\S]*$/, '').replace(/\b(?:ft\.?|feet|foot)\b/gi, '').replace(/\s+/g, ' ').trim();
+        },
+
+        beaconAttackRangeRaw(record, parent) {
+            const direct = String(record && (record.range || record._reachText) || '').trim();
+            if (direct) return direct;
+            const parentRange = String(parent && (parent.range || (parent.weaponData && parent.weaponData.range)) || '').trim();
+            if (parentRange) return parentRange;
+            const propertyText = Array.isArray(parent && parent.properties)
+                ? parent.properties.join(' | ')
+                : String(parent && parent.properties || '');
+            const propertyMatch = propertyText.match(/\bRange\s+(\d+(?:\.\d+)?\s*\/\s*\d+(?:\.\d+)?)/i);
+            if (propertyMatch) return propertyMatch[1];
+            const description = String(parent && parent.description || '');
+            const descriptionMatch = description.match(/\bRange\s+(\d+(?:\.\d+)?\s*\/\s*\d+(?:\.\d+)?)/i);
+            return descriptionMatch ? descriptionMatch[1] : '';
+        },
+
+        attackDescription(record, parent) {
+            return String(record && record.description || parent && parent.description || '').trim();
+        },
+
+        attackTypeLabel(value, fallbackRange) {
+            const type = String(value || '').trim();
+            if (/melee/i.test(type)) return 'Melee Attack';
+            if (/ranged/i.test(type)) return 'Ranged Attack';
+            const range = String(fallbackRange || '').trim();
+            if (/save/i.test(type)) {
+                const inferred = range ? this.legacyAttackTypeLabel({ atkrange: range }) : '';
+                return /^Ranged Attack$/i.test(inferred) ? 'Ranged Save' : 'Save Attack';
+            }
+            if (range) return this.legacyAttackTypeLabel({ atkrange: range });
+            return 'Attack';
+        },
+
+        flattenDiagnosticValue(value, prefix, out, depth) {
+            const target = Array.isArray(out) ? out : [];
+            const path = String(prefix || '').trim();
+            const level = Math.max(0, Utils.toInt(depth, 0));
+            if (level > 7) {
+                target.push({ key: path || '(value)', value: '[max depth reached]' });
+                return target;
+            }
+            if (value === null || value === undefined || typeof value !== 'object') {
+                target.push({ key: path || '(value)', value });
+                return target;
+            }
+            if (Array.isArray(value)) {
+                if (!value.length) {
+                    target.push({ key: path || '(value)', value: '[]' });
+                    return target;
+                }
+                value.forEach((entry, index) => this.flattenDiagnosticValue(entry, (path ? path + '.' : '') + '[' + String(index) + ']', target, level + 1));
+                return target;
+            }
+            const keys = Object.keys(value).sort();
+            if (!keys.length) {
+                target.push({ key: path || '(value)', value: '{}' });
+                return target;
+            }
+            keys.forEach((key) => this.flattenDiagnosticValue(value[key], path ? (path + '.' + key) : key, target, level + 1));
+            return target;
+        },
+
+        getStoreDiagnosticSnapshot(characterId) {
+            const safeCharacterId = String(characterId || '').trim();
+            const started = Date.now();
+            const attrs = safeCharacterId ? (findObjs({ _type: 'attribute', _characterid: safeCharacterId }) || []) : [];
+            const storeAttr = attrs.find((attr) => attr && Utils.isFunction(attr.get) && String(attr.get('name') || '').trim().toLowerCase() === 'store');
+            if (!storeAttr) return { root: null, attrs, storeChars: undefined, readMs: Date.now() - started };
+            const current = storeAttr.get('current');
+            if (current && typeof current === 'object') {
+                return { root: current, attrs, storeChars: undefined, readMs: Date.now() - started };
+            }
+            const raw = String(current || '').trim();
+            if (!raw) return { root: null, attrs, storeChars: undefined, readMs: Date.now() - started };
+            try {
+                return { root: JSON.parse(raw), attrs, storeChars: raw.length, readMs: Date.now() - started };
+            } catch (error) {
+                Logger.debug('[actions:diagnostic-store]', error && error.message ? error.message : String(error));
+                return { root: null, attrs, storeChars: raw.length, readMs: Date.now() - started };
+            }
+        },
+
+        getLegacyAttackDiagnostics(characterId, attrs, readMs) {
+            const started = Date.now();
+            const sourceAttrs = Array.isArray(attrs) ? attrs : (findObjs({ _type: 'attribute', _characterid: String(characterId || '').trim() }) || []);
+            const pcAttacks = this.getLegacyAttackRows(characterId, sourceAttrs).filter((row) => {
+                const name = String(row && row.atkname || '').trim();
+                if (!name) return false;
+                if (String(row.spelllevel || '').trim() || String(row.spell_innate || '').trim()) return false;
+                if (String(row.atkflag || '').trim() && String(row.atkflag).indexOf('attack=1') < 0) return false;
+                return true;
+            }).map((row) => {
+                const derived = {
+                    rowId: String(row.rowId || ''),
+                    source: 'repeating_attack',
+                    abilityFromAtkattrBase: this.legacyAttrAbility(row.atkattr_base),
+                    abilityLabel: this.abilityLabel(this.legacyAttrAbility(row.atkattr_base)),
+                    attackTypeInferred: this.legacyAttackTypeLabel(row),
+                    rangeRaw: String(row.atkrange || ''),
+                    rangeLabel: this.combatRangeLabel(row.atkrange),
+                    description: String(row.atk_desc || '')
+                };
+                const fields = [];
+                this.flattenDiagnosticValue(derived, 'derived', fields, 0);
+                this.flattenDiagnosticValue(row, 'row', fields, 0);
+                return {
+                    name: String(row.atkname || '').trim(),
+                    sheetVersion: '2014',
+                    fields
+                };
+            });
+            const npcAttacks = this.getLegacyNpcActionRows(characterId, sourceAttrs)
+                .filter((row) => this.legacyNpcActionIsAttack(row))
+                .map((row) => {
+                    const derived = {
+                        rowId: String(row.rowId || ''),
+                        source: 'repeating_npcaction',
+                        attackTypeRaw: String(row.attack_type || ''),
+                        attackTypeLabel: this.attackTypeLabel(row.attack_type, row.attack_range),
+                        rangeRaw: String(row.attack_range || ''),
+                        rangeLabel: this.combatRangeLabel(row.attack_range),
+                        description: String(row.description || ''),
+                        attackBonusFinal: this.parseSignedNumber(row.attack_tohit, 0),
+                        damageCount: this.legacyNpcDamageSummaries(row).length
+                    };
+                    const fields = [];
+                    this.flattenDiagnosticValue(derived, 'derived', fields, 0);
+                    this.flattenDiagnosticValue(row, 'row', fields, 0);
+                    return {
+                        name: String(row.name || '').trim(),
+                        sheetVersion: '2014 NPC',
+                        fields
+                    };
+                });
+            return {
+                sheetVersion: npcAttacks.length && !pcAttacks.length ? '2014 NPC' : '2014',
+                attacks: pcAttacks.concat(npcAttacks),
+                readMs: Math.max(0, Utils.toInt(readMs, 0)),
+                collectMs: Date.now() - started
+            };
+        },
+
+        getBeaconAttackDiagnostics(characterId, root, storeChars, readMs, liveDiagnostics) {
+            const started = Date.now();
+            const integrants = root && root.integrants && root.integrants.integrants && typeof root.integrants.integrants === 'object'
+                ? root.integrants.integrants
+                : {};
+            const attacks = Object.keys(integrants).map((integrantKey) => ({ integrantKey, record: integrants[integrantKey] }))
+                .filter((entry) => this.beaconAttackIsUsable(entry.record, integrants))
+                .map((entry) => {
+                    const record = entry.record;
+                    const parentKey = String(record.parentID || record.sourceID || '').trim();
+                    const parent = parentKey ? (integrants[parentKey] || null) : null;
+                    const childIds = this.parseJsonList(record.childIDs);
+                    const children = childIds.map((id) => integrants[id]).filter(Boolean);
+                    const rangeRaw = this.beaconAttackRangeRaw(record, parent);
+                    const attackAbility = this.beaconAttackAbility(record);
+                    const liveAbility = liveDiagnostics && liveDiagnostics.abilities ? liveDiagnostics.abilities[attackAbility] : null;
+                    const derived = {
+                        integrantKey: entry.integrantKey,
+                        shortID: String(record.shortID || ''),
+                        abilityRaw: record && record.attack ? record.attack.abilityBonus : undefined,
+                        abilityNormalized: attackAbility,
+                        abilityLabel: this.abilityLabel(attackAbility),
+                        effectiveAbilityReadComparison: liveAbility || '(not collected)',
+                        proficiencyReadComparison: liveDiagnostics && liveDiagnostics.proficiency ? liveDiagnostics.proficiency : '(not collected)',
+                        attackTypeRaw: record && record.attack ? record.attack.type : undefined,
+                        attackTypeLabel: this.attackTypeLabel(record && record.attack && record.attack.type, rangeRaw),
+                        rangeRaw,
+                        rangeLabel: this.combatRangeLabel(rangeRaw),
+                        description: this.attackDescription(record, parent),
+                        parentKey,
+                        childCount: children.length
+                    };
+                    const fields = [];
+                    this.flattenDiagnosticValue(derived, 'derived', fields, 0);
+                    this.flattenDiagnosticValue(record, 'record', fields, 0);
+                    if (parent) this.flattenDiagnosticValue(parent, 'parent', fields, 0);
+                    children.forEach((child, index) => this.flattenDiagnosticValue(child, 'child[' + String(index) + ']', fields, 0));
+                    return {
+                        name: String(record.name || record.recordName || 'Attack').trim() || 'Attack',
+                        sheetVersion: '2024',
+                        fields
+                    };
+                });
+            return {
+                sheetVersion: '2024',
+                attacks,
+                storeChars: storeChars === undefined || storeChars === null ? undefined : Math.max(0, Utils.toInt(storeChars, 0)),
+                readMs: Math.max(0, Utils.toInt(readMs, 0)),
+                collectMs: Date.now() - started,
+                liveReadMs: liveDiagnostics ? Math.max(0, Utils.toInt(liveDiagnostics.readMs, 0)) : 0,
+                sheetApiReads: liveDiagnostics ? Math.max(0, Utils.toInt(liveDiagnostics.sheetApiReads, 0)) : 0
+            };
+        },
+
+
+        getAttackDiagnostics(characterId) {
+            const snapshot = this.getStoreDiagnosticSnapshot(characterId);
+            const root = snapshot.root;
+            const isBeacon = !!(root && typeof root === 'object' && (root.integrants || root.settings || root.hitpoints));
+            return isBeacon
+                ? this.getBeaconAttackDiagnostics(characterId, root, snapshot.storeChars, snapshot.readMs)
+                : this.getLegacyAttackDiagnostics(characterId, snapshot.attrs, snapshot.readMs);
+        },
+
+        legacyAttributeMap(attrs) {
+            const map = Object.create(null);
+            (Array.isArray(attrs) ? attrs : []).forEach((attr) => {
+                if (!attr || !Utils.isFunction(attr.get)) return;
+                const name = String(attr.get('name') || '').trim().toLowerCase();
+                if (name) map[name] = attr.get('current');
+            });
+            return map;
+        },
+
+        legacyDamageSummaries(row, attrMap, attackAbility) {
+            const out = [];
+            const build = (prefix) => {
+                const base = String(row && row[prefix + 'base'] || '').trim();
+                const damageType = String(row && row[prefix + 'type'] || '').trim();
+                if (!base && !damageType) return;
+                const ability = this.legacyAttrAbility(row && row[prefix + 'attr']) || attackAbility;
+                const abilityMod = ability ? this.parseSignedNumber(attrMap[ability + '_mod'], 0) : 0;
+                const flatBonus = this.parseSignedNumber(row && row[prefix + 'mod'], 0);
+                const totalFlat = abilityMod + flatBonus;
+                let formula = base;
+                if (formula && totalFlat) formula += this.normalizeSigned(totalFlat);
+                else if (!formula && totalFlat) formula = String(totalFlat);
+                out.push({
+                    formula: formula || '-',
+                    damageType: damageType || 'Damage',
+                    ability,
+                    abilityLabel: this.abilityLabel(ability),
+                    abilityModifier: abilityMod,
+                    flatBonus
+                });
+            };
+            build('dmg');
+            build('dmg2');
+            return out;
+        },
+
+        getLegacyAttackSummaries(characterId, sourceAttrs) {
+            const attrs = Array.isArray(sourceAttrs)
+                ? sourceAttrs
+                : (findObjs({ _type: 'attribute', _characterid: String(characterId || '').trim() }) || []);
+            const attrMap = this.legacyAttributeMap(attrs);
+            const rows = this.getLegacyAttackRows(characterId, attrs).filter((row) => {
+                const name = String(row && row.atkname || '').trim();
+                if (!name) return false;
+                if (String(row.spelllevel || '').trim() || String(row.spell_innate || '').trim()) return false;
+                if (String(row.atkflag || '').trim() && String(row.atkflag).indexOf('attack=1') < 0) return false;
+                return true;
+            });
+            const pcAttacks = rows.map((row) => {
+                const ability = this.legacyAttrAbility(row.atkattr_base);
+                const abilityMod = ability ? this.parseSignedNumber(attrMap[ability + '_mod'], 0) : 0;
+                const profEnabled = /pb/i.test(String(row.atkprofflag || ''));
+                const pb = profEnabled ? this.parseSignedNumber(attrMap.pb, 0) : 0;
+                const extraBonus = this.parseSignedNumber(row.atkmod, 0) + this.parseSignedNumber(row.atkmagic, 0);
+                const computed = abilityMod + pb + extraBonus;
+                const fromSheet = this.parseSignedNumber(row.atkbonus, null);
+                const attackBonus = fromSheet !== null ? fromSheet : computed;
+                const parts = [];
+                if (ability) parts.push(this.normalizeSigned(abilityMod) + ' ' + this.abilityLabel(ability));
+                if (pb) parts.push(this.normalizeSigned(pb) + ' PB');
+                if (extraBonus) parts.push(this.normalizeSigned(extraBonus) + ' Bonus');
+                const rowId = String(row.rowId || '').trim();
+                return {
+                    id: rowId,
+                    name: String(row.atkname || '').trim(),
+                    sheetVersion: '2014',
+                    ability,
+                    abilityLabel: this.abilityLabel(ability),
+                    abilityModifier: abilityMod,
+                    proficiencyBonus: pb,
+                    extraBonus,
+                    attackTypeLabel: this.legacyAttackTypeLabel(row),
+                    range: String(row.atkrange || '').trim(),
+                    rangeLabel: this.combatRangeLabel(row.atkrange),
+                    description: String(row.atk_desc || '').trim(),
+                    saveDc: this.legacyRowSaveInfo(row).saveDc,
+                    saveAbility: this.legacyRowSaveInfo(row).saveAbility,
+                    attackBonus,
+                    attackBonusLabel: this.normalizeSigned(attackBonus),
+                    attackBreakdown: this.normalizeSigned(attackBonus) + (parts.length ? (' (' + parts.join(' ') + ')') : ''),
+                    damage: this.legacyDamageSummaries(row, attrMap, ability),
+                    rollCommand: rowId ? R20.buttonAbilityCommand(characterId, 'repeating_attack_' + rowId + '_attack') : '',
+                    damageCommand: rowId ? R20.buttonAbilityCommand(characterId, 'repeating_attack_' + rowId + '_attack_dmg') : ''
+                };
+            });
+            return pcAttacks.concat(this.getLegacyNpcAttackSummaries(characterId, attrs));
+        },
+
+        getBeaconAttackSummaries(characterId) {
+            const root = this.getBeaconStore(characterId);
+            return root ? this.getBeaconAttackSummariesFromRoot(characterId, root) : [];
+        },
+
+        async getAttackSummaries(characterId) {
+            const version = R20.detectSheetVersion(characterId);
+            return version === '2024'
+                ? this.getBeaconAttackSummaries(characterId)
+                : this.getLegacyAttackSummaries(characterId);
+        },
+
+        getLegacyAttackNames(characterId) {
+            const pcNames = this.getLegacyAttackRows(characterId)
+                .filter((row) => {
+                    const name = String(row && row.atkname || '').trim();
+                    if (!name) return false;
+                    if (String(row.spelllevel || '').trim() || String(row.spell_innate || '').trim()) return false;
+                    if (String(row.atkflag || '').trim() && String(row.atkflag).indexOf('attack=1') < 0) return false;
+                    return true;
+                })
+                .map((row) => ({ name: String(row.atkname || '').trim() }));
+            const npcNames = this.getLegacyNpcActionRows(characterId)
+                .filter((row) => this.legacyNpcActionIsAttack(row))
+                .map((row) => ({ name: String(row.name || '').trim() }));
+            return pcNames.concat(npcNames);
+        },
+
+        getBeaconAttackNames(characterId) {
+            const root = this.getBeaconStore(characterId);
+            const integrants = root && root.integrants && root.integrants.integrants && typeof root.integrants.integrants === 'object'
+                ? root.integrants.integrants
+                : {};
+            return Object.keys(integrants)
+                .map((key) => integrants[key])
+                .filter((record) => this.beaconAttackIsUsable(record, integrants))
+                .map((record) => ({ name: String(record.name || record.recordName || 'Attack').trim() || 'Attack' }));
+        },
+
+        getAttackNames(characterId) {
+            const version = R20.detectSheetVersion(characterId);
+            return version === '2024' ? this.getBeaconAttackNames(characterId) : this.getLegacyAttackNames(characterId);
+        },
+
+        async getAttacks(characterId) {
+            const version = R20.detectSheetVersion(characterId);
+            return version === '2024' ? this.getBeaconAttacks(characterId) : this.getLegacyAttacks(characterId);
+        },
+
+        getLegacySpellRows(characterId, sourceAttrs) {
+            const safeCharacterId = String(characterId || '').trim();
+            const attrs = Array.isArray(sourceAttrs)
+                ? sourceAttrs
+                : (findObjs({ _type: 'attribute', _characterid: safeCharacterId }) || []);
+            const rows = Object.create(null);
+            attrs.forEach((attr) => {
+                if (!attr || !Utils.isFunction(attr.get)) return;
+                const name = String(attr.get('name') || '');
+                const match = name.match(/^repeating_spell-([^_]+)_([^_]+)_(.+)$/i);
+                if (!match) return;
+                const sectionLevel = String(match[1] || '').trim();
+                const rowId = String(match[2] || '').trim();
+                const field = String(match[3] || '').trim().toLowerCase();
+                const key = sectionLevel + '|' + rowId;
+                rows[key] = rows[key] || { sectionLevel, rowId };
+                rows[key][field] = attr.get('current');
+            });
+            return Object.keys(rows).map((key) => rows[key]);
+        },
+
+        legacySpellDisplayName(row) {
+            const source = row || {};
+            return String(source.spellname || source.name || source.spell_name || source.atkname || '').trim() || ('Spell ' + String(source.rowId || ''));
+        },
+
+        legacySpellGlobalDiagnostic(attrs) {
+            const fields = [];
+            (Array.isArray(attrs) ? attrs : []).forEach((attr) => {
+                if (!attr || !Utils.isFunction(attr.get)) return;
+                const name = String(attr.get('name') || '').trim();
+                if (!name || /^repeating_/i.test(name) || /^store$/i.test(name)) return;
+                if (!/(spell|casting|^pb$|proficiency)/i.test(name)) return;
+                fields.push({ key: 'attribute.' + name + '.current', value: attr.get('current') });
+                const max = attr.get('max');
+                if (max !== undefined && max !== null && String(max).trim() !== '') fields.push({ key: 'attribute.' + name + '.max', value: max });
+            });
+            fields.sort((a, b) => String(a.key).localeCompare(String(b.key)));
+            return fields;
+        },
+
+        getLegacySpellDiagnostics(characterId, attrs, readMs) {
+            const started = Date.now();
+            const sourceAttrs = Array.isArray(attrs) ? attrs : (findObjs({ _type: 'attribute', _characterid: String(characterId || '').trim() }) || []);
+            const attrMap = this.legacyAttributeMap(sourceAttrs);
+            const globalSpellSaveDc = Math.max(0, Utils.toInt(attrMap.spell_save_dc, 0));
+            const globalSpellAttackBonus = this.parseSignedNumber(attrMap.spell_attack_bonus, 0);
+            const spellcastingAbilityRaw = String(attrMap.spellcasting_ability || '').trim();
+            const spells = this.getLegacySpellRows(characterId, sourceAttrs).map((row) => {
+                const saveInfo = this.legacyRowSaveInfo(row);
+                const derived = {
+                    source: 'repeating_spell-' + String(row.sectionLevel || ''),
+                    sectionLevel: String(row.sectionLevel || ''),
+                    rowId: String(row.rowId || ''),
+                    spellAttack: String(row.spellattack || ''),
+                    saveDc: saveInfo.saveDc || globalSpellSaveDc,
+                    saveDcRow: saveInfo.saveDc,
+                    saveDcGlobal: globalSpellSaveDc,
+                    saveAbility: saveInfo.saveAbility,
+                    globalSpellAttackBonus,
+                    spellcastingAbilityRaw,
+                    rangeRaw: String(row.spellrange || row.range || ''),
+                    damage1: String(row.spelldamage || ''),
+                    damageType1: String(row.spelldamagetype || ''),
+                    damage2: String(row.spelldamage2 || ''),
+                    damageType2: String(row.spelldamagetype2 || ''),
+                    description: String(row.spelldescription || row.spelldesc || row.description || '')
+                };
+                const fields = [];
+                this.flattenDiagnosticValue(derived, 'derived', fields, 0);
+                this.flattenDiagnosticValue(row, 'row', fields, 0);
+                return {
+                    name: this.legacySpellDisplayName(row),
+                    sheetVersion: '2014',
+                    fields
+                };
+            });
+            const spellAttackDiagnostics = this.getLegacyAttackRows(characterId, sourceAttrs)
+                .filter((row) => {
+                    if (String(row.spelllevel || '').trim() || String(row.spell_innate || '').trim()) return true;
+                    return Object.keys(row || {}).some((key) => /^spell/.test(String(key || '').toLowerCase()));
+                })
+                .map((row) => {
+                    const saveInfo = this.legacyRowSaveInfo(row);
+                    const derived = {
+                        source: 'repeating_attack (spell-linked)',
+                        rowId: String(row.rowId || ''),
+                        spellLevel: String(row.spelllevel || ''),
+                        spellInnate: String(row.spell_innate || ''),
+                        saveDc: saveInfo.saveDc,
+                        saveAbility: saveInfo.saveAbility,
+                        attackAbility: this.legacyAttrAbility(row.atkattr_base),
+                        rangeRaw: String(row.atkrange || '')
+                    };
+                    const fields = [];
+                    this.flattenDiagnosticValue(derived, 'derived', fields, 0);
+                    this.flattenDiagnosticValue(row, 'row', fields, 0);
+                    return {
+                        name: String(row.atkname || 'Spell Attack').trim() || 'Spell Attack',
+                        sheetVersion: '2014 Spell Attack',
+                        fields
+                    };
+                });
+            const contextFields = this.legacySpellGlobalDiagnostic(sourceAttrs);
+            return {
+                sheetVersion: '2014',
+                spells,
+                spellAttackRows: spellAttackDiagnostics.length,
+                extraEntries: spellAttackDiagnostics.concat(contextFields.length ? [{
+                    name: 'Spellcasting Context',
+                    sheetVersion: '2014',
+                    isContext: true,
+                    fields: contextFields
+                }] : []),
+                readMs: Math.max(0, Utils.toInt(readMs, 0)),
+                collectMs: Date.now() - started
+            };
+        },
+
+        beaconSpellRelatedRecords(spellKey, spell, integrants) {
+            const source = integrants || {};
+            const rootId = String(spell && spell._id || spellKey || '').trim();
+            const queued = [];
+            const seen = Object.create(null);
+            const out = [];
+            const enqueue = (id) => {
+                const safeId = String(id || '').trim();
+                if (!safeId || seen[safeId] || safeId === rootId || safeId === String(spellKey || '')) return;
+                queued.push(safeId);
+            };
+            this.parseJsonList(spell && spell.childIDs).forEach(enqueue);
+            Object.keys(source).forEach((key) => {
+                const item = source[key];
+                if (!item || item === spell) return;
+                const parentId = String(item.parentID || '').trim();
+                const sourceId = String(item.sourceID || '').trim();
+                if ((rootId && (parentId === rootId || sourceId === rootId)) || parentId === String(spellKey || '') || sourceId === String(spellKey || '')) enqueue(key);
+            });
+            while (queued.length && out.length < 80) {
+                const id = queued.shift();
+                if (seen[id]) continue;
+                seen[id] = true;
+                const record = source[id];
+                if (!record) continue;
+                out.push({ key: id, record });
+                this.parseJsonList(record.childIDs).forEach(enqueue);
+                const recordId = String(record._id || id).trim();
+                Object.keys(source).forEach((key) => {
+                    const child = source[key];
+                    if (!child || seen[key]) return;
+                    const parentId = String(child.parentID || '').trim();
+                    if (parentId === recordId || parentId === id) enqueue(key);
+                });
+            }
+            return out;
+        },
+
+        beaconSpellcastingProfiles(root) {
+            const integrants = this.beaconIntegrants(root || {});
+            const combatContext = this.beaconCombatContext(root || {});
+            const abilities = combatContext.abilities || {};
+            const proficiencyBonus = Math.max(0, Utils.toInt(combatContext.proficiency && combatContext.proficiency.value, 0));
+            const currentPactByLevel = root && root.spellSlots && root.spellSlots.currentPactByLevel && typeof root.spellSlots.currentPactByLevel === 'object'
+                ? root.spellSlots.currentPactByLevel
+                : {};
+            return Object.keys(integrants).map((key) => ({ key, record: integrants[key] }))
+                .filter((entry) => entry.record && String(entry.record.type || '').toLowerCase() === 'spellcasting' && entry.record._enabled !== false && entry.record.parentDisabled !== true)
+                .map((entry) => {
+                    const record = entry.record;
+                    const ability = this.normalizeAbilityName(record.ability || record.spellcastingAbility || '');
+                    const abilityData = ability && abilities[ability] ? abilities[ability] : null;
+                    const modifier = abilityData ? Utils.toInt(abilityData.modifier, 0) : 0;
+                    const casterType = String(record.casterType || '').trim().toLowerCase();
+                    const isPact = casterType === 'pact';
+                    let pactSlotLevel = 0;
+                    let pactSlotMax = 0;
+                    let pactSlotsCurrent = 0;
+                    if (isPact) {
+                        const sourceId = String(record.sourceID || '').trim();
+                        Object.keys(integrants).forEach((id) => {
+                            const slot = integrants[id];
+                            if (!slot || slot._enabled === false || String(slot.type || '').toLowerCase() !== 'spell slot') return;
+                            if (sourceId && String(slot.sourceID || '').trim() !== sourceId) return;
+                            const level = Math.max(0, Utils.toInt(slot.spellLevel, 0));
+                            if (level <= 0 || level > 9) return;
+                            if (level > pactSlotLevel) {
+                                pactSlotLevel = level;
+                                pactSlotMax = Math.max(0, Utils.toInt(this.beaconFlatFormulaValue(slot), 0));
+                            } else if (level === pactSlotLevel) {
+                                pactSlotMax = Math.max(pactSlotMax, Math.max(0, Utils.toInt(this.beaconFlatFormulaValue(slot), 0)));
+                            }
+                        });
+                        const levelKey = ResourceService && ResourceService.LEVEL_WORDS ? ResourceService.LEVEL_WORDS[pactSlotLevel] : '';
+                        pactSlotsCurrent = levelKey ? Math.max(0, Utils.toInt(currentPactByLevel[levelKey], 0)) : 0;
+                    }
+                    return {
+                        integrantKey: entry.key,
+                        name: String(record.name || record.recordName || 'Spellcasting').trim() || 'Spellcasting',
+                        source: String(record.source || '').trim(),
+                        sourceID: String(record.sourceID || '').trim(),
+                        casterType: casterType || 'other',
+                        ability,
+                        abilityLabel: this.abilityLabel(ability),
+                        abilityScore: abilityData ? Utils.toInt(abilityData.score, 10) : null,
+                        abilityModifier: modifier,
+                        proficiencyBonus,
+                        spellAttackBonus: modifier + proficiencyBonus,
+                        spellSaveDc: 8 + modifier + proficiencyBonus,
+                        pactSlotLevel,
+                        pactSlotsCurrent,
+                        pactSlotMax
+                    };
+                });
+        },
+
+        beaconPrimarySpellcastingProfile(spell, profiles) {
+            const safeProfiles = Array.isArray(profiles) ? profiles : [];
+            if (!safeProfiles.length) return null;
+            const sourceId = String(spell && spell.sourceID || '').trim();
+            if (sourceId) {
+                const direct = safeProfiles.find((profile) => String(profile && profile.sourceID || '').trim() === sourceId);
+                if (direct) return direct;
+            }
+            return safeProfiles.find((profile) => String(profile && profile.source || '').toLowerCase() === 'class') || safeProfiles[0];
+        },
+
+        beaconSpellContextDiagnostics(integrants, root) {
+            const fields = [];
+            const storeRoot = root && typeof root === 'object' ? root : {};
+            const profiles = this.beaconSpellcastingProfiles(storeRoot);
+            profiles.forEach((profile, index) => this.flattenDiagnosticValue(profile, 'derived.spellcasting[' + String(index) + ']', fields, 0));
+            if (storeRoot.spells && typeof storeRoot.spells === 'object') this.flattenDiagnosticValue(storeRoot.spells, 'store.spells', fields, 0);
+            if (storeRoot.spellSlots && typeof storeRoot.spellSlots === 'object') this.flattenDiagnosticValue(storeRoot.spellSlots, 'store.spellSlots', fields, 0);
+            if (storeRoot.settings && typeof storeRoot.settings === 'object') {
+                Object.keys(storeRoot.settings).forEach((key) => {
+                    if (!/(spell|cast|magic)/i.test(String(key || ''))) return;
+                    this.flattenDiagnosticValue(storeRoot.settings[key], 'store.settings.' + key, fields, 0);
+                });
+            }
+            Object.keys(integrants || {}).forEach((key) => {
+                const record = integrants[key];
+                if (!record || record._enabled === false || String(record.type || '').toLowerCase() === 'spell') return;
+                const text = [record.type, record.name, record.recordName, record.label].map((value) => String(value || '')).join(' ');
+                if (!/(spellcasting|spell attack|spell save|spell dc|spellcasting ability|magic attack|magic dc)/i.test(text)) return;
+                this.flattenDiagnosticValue(record, 'integrant[' + key + ']', fields, 0);
+            });
+            return fields;
+        },
+
+        async collectSpellLiveSheetDiagnostics(characterId) {
+            const started = Date.now();
+            const candidates = [
+                'spell_save_dc', 'spellSaveDC', 'spell_dc', 'spellDC',
+                'spell_attack_bonus', 'spellAttackBonus', 'spell_attack_mod',
+                'spellcasting_ability', 'spellcastingAbility',
+                'pb', 'proficiency_bonus', 'proficiencyBonus',
+                'intelligence', 'intelligence_mod',
+                'wisdom', 'wisdom_mod',
+                'charisma', 'charisma_mod'
+            ];
+            const sheetItems = await this.diagnosticGetSheetItemCandidates(characterId, candidates);
+            const fields = [];
+            this.flattenDiagnosticValue(sheetItems.values, 'getSheetItem', fields, 0);
+            return {
+                name: 'Spellcasting Live Sheet API',
+                sheetVersion: '2024',
+                isContext: true,
+                fields,
+                readMs: Date.now() - started,
+                sheetApiReads: sheetItems.reads
+            };
+        },
+
+        getBeaconSpellDiagnostics(characterId, root, storeChars, readMs) {
+            const started = Date.now();
+            const integrants = this.beaconIntegrants(root || {});
+            const spellcastingProfiles = this.beaconSpellcastingProfiles(root || {});
+            const spells = Object.keys(integrants)
+                .map((key) => ({ key, record: integrants[key] }))
+                .filter((entry) => entry.record && String(entry.record.type || '').toLowerCase() === 'spell' && entry.record._enabled !== false && entry.record.parentDisabled !== true)
+                .map((entry) => {
+                    const record = entry.record;
+                    const related = this.beaconSpellRelatedRecords(entry.key, record, integrants);
+                    const relatedRecords = related.map((item) => item.record);
+                    const saveInfo = this.structuredSaveInfo(record, relatedRecords);
+                    const spellcasting = this.beaconPrimarySpellcastingProfile(record, spellcastingProfiles);
+                    const parentKey = String(record.parentID || '').trim();
+                    const parent = parentKey ? integrants[parentKey] : null;
+                    const derived = {
+                        integrantKey: entry.key,
+                        shortID: String(record.shortID || ''),
+                        level: record.level,
+                        prepared: record._prepared,
+                        alwaysPrepared: record.alwaysPrepared,
+                        castingTime: record.castingTime,
+                        range: record.range,
+                        duration: record.duration,
+                        concentration: record.concentration,
+                        saveDc: saveInfo.saveDc || (saveInfo.saveAbility && spellcasting ? spellcasting.spellSaveDc : 0),
+                        saveAbility: saveInfo.saveAbility,
+                        spellcastingAbility: spellcasting ? spellcasting.abilityLabel : '',
+                        spellAttackBonus: spellcasting ? spellcasting.spellAttackBonus : 0,
+                        spellSaveDc: spellcasting ? spellcasting.spellSaveDc : 0,
+                        casterType: spellcasting ? spellcasting.casterType : '',
+                        pactSlotLevel: spellcasting ? spellcasting.pactSlotLevel : 0,
+                        pactSlotsCurrent: spellcasting ? spellcasting.pactSlotsCurrent : 0,
+                        pactSlotMax: spellcasting ? spellcasting.pactSlotMax : 0,
+                        childCount: this.parseJsonList(record.childIDs).length,
+                        relatedCount: related.length
+                    };
+                    const fields = [];
+                    this.flattenDiagnosticValue(derived, 'derived', fields, 0);
+                    this.flattenDiagnosticValue(record, 'record', fields, 0);
+                    if (parent) this.flattenDiagnosticValue(parent, 'parent', fields, 0);
+                    related.forEach((item, index) => {
+                        fields.push({ key: 'related[' + String(index) + '].integrantKey', value: item.key });
+                        this.flattenDiagnosticValue(item.record, 'related[' + String(index) + '].record', fields, 0);
+                    });
+                    return {
+                        name: String(record.name || record.recordName || 'Spell').trim() || 'Spell',
+                        sheetVersion: '2024',
+                        fields
+                    };
+                });
+            const contextFields = this.beaconSpellContextDiagnostics(integrants, root);
+            return {
+                sheetVersion: '2024',
+                spells,
+                spellAttackRows: 0,
+                extraEntries: contextFields.length ? [{
+                    name: 'Spellcasting Context',
+                    sheetVersion: '2024',
+                    isContext: true,
+                    fields: contextFields
+                }] : [],
+                storeChars: storeChars === undefined || storeChars === null ? undefined : Math.max(0, Utils.toInt(storeChars, 0)),
+                readMs: Math.max(0, Utils.toInt(readMs, 0)),
+                collectMs: Date.now() - started
+            };
+        },
+
+        getSpellDiagnostics(characterId) {
+            const snapshot = this.getStoreDiagnosticSnapshot(characterId);
+            const root = snapshot.root;
+            const isBeacon = !!(root && typeof root === 'object' && (root.integrants || root.settings || root.hitpoints));
+            return isBeacon
+                ? this.getBeaconSpellDiagnostics(characterId, root, snapshot.storeChars, snapshot.readMs)
+                : this.getLegacySpellDiagnostics(characterId, snapshot.attrs, snapshot.readMs);
+        },
+
+        normalizeSpellListLevel(value, fallback) {
+            const raw = String(value === undefined || value === null ? '' : value).trim().toLowerCase();
+            if (!raw) return Math.max(0, Math.min(9, Utils.toInt(fallback, 0)));
+            if (/cantrip|^0$/.test(raw)) return 0;
+            const match = raw.match(/\d+/);
+            return Math.max(0, Math.min(9, Utils.toInt(match ? match[0] : fallback, 0)));
+        },
+
+        primarySpellListProfile(profiles) {
+            const safeProfiles = Array.isArray(profiles) ? profiles : [];
+            if (!safeProfiles.length) return null;
+            return safeProfiles.find((profile) => {
+                const source = String(profile && profile.source || '').trim().toLowerCase();
+                const casterType = String(profile && profile.casterType || '').trim().toLowerCase();
+                return source === 'class' && (casterType === 'pact' || casterType === 'full' || casterType === 'half' || casterType === 'third');
+            }) || safeProfiles.find((profile) => String(profile && profile.source || '').trim().toLowerCase() === 'class') || safeProfiles[0];
+        },
+
+        beaconSpellAbilityName(spell) {
+            const source = spell || {};
+            const level = this.normalizeSpellListLevel(source.level !== undefined ? source.level : source.spellLevel, 0);
+            const section = level === 0 ? 'cantrip' : String(level);
+            const shortID = String(source.shortID || '').trim();
+            return shortID ? ('repeating_spell-' + section + '_' + shortID + '_spell') : '';
+        },
+
+        beaconSpellAbilityCommand(characterId, spell) {
+            const abilityName = this.beaconSpellAbilityName(spell);
+            return abilityName ? R20.buttonAbilityCommand(characterId, abilityName) : '';
+        },
+
+        dedupeSpellList(spells) {
+            const out = [];
+            const indexes = Object.create(null);
+            (Array.isArray(spells) ? spells : []).forEach((spell) => {
+                if (!spell || !String(spell.name || '').trim()) return;
+                const level = Math.max(0, Math.min(9, Utils.toInt(spell.level, 0)));
+                const key = String(spell.name || '').trim().toLowerCase() + '|' + String(level);
+                if (!Object.prototype.hasOwnProperty.call(indexes, key)) {
+                    indexes[key] = out.length;
+                    out.push(spell);
+                    return;
+                }
+                const index = indexes[key];
+                const existing = out[index] || {};
+                const existingRank = (Utils.toBoolean(existing.alwaysPrepared, false) ? 2 : 0) + (Utils.toBoolean(existing.prepared, false) ? 1 : 0);
+                const candidateRank = (Utils.toBoolean(spell.alwaysPrepared, false) ? 2 : 0) + (Utils.toBoolean(spell.prepared, false) ? 1 : 0);
+                if (candidateRank > existingRank) out[index] = spell;
+            });
+            return out.sort((a, b) => {
+                const levelDiff = Utils.toInt(a && a.level, 0) - Utils.toInt(b && b.level, 0);
+                if (levelDiff) return levelDiff;
+                return String(a && a.name || '').localeCompare(String(b && b.name || ''));
+            });
+        },
+
+        applySpellSlotDamageUpcast(damageEntries, upcastText, castLevel) {
+            const damage = (Array.isArray(damageEntries) ? damageEntries : []).map((entry) => Object.assign({}, entry));
+            const text = String(upcastText || '').trim();
+            const level = Math.max(0, Utils.toInt(castLevel, 0));
+            if (!damage.length || !text || level <= 0) return damage;
+
+            // Beacon usually exposes the upcast child records too, but the stable
+            // source for the simple "+XdY per slot level" rule is the Spell's
+            // upcastText. Applying it here keeps Pact Magic damage in the list at
+            // the level it will actually be cast, without live Sheet API reads.
+            const match = text.match(/damage\s+increases\s+by\s+(\d+)d(\d+)\s+for\s+each\s+spell\s+slot\s+level\s+above\s+(\d+)(?:st|nd|rd|th)?/i);
+            if (!match) return damage;
+            const incrementDice = Math.max(0, Utils.toInt(match[1], 0));
+            const dieSize = Math.max(0, Utils.toInt(match[2], 0));
+            const threshold = Math.max(0, Utils.toInt(match[3], 0));
+            const extraLevels = Math.max(0, level - threshold);
+            const extraDice = incrementDice * extraLevels;
+            if (!dieSize || !extraDice) return damage;
+
+            for (let i = 0; i < damage.length; i += 1) {
+                const formula = String(damage[i] && damage[i].formula || '').trim();
+                const formulaMatch = formula.match(new RegExp('^(\\d+)d' + String(dieSize) + '(.*)$', 'i'));
+                if (!formulaMatch) continue;
+                const baseDice = Math.max(0, Utils.toInt(formulaMatch[1], 0));
+                damage[i].formula = String(baseDice + extraDice) + 'd' + String(dieSize) + String(formulaMatch[2] || '');
+                damage[i].upcastApplied = true;
+                damage[i].castLevel = level;
+                break;
+            }
+            return damage;
+        },
+
+        beaconSpellCombatSummary(characterId, spellKey, spell, integrants, profiles, context) {
+            const related = this.beaconSpellRelatedRecords(spellKey, spell, integrants);
+            const spellId = String(spell && (spell._id || spellKey) || '').trim();
+            const attackCandidates = related.filter((item) => {
+                const record = item && item.record;
+                return record && String(record.type || '').trim().toLowerCase() === 'attack' && record._enabled !== false && record.parentDisabled !== true;
+            });
+            const attackEntry = attackCandidates.find((item) => {
+                const record = item.record || {};
+                return String(record.parentID || '').trim() === spellId || String(record.sourceID || '').trim() === spellId;
+            }) || attackCandidates[0] || null;
+            if (!attackEntry) return null;
+            const attack = attackEntry.record || {};
+            const attackChildren = this.parseJsonList(attack.childIDs).map((id) => integrants[id]).filter(Boolean);
+            const saveInfo = this.structuredSaveInfo(attack, attackChildren);
+            const profile = this.beaconPrimarySpellcastingProfile(spell, profiles) || this.primarySpellListProfile(profiles);
+            const attackType = String(attack.attack && attack.attack.type || '').trim();
+            const isSave = /save/i.test(attackType) || !!saveInfo.saveAbility;
+            const isAttack = /attack/i.test(attackType) && !isSave;
+            // A spell that is neither an attack nor a saving throw belongs to
+            // the Cast path, even if it has narrative/automatic damage.
+            if (!isAttack && !isSave) return null;
+            let saveDc = 0;
+            if (isSave) {
+                saveDc = this.beaconCalculatedSaveDc(attack, context, saveInfo);
+                if (!saveDc && profile) saveDc = Math.max(0, Utils.toInt(profile.spellSaveDc, 0));
+            }
+            const attackBonus = profile ? Utils.toInt(profile.spellAttackBonus, 0) : 0;
+            const ability = profile ? String(profile.ability || '').trim() : '';
+            const shortID = String(attack.shortID || '').trim();
+            const abilityLabel = profile ? String(profile.abilityLabel || this.abilityLabel(ability)).trim() : this.abilityLabel(ability);
+            const casterType = String(profile && profile.casterType || '').trim().toLowerCase();
+            const spellLevel = this.normalizeSpellListLevel(spell && (spell.level !== undefined ? spell.level : spell.spellLevel), 0);
+            const castLevel = casterType === 'pact'
+                ? Math.max(spellLevel, Math.max(0, Utils.toInt(profile && profile.pactSlotLevel, 0)))
+                : spellLevel;
+            const baseDamage = this.beaconDamageSummaries(attack, context, ability);
+            const damage = castLevel > spellLevel
+                ? this.applySpellSlotDamageUpcast(baseDamage, spell && spell.upcastText, castLevel)
+                : baseDamage;
+            return {
+                id: shortID,
+                name: String(spell && (spell.name || spell.recordName) || attack.name || 'Spell').trim() || 'Spell',
+                sheetVersion: '2024',
+                ability,
+                abilityLabel,
+                attackType,
+                attackTypeLabel: this.attackTypeLabel(attackType, String(attack.range || spell && spell.range || '')),
+                saveDc,
+                saveAbility: saveInfo.saveAbility,
+                attackBonus,
+                attackBonusLabel: this.normalizeSigned(attackBonus),
+                attackBreakdown: this.normalizeSigned(attackBonus) + (abilityLabel ? (' (' + abilityLabel + ' spellcasting)') : ' (spellcasting)'),
+                damage,
+                castLevel,
+                rollCommand: shortID ? R20.buttonAbilityCommand(characterId, 'repeating_attack_' + shortID + '_attack') : '',
+                damageCommand: shortID ? R20.buttonAbilityCommand(characterId, 'repeating_attack_' + shortID + '_attack_dmg') : ''
+            };
+        },
+
+        legacySpellDamageSummaries(row) {
+            const source = row || {};
+            const damage = [];
+            const add = (formula, damageType) => {
+                const safeFormula = String(formula || '').trim();
+                const safeType = String(damageType || '').trim();
+                if (!safeFormula && !safeType) return;
+                // Never inject Roll20 macro/inline-roll syntax into the spell card.
+                // If a custom 2014 spell stores executable syntax here, omit its
+                // Damage control rather than risk invalidating the entire list.
+                if (/\[\[|@\{|%\{|\?\{/.test(safeFormula)) return;
+                damage.push({
+                    formula: safeFormula || '-',
+                    damageType: safeType || 'Damage'
+                });
+            };
+            add(source.spelldamage, source.spelldamagetype);
+            add(source.spelldamage2, source.spelldamagetype2);
+            return damage;
+        },
+
+        buildLegacySpellRowCombatSummary(characterId, row, profile) {
+            const source = row || {};
+            const attackMode = String(source.spellattack || '').trim();
+            const hasAttack = !!attackMode && !/^(?:none|0|off|false)$/i.test(attackMode);
+            const saveAbility = this.normalizeAbilityName(source.spellsave || source.save || '');
+            const hasSave = !!saveAbility;
+            const damage = this.legacySpellDamageSummaries(source);
+            const attackBonus = Utils.toInt(profile && profile.spellAttackBonus, 0);
+            const rowId = String(source.rowId || '').trim();
+            const sectionLevel = String(source.sectionLevel || '').trim();
+            const command = rowId && sectionLevel
+                ? R20.buttonAbilityCommand(characterId, 'repeating_spell-' + sectionLevel + '_' + rowId + '_spell')
+                : '';
+            if (!hasAttack && !hasSave) return null;
+            const displayName = this.legacySpellDisplayName(source);
+            // Without a linked repeating_attack there is no native standalone
+            // Damage ability, so keep the spell on the Cast/Roll path only.
+            const damageCommand = '';
+            return {
+                id: rowId,
+                name: displayName,
+                sheetVersion: '2014',
+                ability: String(profile && profile.ability || '').trim(),
+                abilityLabel: String(profile && profile.abilityLabel || '').trim(),
+                saveDc: hasSave ? Math.max(0, Utils.toInt(profile && profile.spellSaveDc, 0)) : 0,
+                saveAbility,
+                attackBonus,
+                attackBonusLabel: hasAttack ? this.normalizeSigned(attackBonus) : '-',
+                attackBreakdown: hasAttack ? (this.normalizeSigned(attackBonus) + ' (spellcasting)') : (hasSave ? ('DC ' + String(Math.max(0, Utils.toInt(profile && profile.spellSaveDc, 0))) + ' ' + this.abilityLabel(saveAbility)) : 'Spell roll'),
+                damage,
+                rollCommand: command,
+                damageCommand
+            };
+        },
+
+        buildLegacySpellCombatSummary(characterId, row, spellRow, attrMap, profile) {
+            if (!row) return null;
+            const ability = this.legacyAttrAbility(row.atkattr_base) || String(profile && profile.ability || '').trim();
+            const abilityMod = ability ? this.parseSignedNumber(attrMap[ability + '_mod'], Utils.toInt(profile && profile.abilityModifier, 0)) : 0;
+            const saveInfo = this.legacyRowSaveInfo(row);
+            const fromSheet = this.parseSignedNumber(row.atkbonus, null);
+            const attackBonus = fromSheet !== null ? fromSheet : Utils.toInt(profile && profile.spellAttackBonus, abilityMod);
+            const rowId = String(row.rowId || '').trim();
+            return {
+                id: rowId,
+                name: String(row.atkname || 'Spell').trim() || 'Spell',
+                sheetVersion: '2014',
+                ability,
+                abilityLabel: this.abilityLabel(ability),
+                saveDc: saveInfo.saveDc || Math.max(0, Utils.toInt(profile && profile.spellSaveDc, 0)),
+                saveAbility: saveInfo.saveAbility,
+                attackBonus,
+                attackBonusLabel: this.normalizeSigned(attackBonus),
+                attackBreakdown: this.normalizeSigned(attackBonus) + ' (spellcasting)',
+                // Render only the clean damage values stored on repeating_spell.
+                // The repeating_attack dmgbase may contain inline-roll/attribute syntax
+                // (especially scaling cantrips) that can invalidate a large chat card.
+                damage: this.legacySpellDamageSummaries(spellRow),
+                rollCommand: rowId ? R20.buttonAbilityCommand(characterId, 'repeating_attack_' + rowId + '_attack') : '',
+                damageCommand: rowId ? R20.buttonAbilityCommand(characterId, 'repeating_attack_' + rowId + '_attack_dmg') : ''
+            };
+        },
+
+        getBeaconSpellListData(characterId, root) {
+            const storeRoot = root && typeof root === 'object' ? root : this.getBeaconStore(characterId);
+            if (!storeRoot) return { sheetVersion: '2024', spells: [], slots: [], isPact: false, profile: null };
+            const integrants = this.beaconIntegrants(storeRoot);
+            const profiles = this.beaconSpellcastingProfiles(storeRoot);
+            const primaryProfile = this.primarySpellListProfile(profiles);
+            const spellSettings = storeRoot.spells && storeRoot.spells.generalSpellSettings && typeof storeRoot.spells.generalSpellSettings === 'object'
+                ? storeRoot.spells.generalSpellSettings
+                : {};
+            const showPreparedOnly = Utils.toBoolean(spellSettings.showPreparedSpellsOnly, false);
+            const combatContext = this.beaconCombatContext(storeRoot);
+            let spells = Object.keys(integrants)
+                .map((key) => ({ key, record: integrants[key] }))
+                .filter((entry) => entry.record && String(entry.record.type || '').trim().toLowerCase() === 'spell' && entry.record._enabled !== false && entry.record.parentDisabled !== true)
+                .map((entry) => {
+                    const record = entry.record;
+                    const level = this.normalizeSpellListLevel(record.level !== undefined ? record.level : record.spellLevel, 0);
+                    const prepared = Utils.toBoolean(record._prepared, false);
+                    const alwaysPrepared = Utils.toBoolean(record.alwaysPrepared, false);
+                    const components = record.components && typeof record.components === 'object' ? record.components : {};
+                    return {
+                        id: String(record._id || entry.key || '').trim(),
+                        name: String(record.name || record.recordName || 'Spell').trim() || 'Spell',
+                        level,
+                        prepared,
+                        alwaysPrepared,
+                        concentration: Utils.toBoolean(record.concentration, /concentration/i.test(String(record.duration || ''))),
+                        castingTime: String(record.castingTime || '').trim(),
+                        range: String(record.range || '').trim(),
+                        duration: String(record.duration || '').trim(),
+                        ritual: Utils.toBoolean(record.ritual, false),
+                        school: String(record.school || '').trim(),
+                        verbal: Utils.toBoolean(components.verbal, false),
+                        somatic: Utils.toBoolean(components.somatic, false),
+                        material: Utils.toBoolean(components.material, false),
+                        materialDescription: String(components.materialDescription || '').trim(),
+                        description: String(record.description || '').trim(),
+                        upcastText: String(record.upcastText || '').trim(),
+                        source: String(record.source || '').trim(),
+                        sourceID: String(record.sourceID || '').trim(),
+                        castCommand: this.beaconSpellAbilityCommand(characterId, record),
+                        combat: this.beaconSpellCombatSummary(characterId, entry.key, record, integrants, profiles, combatContext)
+                    };
+                })
+                .filter((spell) => !showPreparedOnly || spell.level === 0 || spell.prepared || spell.alwaysPrepared);
+            spells = this.dedupeSpellList(spells);
+
+            const isPact = !!(primaryProfile && String(primaryProfile.casterType || '').trim().toLowerCase() === 'pact');
+            let slots = [];
+            if (!isPact && typeof ResourceService !== 'undefined' && ResourceService && Utils.isFunction(ResourceService.buildBeaconResourceEntries)) {
+                slots = ResourceService.buildBeaconResourceEntries(characterId, storeRoot)
+                    .filter((entry) => entry && entry.ref && entry.ref.kind === 'beacon-spell')
+                    .map((entry) => ({
+                        level: Math.max(1, Math.min(9, Utils.toInt(entry.ref.level, 0))),
+                        current: Math.max(0, Utils.toInt(entry.current, 0)),
+                        max: Math.max(0, Utils.toInt(entry.max, 0))
+                    }));
+            }
+            return {
+                sheetVersion: '2024',
+                spells,
+                slots,
+                profiles,
+                profile: primaryProfile,
+                isPact,
+                pactSlotLevel: isPact ? Math.max(0, Utils.toInt(primaryProfile && primaryProfile.pactSlotLevel, 0)) : 0,
+                pactSlotsCurrent: isPact ? Math.max(0, Utils.toInt(primaryProfile && primaryProfile.pactSlotsCurrent, 0)) : 0,
+                pactSlotMax: isPact ? Math.max(0, Utils.toInt(primaryProfile && primaryProfile.pactSlotMax, 0)) : 0
+            };
+        },
+
+        getLegacySpellListData(characterId, sourceAttrs) {
+            const attrs = Array.isArray(sourceAttrs)
+                ? sourceAttrs
+                : (findObjs({ _type: 'attribute', _characterid: String(characterId || '').trim() }) || []);
+            const attrMap = this.legacyAttributeMap(attrs);
+            const abilityRaw = String(attrMap.spellcasting_ability || '').trim();
+            let ability = this.legacyAttrAbility(abilityRaw);
+            if (!ability) {
+                const match = abilityRaw.toLowerCase().match(/strength|dexterity|constitution|intelligence|wisdom|charisma/);
+                ability = match ? match[0] : '';
+            }
+            const abilityModifier = ability ? this.parseSignedNumber(attrMap[ability + '_mod'], 0) : 0;
+            const proficiencyBonus = this.parseSignedNumber(attrMap.pb, 0);
+            const spellAttackBonus = this.parseSignedNumber(attrMap.spell_attack_bonus, abilityModifier + proficiencyBonus);
+            const spellSaveDc = Math.max(0, Utils.toInt(attrMap.spell_save_dc, 8 + abilityModifier + proficiencyBonus));
+            const profile = {
+                name: 'Spellcasting',
+                source: 'Class',
+                casterType: 'other',
+                ability,
+                abilityLabel: this.abilityLabel(ability),
+                abilityModifier,
+                proficiencyBonus,
+                spellAttackBonus,
+                spellSaveDc
+            };
+            const spellAttackRows = this.getLegacyAttackRows(characterId, attrs).filter((row) => {
+                return !!(String(row.spelllevel || '').trim() || String(row.spell_innate || '').trim() || Object.keys(row || {}).some((key) => /^spell/.test(String(key || '').toLowerCase())));
+            });
+            const spellAttackBySpellId = Object.create(null);
+            const spellAttackByName = Object.create(null);
+            spellAttackRows.forEach((row) => {
+                const spellId = String(row.spellid || '').trim().toLowerCase();
+                const nameKey = String(row.atkname || '').trim().toLowerCase();
+                if (spellId && !spellAttackBySpellId[spellId]) spellAttackBySpellId[spellId] = row;
+                if (nameKey && !spellAttackByName[nameKey]) spellAttackByName[nameKey] = row;
+            });
+            const legacyComponentEnabled = (value, letter) => {
+                const raw = String(value || '').trim();
+                if (!raw || /^0|false|off|no$/i.test(raw)) return false;
+                return new RegExp('(?:^|[^a-z])' + letter + '\\s*=\\s*1|^1$|true|on|yes', 'i').test(raw);
+            };
+            let spells = this.getLegacySpellRows(characterId, attrs).map((row) => {
+                const name = this.legacySpellDisplayName(row);
+                const rowId = String(row.rowId || '').trim();
+                const linkedAttack = spellAttackBySpellId[rowId.toLowerCase()] || spellAttackByName[String(name || '').trim().toLowerCase()] || null;
+                const level = this.normalizeSpellListLevel(row.sectionLevel, row.spelllevel);
+                const sectionLevel = level === 0 ? 'cantrip' : String(level);
+                return {
+                    id: rowId,
+                    name,
+                    level,
+                    prepared: /^(?:1|on|true|yes|prepared)$/i.test(String(row.spellprepared || row.prepared || row.spellpreparedflag || '').trim()),
+                    alwaysPrepared: false,
+                    concentration: /concentration/i.test(String(row.spellduration || row.duration || row.spelldescription || row.spelldesc || '')),
+                    castingTime: String(row.spellcastingtime || row.castingtime || '').trim(),
+                    range: String(row.spellrange || row.range || '').trim(),
+                    duration: String(row.spellduration || row.duration || '').trim(),
+                    ritual: /^(?:1|on|true|yes|ritual)$/i.test(String(row.spellritual || row.ritual || '').trim()),
+                    school: String(row.spellschool || row.school || '').trim(),
+                    verbal: legacyComponentEnabled(row.spellcomp_v, 'v'),
+                    somatic: legacyComponentEnabled(row.spellcomp_s, 's'),
+                    material: legacyComponentEnabled(row.spellcomp_m, 'm'),
+                    materialDescription: String(row.spellcomp_materials || '').trim(),
+                    description: String(row.spelldescription || row.spelldesc || row.spell_desc || '').trim(),
+                    upcastText: String(row.spellhldie || row.spellhlbonus || '').trim(),
+                    source: '2014',
+                    castCommand: rowId ? R20.buttonAbilityCommand(characterId, 'repeating_spell-' + sectionLevel + '_' + rowId + '_spell') : '',
+                    combat: linkedAttack
+                        ? this.buildLegacySpellCombatSummary(characterId, linkedAttack, row, attrMap, profile)
+                        : this.buildLegacySpellRowCombatSummary(characterId, row, profile)
+                };
+            });
+            spells = this.dedupeSpellList(spells);
+            let slots = [];
+            if (typeof ResourceService !== 'undefined' && ResourceService && Utils.isFunction(ResourceService.buildLegacyResourceEntries)) {
+                slots = ResourceService.buildLegacyResourceEntries(characterId)
+                    .filter((entry) => entry && entry.ref && entry.ref.kind === 'legacy-spell')
+                    .map((entry) => ({
+                        level: Math.max(1, Math.min(9, Utils.toInt(entry.ref.level, 0))),
+                        current: Math.max(0, Utils.toInt(entry.current, 0)),
+                        max: Math.max(0, Utils.toInt(entry.max, 0))
+                    }));
+            }
+            const classText = Object.keys(attrMap).filter((key) => /^class$|^multiclass\d*$|^class_display$/i.test(key)).map((key) => String(attrMap[key] || '')).join(' ');
+            const isPact = /warlock/i.test(classText);
+            let pactSlotLevel = 0;
+            let pactSlotsCurrent = 0;
+            let pactSlotMax = 0;
+            if (isPact && slots.length) {
+                const active = slots.slice().sort((a, b) => Utils.toInt(b.level, 0) - Utils.toInt(a.level, 0))[0];
+                pactSlotLevel = Math.max(0, Utils.toInt(active && active.level, 0));
+                pactSlotsCurrent = Math.max(0, Utils.toInt(active && active.current, 0));
+                pactSlotMax = Math.max(0, Utils.toInt(active && active.max, 0));
+                slots = [];
+                profile.casterType = 'pact';
+            }
+            return { sheetVersion: '2014', spells, slots, profile, profiles: [profile], isPact, pactSlotLevel, pactSlotsCurrent, pactSlotMax };
+        },
+
+        getSpellListData(characterId, suppliedRoot, sourceAttrs) {
+            const root = suppliedRoot && typeof suppliedRoot === 'object' ? suppliedRoot : null;
+            const isBeacon = root
+                ? !!(root.integrants || root.settings || root.hitpoints)
+                : R20.detectSheetVersion(characterId) === '2024';
+            if (isBeacon) return this.getBeaconSpellListData(characterId, root || this.getBeaconStore(characterId));
+            return this.getLegacySpellListData(characterId, sourceAttrs);
+        },
+
+        prepareLegacySpellListForSharedRenderer(spellList) {
+            const data = Object.assign({}, spellList || {});
+            data.spells = (Array.isArray(data.spells) ? data.spells : []).map((spell) => {
+                const normalized = Object.assign({}, spell || {});
+                const action = normalized.combat && typeof normalized.combat === 'object' ? normalized.combat : null;
+                // Spells without a native Roll/Save action stay on the Cast-button path.
+                if (!action || !String(action.rollCommand || '').trim()) normalized.combat = null;
+                return normalized;
+            });
+            return data;
+        },
+
+        findRepresentativeToken(characterId, ctx) {
+            const safeCharacterId = String(characterId || '').trim();
+            if (!safeCharacterId) return null;
+            const pageId = R20.getPlayerPageId(ctx && ctx.playerId || '');
+            const pageToken = pageId ? R20.findTokenByCharacterIdOnPage(safeCharacterId, pageId) : null;
+            if (pageToken) return pageToken;
+            const tokens = R20.getTokensByCharacterId(safeCharacterId);
+            return tokens[0] || null;
+        },
+
+        resolveSheetCommandContext(ctx, commandArgs, label) {
+            const args = Array.isArray(commandArgs) ? commandArgs : [];
+            const explicit = Utils.stripWrappingQuotes(args[0] || '');
+            const explicitToken = explicit ? R20.getTokenById(explicit) : null;
+            if (explicitToken) return this.getActionToken(R20.getTokenId(explicitToken), ctx);
+
+            const selected = R20.getSelectedTokens(ctx && ctx.msg);
+            if (selected.length) return this.getActionToken(R20.getTokenId(selected[0]), ctx);
+
+            const characterName = Utils.stripWrappingQuotes(args.map((value) => String(value || '').trim()).filter(Boolean).join(' '));
+            if (!characterName) {
+                return {
+                    ok: false,
+                    message: 'Select a linked token or use <code>!ca ' + Utils.escapeHtml(String(label || 'combat').toLowerCase()) + ' &quot;Exact Sheet Name&quot;</code>.'
+                };
+            }
+
+            const character = R20.getCharacterByName(characterName);
+            if (!character) return { ok: false, message: 'No character sheet named <strong>' + Utils.escapeHtml(characterName) + '</strong> was found.' };
+            const characterId = String(character.id || (Utils.isFunction(character.get) ? character.get('_id') : '') || '').trim();
+            const token = this.findRepresentativeToken(characterId, ctx);
+            if (!ctx.isGM) {
+                const controlled = token
+                    ? R20.tokenIsControlledByPlayer(token, character, ctx.playerId)
+                    : !!R20.getCharacterAccessFlags(character, ctx.playerId, false).controlAccess;
+                if (!controlled) return { ok: false, message: 'You do not control that character.' };
+            }
+            return {
+                ok: true,
+                token,
+                tokenId: token ? R20.getTokenId(token) : '',
+                character,
+                characterId,
+                characterName: String(character.get('name') || characterName).trim() || characterName
+            };
+        },
+
+        async showCombatForInfo(ctx, info) {
+            if (!info || !info.ok) {
+                Render.sendWhisperMessage(ctx && ctx.who || 'GM', 'Combat', info && info.message || 'No accessible character sheet was found.', 'warning');
+                return false;
+            }
+            let attacks = [];
+            let snapshot = null;
+            let root = null;
+            let isBeacon = false;
+            const started = Date.now();
+            try {
+                snapshot = this.getStoreDiagnosticSnapshot(info.characterId);
+                root = snapshot.root;
+                isBeacon = !!(root && typeof root === 'object' && (root.integrants || root.settings || root.hitpoints));
+                attacks = isBeacon
+                    ? this.getBeaconAttackSummariesFromRoot(info.characterId, root)
+                    : this.getLegacyAttackSummaries(info.characterId, snapshot.attrs);
+                Logger.debug('[actions:combat] sheet=' + (isBeacon ? '2024' : '2014') + ' attacks=' + String(attacks.length) + ' ms=' + String(Date.now() - started));
+            } catch (error) {
+                Logger.error('[actions:combat]', error && error.stack ? error.stack : String(error));
+                Render.sendWhisperMessage(ctx && ctx.who || 'GM', 'Combat', 'Combat Assistant could not read this character\'s attack data.', 'failure');
+                return false;
+            }
+            const recipient = ctx && ctx.who || 'GM';
+            // Keep the actual Combat menu fast: send it before any diagnostic Sheet API reads.
+            R20.whisper(recipient, Render.buildCombatAttacksCard(info.characterName, attacks));
+
+            if (RuntimeConfig.get('CHAT_DEBUG_ATTACKS')) {
+                let diagnosticSet = null;
+                try {
+                    if (isBeacon) {
+                        const liveDiagnostics = await this.collectBeaconLiveAbilityDiagnostics(info.characterId, snapshot.attrs, attacks, root);
+                        diagnosticSet = this.getBeaconAttackDiagnostics(info.characterId, root, snapshot.storeChars, snapshot.readMs, liveDiagnostics);
+                    } else {
+                        diagnosticSet = this.getLegacyAttackDiagnostics(info.characterId, snapshot.attrs, snapshot.readMs);
+                    }
+                } catch (error) {
+                    Logger.debug('[actions:combat-diagnostic]', error && error.message ? error.message : String(error));
+                }
+                if (diagnosticSet) {
+                    R20.whisper(recipient, Render.buildCombatDiagnosticSummaryCard(info.characterName, diagnosticSet));
+                    (diagnosticSet.attacks || []).forEach((diagnostic, index) => {
+                        R20.whisper(recipient, Render.buildCombatAttackDiagnosticCard(info.characterName, diagnostic, index, diagnosticSet.attacks.length));
+                    });
+                }
+            }
+            return true;
+        },
+
+        async showCombatForContext(ctx, commandArgs) {
+            return this.showCombatForInfo(ctx, this.resolveSheetCommandContext(ctx, commandArgs, 'combat'));
+        },
+
+
+        inspectSpellRender(characterName, spellList) {
+            const data = spellList || {};
+            const spells = (Array.isArray(data.spells) ? data.spells : []).filter((spell) => spell && String(spell.name || '').trim());
+            const result = {
+                fullCardChars: 0,
+                fullCardError: '',
+                levelCards: [],
+                singleSpellMaxChars: 0,
+                singleSpellMaxName: ''
+            };
+            try {
+                result.fullCardChars = Render.buildSpellsCard(characterName, data).length;
+            } catch (error) {
+                result.fullCardError = Logger.format(error);
+            }
+            const grouped = Object.create(null);
+            spells.forEach((spell) => {
+                const level = Math.max(0, Math.min(9, Utils.toInt(spell && spell.level, 0)));
+                grouped[level] = grouped[level] || [];
+                grouped[level].push(spell);
+            });
+            Object.keys(grouped).map((value) => Utils.toInt(value, 0)).sort((a, b) => a - b).forEach((level) => {
+                try {
+                    const chars = Render.buildSpellsCard(characterName, Object.assign({}, data, { spells: grouped[level] })).length;
+                    result.levelCards.push({ level, count: grouped[level].length, chars });
+                } catch (error) {
+                    result.levelCards.push({ level, count: grouped[level].length, chars: 0, error: Logger.format(error) });
+                }
+            });
+            spells.forEach((spell) => {
+                try {
+                    const chars = Render.buildSpellsCard(characterName, Object.assign({}, data, { spells: [spell] })).length;
+                    if (chars > result.singleSpellMaxChars) {
+                        result.singleSpellMaxChars = chars;
+                        result.singleSpellMaxName = String(spell.name || 'Spell').trim() || 'Spell';
+                    }
+                } catch (error) {
+                    Logger.info('[spells-debug:single-render] name=' + String(spell && spell.name || 'Spell') + ' error=' + Logger.format(error));
+                }
+            });
+            return result;
+        },
+
+        buildLegacySpellCardChunks(characterName, spellList, maxChars) {
+            const data = spellList || {};
+            const spells = (Array.isArray(data.spells) ? data.spells : [])
+                .filter((spell) => spell && String(spell.name || '').trim());
+            const limit = Math.max(6500, Utils.toInt(maxChars, 8000));
+            if (!spells.length) {
+                const html = Render.buildSpellsCard(characterName, data);
+                return [{ html, level: null, count: 0, chars: html.length }];
+            }
+
+            const fullHtml = Render.buildSpellsCard(characterName, data);
+            if (fullHtml.length <= limit) {
+                return [{ html: fullHtml, level: null, count: spells.length, chars: fullHtml.length }];
+            }
+
+            const grouped = Object.create(null);
+            spells.forEach((spell) => {
+                const level = Math.max(0, Math.min(9, Utils.toInt(spell && spell.level, 0)));
+                grouped[level] = grouped[level] || [];
+                grouped[level].push(spell);
+            });
+
+            const cards = [];
+            const levels = Object.keys(grouped).map((value) => Utils.toInt(value, 0)).sort((a, b) => a - b);
+            levels.forEach((level) => {
+                let chunk = [];
+                const flush = () => {
+                    if (!chunk.length) return;
+                    const html = Render.buildSpellsCard(characterName, Object.assign({}, data, { spells: chunk.slice() }));
+                    cards.push({ html, level, count: chunk.length, chars: html.length });
+                    chunk = [];
+                };
+
+                grouped[level].forEach((spell) => {
+                    const candidate = chunk.concat([spell]);
+                    const candidateHtml = Render.buildSpellsCard(characterName, Object.assign({}, data, { spells: candidate }));
+                    if (chunk.length && candidateHtml.length > limit) {
+                        flush();
+                        chunk = [spell];
+                    } else {
+                        chunk = candidate;
+                    }
+                });
+                flush();
+            });
+            return cards;
+        },
+
+        async showSpellsForContext(ctx, commandArgs) {
+            const info = this.resolveSheetCommandContext(ctx, commandArgs, 'spells');
+            if (!info.ok) {
+                Render.sendWhisperMessage(ctx && ctx.who || 'GM', 'Spells', info.message, 'warning');
+                return false;
+            }
+            const recipient = ctx && ctx.who || 'GM';
+            let snapshot = null;
+            let root = null;
+            let isBeacon = false;
+            let spellList = null;
+            try {
+                snapshot = this.getStoreDiagnosticSnapshot(info.characterId);
+                root = snapshot.root;
+                isBeacon = !!(root && typeof root === 'object' && (root.integrants || root.settings || root.hitpoints));
+                spellList = this.getSpellListData(info.characterId, isBeacon ? root : null, snapshot.attrs);
+            } catch (error) {
+                Logger.error('[actions:spells:read]', Logger.format(error));
+                Render.sendWhisperMessage(recipient, 'Spells', "Combat Assistant could not read this character's spell data.", 'failure');
+                return false;
+            }
+
+            const spellCount = spellList && Array.isArray(spellList.spells) ? spellList.spells.length : 0;
+            const renderSpellList = isBeacon ? spellList : this.prepareLegacySpellListForSharedRenderer(spellList);
+            const debugSpells = !!RuntimeConfig.get('CHAT_DEBUG_SPELLS');
+            const renderProbe = debugSpells ? this.inspectSpellRender(info.characterName, renderSpellList) : null;
+            let spellCards = [];
+            try {
+                const html = Render.buildSpellsCard(info.characterName, renderSpellList);
+                spellCards = [{ html, level: null, count: spellCount, chars: html.length }];
+            } catch (error) {
+                Logger.error('[actions:spells:render]', Logger.format(error));
+                Render.sendWhisperMessage(recipient, 'Spells', 'Spell data was collected, but the spell list renderer failed. Check the API console.', 'failure');
+                return false;
+            }
+
+            if (debugSpells) {
+                if (!isBeacon && renderProbe) {
+                    renderProbe.fullCardChars = spellCards[0] ? spellCards[0].chars : renderProbe.fullCardChars;
+                }
+                const levelStats = renderProbe && Array.isArray(renderProbe.levelCards)
+                    ? renderProbe.levelCards.map((entry) => 'Lv' + String(entry.level) + ':' + String(entry.count) + '/' + String(entry.chars)).join(',')
+                    : '';
+                const chunkStats = spellCards.map((entry, index) =>
+                    String(index + 1) + ':' + (entry.level === null ? 'all' : ('Lv' + String(entry.level))) + '/' + String(entry.count) + '/' + String(entry.chars)
+                ).join(',');
+                Logger.info('[spells-debug] sheet=' + (isBeacon ? '2024' : '2014') +
+                    ' characterId=' + String(info.characterId || '') +
+                    ' spells=' + String(spellCount) +
+                    ' fullCardChars=' + String(renderProbe && renderProbe.fullCardChars || (spellCards[0] && spellCards[0].chars) || 0) +
+                    ' cards=' + String(spellCards.length) +
+                    ' cardStats=' + chunkStats +
+                    ' largestSingle=' + String(renderProbe && renderProbe.singleSpellMaxChars || 0) +
+                    ' largestName=' + String(renderProbe && renderProbe.singleSpellMaxName || '') +
+                    ' levels=' + levelStats);
+                if (!isBeacon) {
+                    if (renderProbe) {
+                        renderProbe.chunkCount = spellCards.length;
+                        renderProbe.chunkCards = spellCards.map((entry) => ({ level: entry.level, count: entry.count, chars: entry.chars }));
+                    }
+                    R20.whisper(recipient, Render.buildSpellRenderProbeCard(info.characterName, renderSpellList, renderProbe));
+                }
+            }
+
+            // Roll20 sendChat callbacks capture the generated message instead of displaying it.
+            // Spell cards must therefore be sent without a callback.
+            spellCards.forEach((entry) => {
+                R20.whisper(recipient, entry.html);
+            });
+            if (debugSpells) {
+                Logger.info('[spells-debug:send] sheet=' + (isBeacon ? '2024' : '2014') +
+                    ' cards=' + String(spellCards.length) +
+                    ' chars=' + spellCards.map((entry) => String(entry.chars)).join(','));
+            }
+            Logger.debug('[actions:spells] sheet=' + (isBeacon ? '2024' : '2014') + ' spells=' + String(spellCount));
+
+            if (debugSpells) {
+                let diagnosticSet = null;
+                try {
+                    diagnosticSet = isBeacon
+                        ? this.getBeaconSpellDiagnostics(info.characterId, root, snapshot.storeChars, snapshot.readMs)
+                        : this.getLegacySpellDiagnostics(info.characterId, snapshot.attrs, snapshot.readMs);
+                    if (diagnosticSet && renderProbe) {
+                        diagnosticSet.fullCardChars = renderProbe.fullCardChars;
+                        diagnosticSet.levelCardChars = (renderProbe.levelCards || []).map((entry) => 'Lv' + String(entry.level) + '=' + String(entry.chars)).join(' | ');
+                        diagnosticSet.singleSpellMaxChars = renderProbe.singleSpellMaxChars;
+                        diagnosticSet.renderError = renderProbe.fullCardError || '';
+                        diagnosticSet.chunkCount = spellCards.length;
+                        diagnosticSet.chunkCardChars = spellCards.map((entry) => String(entry.chars)).join(' | ');
+                    }
+                } catch (error) {
+                    Logger.info('[actions:spells-diagnostic] ' + Logger.format(error));
+                }
+                if (diagnosticSet) {
+                    R20.whisper(recipient, Render.buildSpellDiagnosticSummaryCard(info.characterName, diagnosticSet));
+                    const diagnosticSpells = Array.isArray(diagnosticSet.spells) ? diagnosticSet.spells : [];
+                    const extra = Array.isArray(diagnosticSet.extraEntries) ? diagnosticSet.extraEntries : [];
+                    diagnosticSpells.forEach((diagnostic, index) => {
+                        R20.whisper(recipient, Render.buildSpellDiagnosticCard(info.characterName, diagnostic, index, diagnosticSpells.length));
+                    });
+                    extra.forEach((diagnostic) => {
+                        R20.whisper(recipient, Render.buildSpellDiagnosticCard(info.characterName, diagnostic, 0, 0));
+                    });
+                }
+            }
+            return true;
+        }
+    };
+
     const ResourceService = {
         LEVEL_WORDS: Object.freeze(['', 'FIRST', 'SECOND', 'THIRD', 'FOURTH', 'FIFTH', 'SIXTH', 'SEVENTH', 'EIGHTH', 'NINTH']),
         MAX_STORE_BYTES: 9500000,
@@ -9574,10 +13262,28 @@ const CombatAssistant = (() => {
             const currentByLevel = root.spellSlots && root.spellSlots.currentByLevel && typeof root.spellSlots.currentByLevel === 'object'
                 ? root.spellSlots.currentByLevel
                 : {};
+            const profiles = (typeof ActionService !== 'undefined' && ActionService && Utils.isFunction(ActionService.beaconSpellcastingProfiles))
+                ? ActionService.beaconSpellcastingProfiles(root)
+                : [];
+            const pactProfiles = profiles.filter((profile) => String(profile && profile.casterType || '').trim().toLowerCase() === 'pact');
+            const hasStandardNonPactProfile = profiles.some((profile) => /^(?:full|half|third)$/.test(String(profile && profile.casterType || '').trim().toLowerCase()));
+            const pactOnlySlots = pactProfiles.length > 0 && !hasStandardNonPactProfile;
+            const pactSourceIds = Object.create(null);
+            pactProfiles.forEach((profile) => {
+                const sourceId = String(profile && profile.sourceID || '').trim();
+                if (sourceId) pactSourceIds[sourceId] = true;
+            });
+
+            // Normal spell-slot maxima exclude Pact Magic slot definitions. This
+            // prevents a Warlock's 2 Pact slots from being rendered as fake
+            // Lv1/Lv2/Lv3 resources while preserving normal slots for multiclass
+            // characters that also have a non-pact spellcasting progression.
             const maxima = Object.create(null);
             Object.keys(integrants).forEach((id) => {
                 const slot = integrants[id];
                 if (!slot || slot._enabled === false || String(slot.type || '').toLowerCase() !== 'spell slot') return;
+                const slotSourceId = String(slot.sourceID || '').trim();
+                if (pactOnlySlots || (slotSourceId && pactSourceIds[slotSourceId])) return;
                 let level = this.toResourceInt(slot.spellLevel, 0);
                 if (!level) {
                     const match = String(slot.recordName || slot.name || '').match(/level\s+(\d+)\s+spell\s+slots?/i);
@@ -9609,8 +13315,27 @@ const CombatAssistant = (() => {
                     ref: { kind: 'beacon-spell', level, levelKey: key, label: 'Spell Slots Lv' + String(level) }
                 });
             }
+
+            const pactEntries = [];
+            const pactProfile = pactProfiles.find((profile) => String(profile && profile.source || '').trim().toLowerCase() === 'class') || pactProfiles[0] || null;
+            if (pactProfile) {
+                const level = Math.max(0, this.toResourceInt(pactProfile.pactSlotLevel, 0));
+                const current = Math.max(0, this.toResourceInt(pactProfile.pactSlotsCurrent, 0));
+                const max = Math.max(0, this.toResourceInt(pactProfile.pactSlotMax, 0));
+                const levelKey = this.LEVEL_WORDS[level] || '';
+                if (level > 0 && levelKey && max > 0) {
+                    const label = 'Pact Magic Lv' + String(level);
+                    pactEntries.push({
+                        label,
+                        current,
+                        max,
+                        sheetVersion: '2024',
+                        ref: { kind: 'beacon-pact', level, levelKey, label }
+                    });
+                }
+            }
             resources.sort((a, b) => String(a.label).localeCompare(String(b.label)));
-            return spellSlots.concat(resources);
+            return pactEntries.concat(spellSlots, resources);
         },
 
         getEntries(characterId) {
@@ -9621,12 +13346,13 @@ const CombatAssistant = (() => {
         },
 
         resourceAdjustButtonHtml(tokenId, entry, direction) {
+            if (!String(tokenId || '').trim()) return '';
             const isUse = direction === 'use';
             const payload = Utils.encodeJsonPayload(entry && entry.ref || {});
             const command = Render.sanitizeCommand('!combatAssistant resourceadjust ' + direction + ' ' + Utils.attrSafe(tokenId) + ' ' + payload + ' &#63;{Quantity|1}');
             const tooltip = isUse ? ('Use ' + String(entry && entry.label || 'resource')) : ('Recover ' + String(entry && entry.label || 'resource'));
             const symbol = isUse ? '-' : '+';
-            return '<a href="' + command + '" title="' + Utils.attrSafe(tooltip) + '" style="display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;min-width:14px;min-height:14px;padding:0;margin:0;overflow:hidden;text-decoration:none;border:0;border-radius:3px;box-sizing:border-box;box-shadow:inset 0 0 0 1px rgba(255,255,255,0.65);background:' +
+            return '<a href="' + command + '" title="' + Utils.attrSafe(tooltip) + '" style="display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;min-width:14px;min-height:14px;max-height:14px;padding:0;margin:0;overflow:hidden;text-decoration:none;border:0;border-radius:3px;box-sizing:border-box;box-shadow:inset 0 0 0 1px rgba(255,255,255,0.65);background:' +
                 (isUse ? 'rgba(150,45,45,0.95)' : 'rgba(35,125,70,0.95)') + ';color:rgb(255,255,255);text-align:center;vertical-align:middle;line-height:14px;">' +
                 '<b style="display:flex;align-items:center;justify-content:center;width:14px;height:14px;margin:0;padding:0;text-align:center;font-size:14px;line-height:14px;font-family:Arial,Helvetica,sans-serif;">' + symbol + '</b>' +
             '</a>';
@@ -9634,8 +13360,12 @@ const CombatAssistant = (() => {
 
         buildResourceRowsHtml(tokenId, entries) {
             return (Array.isArray(entries) ? entries : []).map((entry) => {
-                const currentColor = entry.current > 0 ? 'rgb(52,203,116)' : 'rgb(220,45,45)';
-                const valueHtml = '<b style="font-size:13px;line-height:14px;"><span style="color:' + currentColor + ';">' + Utils.escapeHtml(String(entry.current)) + '</span> <span style="color:rgb(225,225,225);">/</span> ' +
+                const current = Math.max(0, Utils.toInt(entry && entry.current, 0));
+                const max = Math.max(0, Utils.toInt(entry && entry.max, 0));
+                const currentColor = current <= 0
+                    ? 'rgb(220,45,45)'
+                    : (max > 0 && current >= max ? 'rgb(52,203,116)' : 'rgb(235,205,75)');
+                const valueHtml = '<b style="display:inline-block;padding-top:2px;vertical-align:middle;font-size:13px;line-height:14px;"><span style="color:' + currentColor + ';">' + Utils.escapeHtml(String(entry.current)) + '</span> <span style="color:rgb(225,225,225);">/</span> ' +
                     '<span style="color:rgb(52,203,116);">' + Utils.escapeHtml(String(entry.max)) + '</span></b>';
                 const minus = this.resourceAdjustButtonHtml(tokenId, entry, 'use');
                 const plus = this.resourceAdjustButtonHtml(tokenId, entry, 'recover');
@@ -9667,24 +13397,64 @@ const CombatAssistant = (() => {
             });
         },
 
-        showForContext(ctx) {
+        findRepresentativeToken(characterId, ctx) {
+            const safeCharacterId = String(characterId || '').trim();
+            if (!safeCharacterId) return null;
+            const pageId = R20.getPlayerPageId(ctx && ctx.playerId || '');
+            const pageToken = pageId ? R20.findTokenByCharacterIdOnPage(safeCharacterId, pageId) : null;
+            if (pageToken) return pageToken;
+            const tokens = R20.getTokensByCharacterId(safeCharacterId);
+            return tokens[0] || null;
+        },
+
+        showForContext(ctx, args) {
             const tokens = R20.getSelectedTokens(ctx && ctx.msg);
-            if (!tokens.length) {
-                Render.sendWhisperMessage(ctx && ctx.who || 'GM', 'Resources', 'Select one or more tokens linked to a character sheet.', 'warning');
-                return false;
-            }
             let sent = 0;
-            tokens.forEach((token) => {
-                if (!ctx.isGM && !R20.tokenIsControlledByPlayer(token, R20.getCharacterFromToken(token), ctx.playerId)) return;
-                const info = this.getCharacterContext(token);
-                if (!info.characterId || !info.character) return;
-                R20.whisper(ctx.who || 'GM', this.buildResourcesCard(token, info.character, this.getEntries(info.characterId)));
-                sent += 1;
-            });
-            if (!sent) {
-                Render.sendWhisperMessage(ctx && ctx.who || 'GM', 'Resources', 'No selected token with an accessible linked character sheet was found.', 'warning');
+
+            // Selection always wins. This preserves the original multi-token
+            // behavior even if a name was also typed after the command.
+            if (tokens.length) {
+                tokens.forEach((token) => {
+                    if (!ctx.isGM && !R20.tokenIsControlledByPlayer(token, R20.getCharacterFromToken(token), ctx.playerId)) return;
+                    const info = this.getCharacterContext(token);
+                    if (!info.characterId || !info.character) return;
+                    R20.whisper(ctx.who || 'GM', this.buildResourcesCard(token, info.character, this.getEntries(info.characterId)));
+                    sent += 1;
+                });
+                if (!sent) {
+                    Render.sendWhisperMessage(ctx && ctx.who || 'GM', 'Resources', 'No selected token with an accessible linked character sheet was found.', 'warning');
+                    return false;
+                }
+                return true;
+            }
+
+            const characterName = (Array.isArray(args) ? args : [args])
+                .map((value) => String(value || '').trim())
+                .filter(Boolean)
+                .join(' ')
+                .trim();
+            if (!characterName) {
+                Render.sendWhisperMessage(ctx && ctx.who || 'GM', 'Resources', 'Select a linked token or use <code>!ca resources &quot;Character Name&quot;</code>.', 'warning');
                 return false;
             }
+
+            const character = R20.getCharacterByName(characterName);
+            if (!character) {
+                Render.sendWhisperMessage(ctx && ctx.who || 'GM', 'Resources', 'No character sheet named <strong>' + Utils.escapeHtml(characterName) + '</strong> was found.', 'warning');
+                return false;
+            }
+            const characterId = String(character.id || (Utils.isFunction(character.get) ? character.get('_id') : '') || '').trim();
+            const token = this.findRepresentativeToken(characterId, ctx);
+            if (!ctx.isGM) {
+                const controlled = token
+                    ? R20.tokenIsControlledByPlayer(token, character, ctx.playerId)
+                    : !!R20.getCharacterAccessFlags(character, ctx.playerId, false).controlAccess;
+                if (!controlled) {
+                    Render.sendWhisperMessage(ctx.who, 'Resources', 'You do not control that character.', 'warning');
+                    return false;
+                }
+            }
+            R20.whisper(ctx.who || 'GM', this.buildResourcesCard(token, character, this.getEntries(characterId)));
             return true;
         },
 
@@ -9736,7 +13506,7 @@ const CombatAssistant = (() => {
                 const id = String(ref && ref.id || '').trim();
                 return entries.find((entry) => entry.ref && entry.ref.kind === kind && String(entry.ref.id || '').trim() === id) || null;
             }
-            if (kind === 'beacon-spell') {
+            if (kind === 'beacon-spell' || kind === 'beacon-pact') {
                 const level = this.toResourceInt(ref && ref.level, 0);
                 return entries.find((entry) => entry.ref && entry.ref.kind === kind && this.toResourceInt(entry.ref.level, 0) === level) || null;
             }
@@ -9892,17 +13662,18 @@ const CombatAssistant = (() => {
                 node.value = safeValue;
                 return { ok: true };
             }
-            if (kind === 'beacon-spell') {
+            if (kind === 'beacon-spell' || kind === 'beacon-pact') {
                 const level = this.toResourceInt(ref && ref.level, 0);
                 const levelKey = String(ref && ref.levelKey || this.LEVEL_WORDS[level] || '').trim();
                 if (level < 1 || level > 9 || !levelKey) {
                     return { ok: false, message: 'The 2024 spell slot reference is invalid.' };
                 }
                 root.spellSlots = root.spellSlots && typeof root.spellSlots === 'object' ? root.spellSlots : {};
-                root.spellSlots.currentByLevel = root.spellSlots.currentByLevel && typeof root.spellSlots.currentByLevel === 'object'
-                    ? root.spellSlots.currentByLevel
+                const bucketName = kind === 'beacon-pact' ? 'currentPactByLevel' : 'currentByLevel';
+                root.spellSlots[bucketName] = root.spellSlots[bucketName] && typeof root.spellSlots[bucketName] === 'object'
+                    ? root.spellSlots[bucketName]
                     : {};
-                root.spellSlots.currentByLevel[levelKey] = safeValue;
+                root.spellSlots[bucketName][levelKey] = safeValue;
                 return { ok: true };
             }
             return { ok: false, message: 'The 2024 resource reference is invalid.' };
@@ -9918,10 +13689,11 @@ const CombatAssistant = (() => {
                 const value = parseInt(node.value, 10);
                 return Number.isNaN(value) ? null : Math.max(0, value);
             }
-            if (kind === 'beacon-spell') {
+            if (kind === 'beacon-spell' || kind === 'beacon-pact') {
                 const level = this.toResourceInt(ref && ref.level, 0);
                 const levelKey = String(ref && ref.levelKey || this.LEVEL_WORDS[level] || '').trim();
-                const currentByLevel = root && root.spellSlots && root.spellSlots.currentByLevel;
+                const bucketName = kind === 'beacon-pact' ? 'currentPactByLevel' : 'currentByLevel';
+                const currentByLevel = root && root.spellSlots && root.spellSlots[bucketName];
                 if (!currentByLevel || typeof currentByLevel !== 'object' || !levelKey) return null;
                 const value = parseInt(currentByLevel[levelKey], 10);
                 return Number.isNaN(value) ? null : Math.max(0, value);
@@ -9992,9 +13764,9 @@ const CombatAssistant = (() => {
         buildResourceUpdateCard(token, character, label, direction, quantity, current, max) {
             const characterName = character && Utils.isFunction(character.get) ? String(character.get('name') || 'Character').trim() : 'Character';
             const imgsrc = token && Utils.isFunction(token.get) ? String(token.get('imgsrc') || '').trim() : '';
-            const image = Utils.isSafeImageUrl(imgsrc) && imgsrc
-                ? '<img src="' + Utils.attrSafe(imgsrc) + '" style="display:block;width:28px;height:28px;object-fit:cover;border-radius:4px;" />'
-                : '<span style="display:block;width:28px;height:28px;line-height:28px;text-align:center;border-radius:4px;background:rgba(55,55,55,0.95);font-size:12px;">?</span>';
+            const avatar = character && Utils.isFunction(character.get) ? String(character.get('avatar') || '').trim() : '';
+            const renderedImage = Render.chatTokenImageHtml(imgsrc, 28, avatar, 4);
+            const image = renderedImage || '<span style="display:block;width:28px;height:28px;line-height:28px;text-align:center;border-radius:4px;background:rgba(55,55,55,0.95);font-size:12px;">?</span>';
             const titleHtml = '<table style="width:100%;border-collapse:collapse;table-layout:fixed;"><tbody><tr>' +
                 '<td style="width:34px;text-align:left;vertical-align:middle;">' + image + '</td>' +
                 '<td style="text-align:center;vertical-align:middle;font-weight:900;color:rgb(235,235,235);padding-right:34px;">Resource Update</td>' +
@@ -10149,6 +13921,7 @@ const CombatAssistant = (() => {
         isPlayerAllowedAction(action) {
             return !!PLAYER_ALLOWED_ACTIONS[String(action || '').trim().toLowerCase()];
         },
+
 
         canUsePlayerActionRequest(ctx, request) {
             if (ctx.isGM) return true;
@@ -10493,7 +14266,35 @@ const CombatAssistant = (() => {
                 Render.showHelp(ctx.who);
                 return;
             }
+            if (action === 'advancemode' || action === 'advancedmode') {
+                const value = String(args[1] || '').trim().toLowerCase();
+                if (value !== 'yes' && value !== 'no') {
+                    Render.sendWhisperMessage(ctx.who, 'Advanced Mode', 'Use <code>!ca advancemode yes</code> or <code>!ca advancemode no</code>. Advanced mode is temporary and resets to NO whenever the API sandbox restarts.', 'warning');
+                    return;
+                }
+                RuntimeConfig.setAdvancedMode(value === 'yes');
+                Render.sendWhisperMessage(ctx.who, 'Advanced Mode', value === 'yes'
+                    ? 'Advanced Mode is enabled for this API session. Temporary debug settings are now visible.'
+                    : 'Advanced Mode is disabled. Temporary debug settings were reset to OFF.', 'normal');
+                Render.showConfigMenu(ctx.who);
+                return;
+            }
             if (action === 'config' || action === 'settings') {
+                Render.showConfigMenu(ctx.who);
+                return;
+            }
+            if (action === 'default' || action === 'defaults') {
+                const confirmed = String(args[1] || '').trim().toLowerCase() === 'yes';
+                if (!confirmed) {
+                    Render.sendWhisperMessage(ctx.who, 'Settings', 'Default reset cancelled. Use the <strong>Default</strong> button at the bottom of Settings and confirm Yes.', 'warning');
+                    return;
+                }
+                RuntimeConfig.resetDefaults();
+                TurnTracker.clearMovementState();
+                if (RUNTIME_CONFIG_DEFAULTS.TURN_TRACKER) TurnTracker.initializeFromCurrentTurnOrder();
+                else TurnTracker.resetState();
+                TurnTracker.refreshCurrentTurnPresentation({ sendCard: false, focus: false });
+                Render.sendWhisperMessage(ctx.who, 'Settings', 'All Combat Assistant settings were restored to their defaults. Advanced Mode and temporary debug settings were also reset.', 'normal');
                 Render.showConfigMenu(ctx.who);
                 return;
             }
@@ -10505,6 +14306,10 @@ const CombatAssistant = (() => {
                 else {
                     if (result.key === 'TURN_TRACKER' && result.value) TurnTracker.initializeFromCurrentTurnOrder();
                     if (result.key === 'TURN_TRACKER' && !result.value) TurnTracker.resetState();
+                    if (result.key === 'TURN_MOVEMENT_TRACKER') {
+                        if (result.value) TurnTracker.resetMovementForCurrentTurn({ resolveAsync: true });
+                        else TurnTracker.clearMovementState();
+                    }
                     if (/^TURN_MARKER|^PUBLIC_TURN_MARKER|^TURN_AUTO_FOCUS/.test(result.key || '')) TurnTracker.refreshCurrentTurnPresentation({ sendCard: false, focus: false });
                     Render.showConfigMenu(ctx.who);
                 }
@@ -10516,13 +14321,33 @@ const CombatAssistant = (() => {
                 else {
                     if (result.key === 'TURN_TRACKER' && result.value) TurnTracker.initializeFromCurrentTurnOrder();
                     if (result.key === 'TURN_TRACKER' && !result.value) TurnTracker.resetState();
+                    if (result.key === 'TURN_MOVEMENT_TRACKER') {
+                        if (result.value) TurnTracker.resetMovementForCurrentTurn({ resolveAsync: true });
+                        else TurnTracker.clearMovementState();
+                    }
                     if (/^TURN_MARKER|^PUBLIC_TURN_MARKER|^TURN_AUTO_FOCUS/.test(result.key || '')) TurnTracker.refreshCurrentTurnPresentation({ sendCard: false, focus: false });
                     Render.showConfigMenu(ctx.who);
                 }
                 return;
             }
+            if (action === 'dash' || action === 'disengage' || action === 'dodge') {
+                ActionService.narrativeAction(ctx, action, '');
+                return;
+            }
+            if (action === 'turnaction') {
+                ActionService.narrativeAction(ctx, args[1] || '', args[2] || '');
+                return;
+            }
+            if (action === 'combat') {
+                await ActionService.showCombatForContext(ctx, args.slice(1));
+                return;
+            }
+            if (action === 'spells') {
+                await ActionService.showSpellsForContext(ctx, args.slice(1));
+                return;
+            }
             if (action === 'resource' || action === 'resources') {
-                ResourceService.showForContext(ctx);
+                ResourceService.showForContext(ctx, args.slice(1));
                 return;
             }
             if (action === 'resourceadjust') {
@@ -10531,6 +14356,10 @@ const CombatAssistant = (() => {
             }
             if (action === 'turn') {
                 const turnAction = String(args[1] || '').trim().toLowerCase();
+                if (!turnAction) {
+                    TurnTracker.sendCurrentTurnCardToContext(ctx);
+                    return;
+                }
                 if (turnAction === 'next') {
                     TurnTracker.advanceTurn(args[2] || '', ctx);
                     return;
@@ -11842,6 +15671,11 @@ const CombatAssistant = (() => {
                 Render.sendWhisperMessage(ctx.who, 'Healing', 'No target tokens were found. Select one or more tokens before pressing the button.', 'warning');
                 return { applied, failed: failed + 1 };
             }
+            const successfulResults = [];
+            const sourceName = String(payload.sourceName || '').trim();
+            const sourceAction = String(payload.sourceAction || '').trim();
+            const isManualHealing = /^manual$/i.test(sourceName) || /^manual(?:\s+healing)?$/i.test(sourceAction);
+            const aggregateGmHealing = !!(ctx && ctx.isGM && isManualHealing && String(payload.mode || 'hp').toLowerCase() !== 'temp');
             for (let i = 0; i < tokens.length; i += 1) {
                 const result = await CombatService.applyHealToToken(tokens[i], payload);
                 if (!result.ok) {
@@ -11850,9 +15684,13 @@ const CombatAssistant = (() => {
                     failed += 1;
                     continue;
                 }
-                Render.sendHealResult(result, ctx.who);
+                successfulResults.push(result);
+                if (!aggregateGmHealing) Render.sendHealResult(result, ctx.who);
                 CombatService.completePersistentAreaMarkerTarget(payload, tokens[i]);
                 applied += 1;
+            }
+            if (aggregateGmHealing && successfulResults.length) {
+                Render.sendGmHealingSummary(successfulResults, payload.amount || payload.healing || payload.heal || 0, ctx.who);
             }
             return { applied, failed };
         }
@@ -11862,11 +15700,11 @@ const CombatAssistant = (() => {
      * Events / registration
      * --------------------------------------------------------------------- */
     const Events = {
-        onGraphicChange(obj) {
+        onGraphicChange(obj, previous) {
             try {
                 if (!SCRIPT_ACTIVE) return;
                 R20.syncAreaMarkerGroupForMovedToken(obj);
-                TurnTracker.handleGraphicChange(obj);
+                TurnTracker.handleGraphicChange(obj, previous || {});
             } catch (error) {
                 Logger.debug('[change:graphic]', error && error.message ? error.message : String(error));
             }
@@ -11977,6 +15815,7 @@ const CombatAssistant = (() => {
         RollParser,
         TurnTracker,
         CombatService,
+        ActionService,
         ResourceService
     });
 })();
