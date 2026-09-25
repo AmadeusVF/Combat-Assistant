@@ -5166,7 +5166,7 @@ const CombatAssistant = (() => {
             });
             const shortcutButtons = [
                 { iconHtml: '&#129706;', label: 'Sheet', command: '!ca sheet', labelSize: 10, backgroundColor: 'rgba(150,135,90,0.85)', tooltip: 'Open the Compact Sheet for the selected token' },
-                { iconHtml: '&#128209;', label: 'Resource', command: '!ca resources', labelSize: 10, backgroundColor: 'rgba(80,120,150,0.85)', tooltip: 'Open Resources for the selected token' },
+                { iconHtml: '&#128209;', label: 'Resource', command: '!ca resources', labelSize: 8, backgroundColor: 'rgba(80,120,150,0.85)', tooltip: 'Open Resources for the selected token' },
                 { iconHtml: '&#129518;', label: 'Turn\nRound', command: '!ca turnRound', backgroundColor: 'rgba(145,85,85,0.85)', tooltip: 'Show the Round Counter using its public/GM delivery setting' },
                 { iconHtml: '&#128203;', label: 'Turn\nCard', command: '!ca turnCard', backgroundColor: 'rgba(80,135,95,0.85)', tooltip: 'Open the Turn Card for the selected token' },
                 { iconHtml: '&#10145;&#65039;', label: 'Turn\nNext', command: '!ca turnNext', tooltip: 'Advance to the next turn' }
