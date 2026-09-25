@@ -4,7 +4,7 @@
  * @Project     Combat Assistant
  * @Description Lightweight Roll20 combat assistance extracted from T&T ideas.
  * @Author      AmadeusVF
- * @Version     1.2.9
+ * @Version     1.2.10
  * =========================================================
  *
  * Design goals:
@@ -39,7 +39,7 @@ const CombatAssistant = (() => {
         SHORT_NAME: 'CA',
         LOG_NAME: 'Combat Assistant',
         CHAT_NAME: 'Combat Assistant',
-        VERSION: '1.2.9',
+        VERSION: '1.2.10',
         SCHEMA_VERSION: 7,
         STATE_KEY: 'COMBAT_ASSISTANT',
         LEGACY_STATE_KEY: 'COMBAT_TRACKER',
@@ -51,40 +51,57 @@ const CombatAssistant = (() => {
         '!ca'
     ]);
 
-    const PLAYER_ALLOWED_ACTIONS = Object.freeze({
-        help: true,
-        use: true,
-        usearea: true,
-        conc: true,
-        concopen: true,
-        conend: true,
-        cleanupbatch: true,
-        rollsave: true,
-        rollinit: true,
-        turn: true,
-        turnnext: true,
-        turnfocus: true,
-        resource: true,
-        resources: true,
-        resourceadjust: true,
-        turnaction: true,
-        dash: true,
-        disengage: true,
-        dodge: true,
-        combat: true,
-        spells: true
+    const PLAYER_TOKEN_ACTIONS = Object.freeze({
+        help: Object.freeze({ name: 'CA Help', command: '!ca help' }),
+        sheet: Object.freeze({ name: 'CA Sheet', command: '!ca sheet' }),
+        'player-init': Object.freeze({ name: 'CA Initiative', command: '!ca player-init' }),
+        combat: Object.freeze({ name: 'CA Combat', command: '!ca combat' }),
+        spells: Object.freeze({ name: 'CA Spells', command: '!ca spells' }),
+        dash: Object.freeze({ name: 'CA Dash', command: '!ca dash' }),
+        disengage: Object.freeze({ name: 'CA Disengage', command: '!ca disengage' }),
+        dodge: Object.freeze({ name: 'CA Dodge', command: '!ca dodge' }),
+        turn: Object.freeze({ name: 'CA Turn', command: '!ca turn' }),
+        turncard: Object.freeze({ name: 'CA Turn Card', command: '!ca turncard' }),
+        turnnext: Object.freeze({ name: 'CA Turn Next', command: '!ca turnnext' }),
+        turnfocus: Object.freeze({ name: 'CA Turn Focus', command: '!ca turnfocus' }),
+        resources: Object.freeze({ name: 'CA Resources', command: '!ca resources' }),
+        conc: Object.freeze({ name: 'CA Concentration', command: '!ca conc' })
     });
+
+    const PLAYER_ALLOWED_ACTIONS = Object.freeze(Object.assign(
+        Object.keys(PLAYER_TOKEN_ACTIONS).reduce((allowed, action) => {
+            allowed[action] = true;
+            return allowed;
+        }, {}),
+        {
+            use: true,
+            usearea: true,
+            concopen: true,
+            conend: true,
+            cleanupbatch: true,
+            rollsave: true,
+            rollinit: true,
+            'turn-card': true,
+            resource: true,
+            resourceadjust: true,
+            turnaction: true,
+            sheetfocus: true,
+            tokenaction: true
+        }
+    ));
 
     const INITIATIVE_BATCH_TIMERS = Object.create(null);
     const INITIATIVE_AUTO_WATCHDOGS = Object.create(null);
     const INITIATIVE_AUTO_COMPLETIONS = Object.create(null);
     const TOKEN_MUTATION_QUEUES = Object.create(null);
+    const PENDING_SPELL_SLOT_CASTS = Object.create(null);
     const NATIVE_SAVE_CAPTURE_BUFFER = {
         timer: null,
         rolls: []
     };
     const TURN_TRACKER_TIMERS = {
-        additions: null
+        additions: null,
+        rotation: null
     };
     let STATE_INITIALIZED = false;
     let AREA_MARKER_GROUP_SYNC_ACTIVE = false;
@@ -101,12 +118,16 @@ const CombatAssistant = (() => {
     const TEMP_RUNTIME_CONFIG_DEFAULTS = Object.freeze({
         DEBUG: false,
         CHAT_DEBUG_ATTACKS: false,
-        CHAT_DEBUG_SPELLS: false
+        CHAT_DEBUG_SPELLS: false,
+        CHAT_PROBE: false,
+        AREA_RADIUS_DEBUG_DRAW: false
     });
     const TEMP_RUNTIME_CONFIG = {
         DEBUG: false,
         CHAT_DEBUG_ATTACKS: false,
-        CHAT_DEBUG_SPELLS: false
+        CHAT_DEBUG_SPELLS: false,
+        CHAT_PROBE: false,
+        AREA_RADIUS_DEBUG_DRAW: false
     };
 
     /** -----------------------------------------------------------------------
@@ -193,6 +214,27 @@ const CombatAssistant = (() => {
         charisma: 'charisma'
     });
 
+    const SKILL_DEFINITIONS = Object.freeze({
+        acrobatics: Object.freeze({ label: 'Acrobatics', ability: 'dexterity', macro: 'acrobatics' }),
+        animal_handling: Object.freeze({ label: 'Animal Handling', ability: 'wisdom', macro: 'animal_handling' }),
+        arcana: Object.freeze({ label: 'Arcana', ability: 'intelligence', macro: 'arcana' }),
+        athletics: Object.freeze({ label: 'Athletics', ability: 'strength', macro: 'athletics' }),
+        deception: Object.freeze({ label: 'Deception', ability: 'charisma', macro: 'deception' }),
+        history: Object.freeze({ label: 'History', ability: 'intelligence', macro: 'history' }),
+        insight: Object.freeze({ label: 'Insight', ability: 'wisdom', macro: 'insight' }),
+        intimidation: Object.freeze({ label: 'Intimidation', ability: 'charisma', macro: 'intimidation' }),
+        investigation: Object.freeze({ label: 'Investigation', ability: 'intelligence', macro: 'investigation' }),
+        medicine: Object.freeze({ label: 'Medicine', ability: 'wisdom', macro: 'medicine' }),
+        nature: Object.freeze({ label: 'Nature', ability: 'intelligence', macro: 'nature' }),
+        perception: Object.freeze({ label: 'Perception', ability: 'wisdom', macro: 'perception' }),
+        performance: Object.freeze({ label: 'Performance', ability: 'charisma', macro: 'performance' }),
+        persuasion: Object.freeze({ label: 'Persuasion', ability: 'charisma', macro: 'persuasion' }),
+        religion: Object.freeze({ label: 'Religion', ability: 'intelligence', macro: 'religion' }),
+        sleight_of_hand: Object.freeze({ label: 'Sleight of Hand', ability: 'dexterity', macro: 'sleight_of_hand' }),
+        stealth: Object.freeze({ label: 'Stealth', ability: 'dexterity', macro: 'stealth' }),
+        survival: Object.freeze({ label: 'Survival', ability: 'wisdom', macro: 'survival' })
+    });
+
     const ROLL20_DAMAGE_ICON_URLS = Object.freeze({
         normal: "data:image/svg+xml,%3csvg%20xmlns='http://www.w3.org/2000/svg'%20width='18'%20height='18'%20viewBox='0%200%2024%2024'%3e%3cg%20clip-path='url(%23clip0_6055_60514)'%3e%3cpath%20d='M13.9888%200.960327C12.9835%203.21173%2011.9175%204.48701%2010.374%204.70611C9.05517%204.89314%207.34742%203.34326%205.42338%201.1437C6.51867%203.31739%206.92151%205.06119%206.18295%205.49192C5.30981%206.00127%203.56062%205.40084%200.970306%204.3133V4.81087C2.75235%205.94187%204.39406%207.04601%204.08749%207.45659C3.81834%207.81692%202.59124%207.75453%200.970306%207.53544V8.81902C3.31471%2010.0033%204.58512%2011.2177%204.58512%2012.3551C4.58512%2013.3335%202.63137%2015.3308%200.970353%2016.9129V17.6726C2.46942%2017.1816%204.30785%2016.9908%204.92576%2018.0917C5.55599%2019.2144%205.13281%2020.8047%204.32328%2023.121H5.71162C7.18246%2021.1343%208.58084%2019.541%209.32629%2019.611C9.85438%2019.661%209.60773%2021.2827%209.24778%2023.121H9.66693C10.9766%2019.4815%2012.5904%2017.2506%2014.9843%2017.332C17.0849%2017.4039%2019.0781%2019.5184%2021.2708%2021.0255C20.1247%2019.623%2018.013%2017.6254%2018.468%2017.2536C18.9465%2016.8621%2020.9978%2017.5783%2023.1307%2018.3538V17.6727C21.7313%2016.718%2020.444%2015.8005%2020.7732%2015.4724C21.0691%2015.1772%2021.972%2015.1295%2023.1306%2015.2104V13.8483C20.6149%2012.8453%2019.1332%2011.9094%2018.6776%2010.4169C18.3036%209.19144%2019.4322%207.56117%2021.559%205.59725C19.3371%206.81497%2017.7015%207.64217%2017.0536%206.48773C16.4717%205.45142%2017.1233%203.50864%2018.1536%200.960796H17.4202C16.5986%202.26144%2015.8987%203.24783%2015.6389%203.00398C15.4126%202.79136%2015.4101%202.0265%2015.508%200.960796H13.9887L13.9888%200.960421V0.960327ZM14.3294%202.46314C14.0701%204.45205%2013.5451%206.94392%2013.8684%207.24734C14.1105%207.47469%2015.0974%205.63691%2015.8588%204.46719C14.9991%206.63506%2014.1723%208.26547%2014.5893%209.00834C14.9189%209.59545%2015.7551%209.18131%2016.8855%208.5619C15.8035%209.56109%2015.2222%2010.3894%2015.4125%2011.0128C15.7902%2012.25%2017.5589%2012.7349%2020.7197%2013.8418C19.0967%2013.6313%2016.8627%2013.209%2016.4874%2013.5832C16.2357%2013.8343%2017.8085%2014.768%2018.7084%2015.415C17.3488%2014.9402%2015.6346%2014.2263%2015.3141%2014.4883C15.0827%2014.6777%2016.1559%2015.6927%2016.739%2016.4064C15.6233%2015.6397%2014.6019%2014.5674%2013.5332%2014.5314C11.9619%2014.478%2011.0617%2016.3664%2010.2856%2019.2511C10.4896%2017.8817%2011.1038%2015.7364%2010.6627%2015.6952C10.0369%2015.6364%208.52496%2017.8674%207.3942%2019.5313C8.18385%2017.1384%208.90123%2015.7753%208.42076%2014.9194C7.98707%2014.1468%206.35976%2014.6166%205.65513%2015.0272C6.48529%2014.2438%208.24474%2012.6675%208.24474%2012.0039C8.24474%2011.038%206.50174%209.95105%203.28762%209.03605C5.21981%209.34064%207.71098%209.89958%208.00184%209.51019C8.22918%209.20578%206.3554%208.14837%205.21512%207.39823C7.22231%208.25905%208.49431%208.84072%209.06295%208.50903C9.43865%208.28989%209.22963%207.40512%208.67238%206.29916C9.65123%207.41816%2010.5288%208.20603%2011.1998%208.11073C12.6154%207.90997%2013.2268%206.03731%2014.3294%202.46314H14.3294Z'%20fill='%23B8B8B8'/%3e%3c/g%3e%3cdefs%3e%3cclipPath%20id='clip0_6055_60514'%3e%3crect%20width='24'%20height='24'%20fill='%23B8B8B8'/%3e%3c/clipPath%3e%3c/defs%3e%3c/svg%3e",
         piercing: "data:image/svg+xml,%3csvg%20width='18'%20height='18'%20viewBox='0%200%2018%2018'%20xmlns='http://www.w3.org/2000/svg'%3e%3cg%20clip-path='url(%23clip0_1297_148459)'%3e%3cpath%20d='M17.2991%200.754796L12.4233%201.52268L13.9417%202.20492L12.6738%202.98933C12.8804%203.22505%2013.0524%203.49973%2013.1781%203.80783L14.5086%202.98497L14.4349%204.77463L17.2991%200.754761L17.2991%200.754796ZM10.5864%202.68723C10.5299%202.6867%2010.4738%202.68864%2010.4172%202.69271C9.7387%202.74183%209.06398%203.13164%208.60779%203.99244L8.32985%204.51753L8.0332%204.00337C7.43358%202.9651%206.36166%202.59016%205.45906%202.76742C4.5566%202.94461%203.83062%203.62411%203.87158%204.91301C3.89784%205.73939%204.30295%206.38057%204.89551%206.99823L5.45583%206.65106C5.70431%206.49722%205.96172%206.423%206.20068%206.42912C6.28035%206.43116%206.3579%206.44241%206.4325%206.4621C6.73084%206.54074%206.95999%206.74978%207.08943%207.00041C7.34832%207.50163%207.22538%208.21871%206.62361%208.59123L6.08969%208.92191C6.62945%2011.2279%205.20087%2012.4348%205.20087%2013.6911C5.20087%2014.401%205.82419%2014.9227%206.42695%2014.9227C7.04317%2014.9227%207.62883%2014.4355%207.62883%2013.7614C7.62883%2012.4439%206.11557%2010.9137%207.02896%208.9384C7.51778%209.41448%207.97706%209.94422%208.32535%2010.5765C8.56627%2010.1608%208.85635%209.79319%209.17022%209.45804C10.1071%2010.5778%208.95707%2011.7993%208.95707%2012.7276C8.95707%2013.1992%209.36636%2013.5406%209.79755%2013.5406C10.2193%2013.5406%2010.6556%2013.176%2010.6556%2012.6793C10.6556%2011.7113%209.2211%2010.4395%2010.5963%208.16943C10.6809%208.09936%2010.7641%208.03073%2010.8468%207.96176C11.3757%208.72616%2010.626%209.54695%2010.626%2010.1766C10.626%2010.5093%2010.915%2010.75%2011.2192%2010.75C11.5168%2010.75%2011.8246%2010.493%2011.8246%2010.1425C11.8246%209.45143%2010.7887%208.71118%2011.8179%207.0773C11.9851%206.90152%2012.1356%206.72274%2012.263%206.53789C12.5853%206.06986%2012.7707%205.57222%2012.7507%204.93276C12.7133%203.73429%2011.9663%202.97105%2011.0896%202.75195C10.9252%202.71092%2010.756%202.68867%2010.5864%202.68716V2.68723ZM6.14355%207.08503C6.05461%207.08943%205.94281%207.12194%205.80183%207.2092L0.700943%2010.3711V11.4873L6.2776%208.03319C6.60561%207.83017%206.61721%207.51773%206.50612%207.30265C6.45057%207.19507%206.36883%207.12441%206.26554%207.09716C6.23967%207.09034%206.2113%207.08626%206.17976%207.08507C6.16799%207.08471%206.15621%207.0845%206.14355%207.08507V7.08503ZM11.3247%2012.954C11.2508%2013.9848%2010.682%2014.2991%2010.682%2014.8733C10.682%2015.1583%2010.9952%2015.4116%2011.3247%2015.4116C11.647%2015.4116%2011.9795%2015.1591%2011.9795%2014.859C11.9795%2014.2609%2011.4172%2013.9864%2011.3247%2012.954V12.954ZM8.46386%2013.5812C8.32219%2015.1622%207.46086%2015.5823%207.46086%2016.4981C7.46086%2016.9577%207.97038%2017.344%208.46386%2017.344C8.96836%2017.344%209.44824%2016.9554%209.44824%2016.5189C9.44824%2015.6398%208.577%2015.1596%208.46386%2013.5812Z'%20fill='%23B8B8B8'/%3e%3c/g%3e%3cdefs%3e%3cclipPath%20id='clip0_1297_148459'%3e%3crect%20width='18'%20height='18'%20fill='%23B8B8B8'/%3e%3c/clipPath%3e%3c/defs%3e%3c/svg%3e",
@@ -241,7 +283,6 @@ const CombatAssistant = (() => {
     const RUNTIME_CONFIG_DEFAULTS = Object.freeze({
         CHAT_TRACKING: true,
         CONCENTRATION_TRACKING: true,
-        CHAT_PROBE: false,
         PLAYER_ATTACK_BUTTON: false,
         COMBAT_VISUAL_EFFECTS: false,
         PROJECTILE_EFFECT_NAME: 'missile',
@@ -266,6 +307,7 @@ const CombatAssistant = (() => {
         TURN_MOVEMENT_TRACKER: false,
         SHOW_PLAYER_RESOURCES: false,
         SHOW_NPC_RESOURCES: true,
+        CONSUME_SPELL_SLOTS: false,
         SHOW_PREPARED_SPELLS_ONLY_2024: false,
         PLAYER_PUBLIC_RESOURCE_USAGE: false,
         PUBLIC_PRESENTATION_CARD: true,
@@ -279,6 +321,9 @@ const CombatAssistant = (() => {
         TURN_MARKER_IMAGE_URL: 'https://files.d20.io/images/495303287/txqHTA2ByhDGG_aL7-Qe2g/med.webm?1785019892',
         TURN_MARKER_IMG_SIZE: 20,
         TURN_MARKER_FOLLOW: true,
+        TURN_MARKER_ROTATION: false,
+        TURN_MARKER_ROTATION_STEPS: 1,
+        TURN_MARKER_ROTATION_SPEED: 100,
         HP_BAR: 1,
         AC_BAR: 2,
         TEMP_HP_BAR: 3,
@@ -288,7 +333,6 @@ const CombatAssistant = (() => {
         REVEAL_DAMAGE_SOURCE: true,
         REVEAL_TOKEN_NAMES_IN_LOG: true,
         HIDE_TOKEN_NAMES_IN_LOG: false,
-        AREA_RADIUS_DEBUG_DRAW: false,
         CHAT_BACKGROUND_IMAGE_URL: DEFAULT_CARD_CONFIG.bodyImageUrl
     });
 
@@ -337,9 +381,13 @@ const CombatAssistant = (() => {
         { key: 'TURN_MARKER_IMAGE_URL', label: 'Turn Marker Token Image', type: 'roll20image', tip: 'Roll20 uploaded image used for the turn marker token. Must start with https://files.d20.io/images/.' },
         { key: 'TURN_MARKER_IMG_SIZE', label: 'Turn Marker Token Size %', type: 'number', tip: 'Percentage added to the current token width and height. 20 means the marker is 20% larger than the token. Default 20.' },
         { key: 'TURN_MARKER_FOLLOW', label: 'Turn Marker Follow', type: 'boolean', tip: 'Keep the marker centered and scaled when the current turn token moves or resizes.' },
+        { key: 'TURN_MARKER_ROTATION', label: 'Turn Marker Rotation', type: 'boolean', tip: 'Rotate the Turn Marker while combat is active.' },
+        { key: 'TURN_MARKER_ROTATION_STEPS', label: 'Turn Marker Rotation Steps', type: 'number', tip: 'Degrees applied on every rotation update. Default 1.' },
+        { key: 'TURN_MARKER_ROTATION_SPEED', label: 'Turn Marker Rotation Speed', type: 'number', tip: 'Milliseconds between rotation updates. Default 100 ms.' },
         { type: 'section', label: 'Resources' },
         { key: 'SHOW_PLAYER_RESOURCES', label: 'Show Player Resources', type: 'boolean', tip: 'Show the current player-controlled token\'s limited resources and spell slots directly on its Turn card.' },
         { key: 'SHOW_NPC_RESOURCES', label: 'Show NPC Resources', type: 'boolean', tip: 'Show limited resources and spell slots for non-player-controlled tokens on the GM Turn card only.' },
+        { key: 'CONSUME_SPELL_SLOTS', label: 'Consume Spell Slots', type: 'boolean', tip: 'When ON, opening Spells arms one spell cast for that character. The next confirmed leveled spell roll from that Spells session consumes one matching spell slot through ResourceService.' },
         { key: 'SHOW_PREPARED_SPELLS_ONLY_2024', label: '2024 Prepared Spells Only', type: 'boolean', tip: 'When ON, the 2024 Spells list shows only spells marked Prepared or Always Prepared. Cantrips are included only when Roll20 marks them prepared or always prepared.' },
         { key: 'PLAYER_PUBLIC_RESOURCE_USAGE', label: 'Player Public Usage', type: 'boolean', tip: 'When a player uses or recovers a resource, send the Resource Update card to public chat instead of private whispers.' },
         { type: 'section', label: 'Extra' },
@@ -349,9 +397,10 @@ const CombatAssistant = (() => {
         { key: 'DEBUG', label: 'Debug', type: 'boolean', temporary: true, advancedOnly: true, tip: 'Temporary API-console debug logging. Resets to OFF whenever the API sandbox restarts.' },
         { key: 'CHAT_DEBUG_ATTACKS', label: 'Chat Debug Attacks', type: 'boolean', temporary: true, advancedOnly: true, tip: 'Temporarily print full attack diagnostics in chat after opening Combat. Resets to OFF whenever the API sandbox restarts.' },
         { key: 'CHAT_DEBUG_SPELLS', label: 'Chat Debug Spells', type: 'boolean', temporary: true, advancedOnly: true, tip: 'Temporarily print full spell diagnostics in chat after opening Spells. Resets to OFF whenever the API sandbox restarts.' },
-        //{ key: 'AREA_RADIUS_DEBUG_DRAW', label: 'Area Radius Debug Draw', type: 'boolean', tip: 'Draw temporary GM-only reference circles when resolving radius, sphere, cylinder, or emanation area markers.' },
+        { key: 'AREA_RADIUS_DEBUG_DRAW', label: 'Area Radius Debug Draw', type: 'boolean', temporary: true, advancedOnly: true, tip: 'Draw temporary GM-only reference circles when resolving radius, sphere, cylinder, or emanation area markers. Resets to OFF whenever the API sandbox restarts.' },
         { key: 'CHAT_BACKGROUND_IMAGE_URL', label: 'Change Background URL', type: 'text', tip: 'Background image used by Combat Assistant cards.' },
-        //{ key: 'CHAT_PROBE', label: 'Chat Probe', type: 'boolean', tip: 'Whisper raw Roll20 chat message dumps to the GM for parser testing.' },
+        { key: 'CHAT_PROBE', label: 'Chat Probe', type: 'boolean', temporary: true, advancedOnly: true, tip: 'Whisper compact Roll20 chat message diagnostics to the GM for parser testing. Resets to OFF whenever the API sandbox restarts.' },
+        { key: 'GET_TOKEN_IMAGE_URL', label: 'Get Token Image URL', type: 'action', action: 'gettokenimage', buttonLabel: 'Get', tip: 'Select exactly one token and return its current token image URL.' },
     ]);
 
 
@@ -444,6 +493,9 @@ const CombatAssistant = (() => {
                 PLAYER_RESOURCES: 'SHOW_PLAYER_RESOURCES',
                 SHOW_NPC_RESOURCES: 'SHOW_NPC_RESOURCES',
                 NPC_RESOURCES: 'SHOW_NPC_RESOURCES',
+                CONSUME_SPELL_SLOTS: 'CONSUME_SPELL_SLOTS',
+                SPELL_SLOT_CONSUMPTION: 'CONSUME_SPELL_SLOTS',
+                AUTO_CONSUME_SPELL_SLOTS: 'CONSUME_SPELL_SLOTS',
                 HANDLE_ACTIONS: 'HANDLE_ACTIONS',
                 TURN_TOKEN_ACTION: 'HANDLE_ACTIONS',
                 TURN_TOKEN_ACTIONS: 'HANDLE_ACTIONS',
@@ -473,6 +525,12 @@ const CombatAssistant = (() => {
                 TURN_MARKER_PERCENT: 'TURN_MARKER_IMG_SIZE',
                 TURN_MARKER_IMG_SIZE: 'TURN_MARKER_IMG_SIZE',
                 TURN_MARKER_FOLLOW: 'TURN_MARKER_FOLLOW',
+                TURN_MARKER_ROTATION: 'TURN_MARKER_ROTATION',
+                TURN_MARKER_ROTATE: 'TURN_MARKER_ROTATION',
+                TURN_MARKER_ROTATION_STEPS: 'TURN_MARKER_ROTATION_STEPS',
+                TURN_MARKER_ROTATION_STEP: 'TURN_MARKER_ROTATION_STEPS',
+                TURN_MARKER_ROTATION_SPEED: 'TURN_MARKER_ROTATION_SPEED',
+                TURN_MARKER_ROTATION_MS: 'TURN_MARKER_ROTATION_SPEED',
                 TURN_AUTO_FOCUS: 'TURN_AUTO_FOCUS',
                 REVEAL_NAMES: 'REVEAL_TOKEN_NAMES_IN_LOG',
                 REVEAL_TOKEN_NAMES: 'REVEAL_TOKEN_NAMES_IN_LOG',
@@ -551,6 +609,8 @@ const CombatAssistant = (() => {
             delete root.settings.DEBUG;
             delete root.settings.CHAT_DEBUG_ATTACKS;
             delete root.settings.CHAT_DEBUG_SPELLS;
+            delete root.settings.CHAT_PROBE;
+            delete root.settings.AREA_RADIUS_DEBUG_DRAW;
             Object.keys(RUNTIME_CONFIG_DEFAULTS).forEach((key) => {
                 if (!Object.prototype.hasOwnProperty.call(root.settings, key)) {
                     root.settings[key] = RUNTIME_CONFIG_DEFAULTS[key];
@@ -1227,6 +1287,8 @@ const CombatAssistant = (() => {
             delete root.settings.DEBUG;
             delete root.settings.CHAT_DEBUG_ATTACKS;
             delete root.settings.CHAT_DEBUG_SPELLS;
+            delete root.settings.CHAT_PROBE;
+            delete root.settings.AREA_RADIUS_DEBUG_DRAW;
             const hadRevealTokenNames = Object.prototype.hasOwnProperty.call(root.settings, 'REVEAL_TOKEN_NAMES_IN_LOG');
             Object.keys(RUNTIME_CONFIG_DEFAULTS).forEach((key) => {
                 if (!Object.prototype.hasOwnProperty.call(root.settings, key)) root.settings[key] = RUNTIME_CONFIG_DEFAULTS[key];
@@ -1505,6 +1567,7 @@ const CombatAssistant = (() => {
             if (!safeCharacterId || !safeAttributeName) return '';
             return (htmlEncoded ? '&#64;' : '@') + '{' + safeCharacterId + '|' + safeAttributeName + '}';
         },
+
 
         getSelectedTokens(msg) {
             const selected = Array.isArray(msg && msg.selected) ? msg.selected : [];
@@ -2893,15 +2956,38 @@ const CombatAssistant = (() => {
             try {
                 const campaign = Campaign();
                 const specificRaw = campaign && Utils.isFunction(campaign.get) ? campaign.get('playerspecificpages') : '';
-                const specific = specificRaw ? JSON.parse(specificRaw) : {};
+                let specific = {};
+                if (specificRaw && typeof specificRaw === 'object') specific = specificRaw;
+                else if (String(specificRaw || '').trim()) specific = JSON.parse(String(specificRaw));
                 if (safePlayerId && specific && specific[safePlayerId]) return String(specific[safePlayerId] || '').trim();
                 const player = safePlayerId ? getObj('player', safePlayerId) : null;
-                const lastPage = player && Utils.isFunction(player.get) ? String(player.get('_lastpage') || '').trim() : '';
+                const lastPage = player && Utils.isFunction(player.get) ? String(player.get('_lastpage') || player.get('lastpage') || '').trim() : '';
                 if (lastPage) return lastPage;
-                return String(campaign.get('playerpageid') || '').trim();
+                return campaign && Utils.isFunction(campaign.get) ? String(campaign.get('playerpageid') || '').trim() : '';
             } catch (error) {
                 return '';
             }
+        },
+
+        getPageName(pageId) {
+            const safePageId = String(pageId || '').trim();
+            const page = safePageId ? getObj('page', safePageId) : null;
+            return page && Utils.isFunction(page.get) ? String(page.get('name') || '').trim() : '';
+        },
+
+        resolveCasterPlayerId(playerId, casterName) {
+            const safePlayerId = String(playerId || '').trim();
+            if (safePlayerId && getObj('player', safePlayerId)) return safePlayerId;
+            const wantedCaster = Utils.normalizeName(String(casterName || '').replace(/\s*\(GM\)\s*$/i, ''));
+            if (!wantedCaster) return '';
+            const matches = (findObjs({ _type: 'player' }) || []).filter((candidate) => {
+                if (!candidate || !Utils.isFunction(candidate.get)) return false;
+                const displayName = String(candidate.get('_displayname') || candidate.get('displayname') || '').trim();
+                return Utils.normalizeName(displayName) === wantedCaster;
+            });
+            if (matches.length !== 1) return '';
+            const player = matches[0];
+            return String(player.id || player.get('_id') || '').trim();
         },
 
         getTokenId(token) {
@@ -2916,23 +3002,65 @@ const CombatAssistant = (() => {
         },
 
         resolveRollSourceToken(result, playerId) {
+            const source = result || {};
             const safePlayerId = String(playerId || '').trim();
-            const explicitTokenId = String(result && (result.sourceTokenId || result.casterTokenId || result.tokenId) || '').trim();
-            const explicit = explicitTokenId ? this.getTokenById(explicitTokenId) : null;
-            if (explicit) return explicit;
+            const casterName = String(source.casterName || source.rollWho || source.who || '').trim();
+            const casterPlayerId = this.resolveCasterPlayerId(safePlayerId, casterName);
+            const casterPageId = casterPlayerId ? this.getPlayerPageId(casterPlayerId) : '';
+            const explicitTokenId = String(source.sourceTokenId || source.casterTokenId || source.tokenId || '').trim();
+            let token = explicitTokenId ? this.getTokenById(explicitTokenId) : null;
+            let character = token ? this.getCharacterFromToken(token) : null;
 
-            const character = this.getCharacterByName(result && (result.characterName || result.tokenName) || '');
-            const characterId = character ? String(character.id || '').trim() : '';
-            if (!characterId) return null;
-            const playerPageId = this.getPlayerPageId(safePlayerId);
-            const pageToken = this.findTokenByCharacterIdOnPage(characterId, playerPageId);
-            if (pageToken) return pageToken;
-
-            const tokens = this.getTokensByCharacterId(characterId);
-            for (let i = 0; i < tokens.length; i += 1) {
-                if (this.tokenIsControlledByPlayer(tokens[i], character, safePlayerId)) return tokens[i];
+            if (token && (!casterPageId || this.getTokenPageId(token) !== casterPageId)) {
+                token = null;
+                character = null;
             }
-            return tokens[0] || null;
+
+            if (!token) {
+                const sourceCharacterId = String(source.rolledByCharacterId || source.characterId || '').trim();
+                character = sourceCharacterId ? getObj('character', sourceCharacterId) : null;
+                if (!character) character = this.getCharacterByName(source.characterName || source.tokenName || '');
+                const characterId = character ? String(character.id || sourceCharacterId || '').trim() : sourceCharacterId;
+                if (characterId && casterPageId) {
+                    token = this.findTokenByCharacterIdOnPage(characterId, casterPageId);
+                }
+            }
+
+            if (RuntimeConfig.get('DEBUG') && !source.__sourceDebugPrinted) {
+                source.__sourceDebugPrinted = true;
+                if (!character && token) character = this.getCharacterFromToken(token);
+                const casterPlayer = casterPlayerId ? getObj('player', casterPlayerId) : null;
+                const casterDisplayName = casterPlayer && Utils.isFunction(casterPlayer.get)
+                    ? String(casterPlayer.get('_displayname') || casterPlayer.get('displayname') || '').trim()
+                    : '';
+                const players = findObjs({ _type: 'player' }) || [];
+                const controllerNames = this.getTokenControllerDisplayNames(token, character);
+                const controllerName = controllerNames.length ? controllerNames.join(', ') : (casterDisplayName || 'Unknown');
+                let controllerIds = this.getTokenControllerIds(token, character);
+                if (controllerIds.indexOf('all') >= 0) {
+                    controllerIds = players.map((player) => String(player && (player.id || (Utils.isFunction(player.get) ? player.get('_id') : '')) || '').trim()).filter(Boolean);
+                }
+                const controllerPages = Utils.uniqueNames(controllerIds.map((id) => this.getPageName(this.getPlayerPageId(id))).filter(Boolean));
+                const controllerPageName = controllerPages.length ? controllerPages.join(', ') : 'Unknown';
+                const casterPageName = casterPageId ? (this.getPageName(casterPageId) || 'Unknown') : 'Unknown';
+                const tokenPageName = token ? (this.getPageName(this.getTokenPageId(token)) || 'Unknown') : 'Not found';
+                const characterName = character && Utils.isFunction(character.get)
+                    ? String(character.get('name') || '').trim()
+                    : String(source.characterName || source.tokenName || 'Unknown').trim();
+                Render.sendPublicMessage(
+                    'Source Debug',
+                    '<div style="text-align:left;font-size:11px;line-height:14px;">' +
+                        '<strong>Character Name:</strong> ' + Utils.escapeHtml(characterName || 'Unknown') + '<br>' +
+                        '<strong>Controller Name:</strong> ' + Utils.escapeHtml(controllerName) + '<br>' +
+                        '<strong>Caster Name:</strong> ' + Utils.escapeHtml(casterName || 'Unknown') + '<br>' +
+                        '<strong>Controller Page:</strong> ' + Utils.escapeHtml(controllerPageName) + '<br>' +
+                        '<strong>Caster Page:</strong> ' + Utils.escapeHtml(casterPageName) + '<br>' +
+                        '<strong>Token Page:</strong> ' + Utils.escapeHtml(tokenPageName) +
+                    '</div>',
+                    'normal'
+                );
+            }
+            return token;
         },
 
         getTokenImageByCharacterName(characterName) {
@@ -3684,6 +3812,13 @@ const CombatAssistant = (() => {
             return String(command || '#').replace(/"/g, '&quot;').replace(/[\r\n]+/g, ' ');
         },
 
+        deferButtonCommand(command) {
+            return Utils.escapeHtml(String(command || ''))
+                .replace(/@/g, '&#64;')
+                .replace(/%/g, '&#37;')
+                .replace(/\?/g, '&#63;');
+        },
+
         iconButtonHtml(buildOptions) {
             const options = buildOptions || {};
             const iconHtml = String(options.iconHtml || options.icon || '&#9679;');
@@ -3701,7 +3836,7 @@ const CombatAssistant = (() => {
             const margin = String(options.margin || '0 1px');
             const paddingTop = Math.max(0, Utils.toInt(options.paddingTop, 5));
             const labelPaddingTop = Math.max(0, Utils.toInt(options.labelPaddingTop, 0));
-            const labelWhiteSpace = options.labelNoWrap ? 'nowrap' : 'normal';
+            const labelWhiteSpace = options.labelPreLine ? 'pre-line' : (options.labelNoWrap ? 'nowrap' : 'normal');
             const safeTooltip = String(options.tooltip || '').trim();
             const titleAttr = safeTooltip ? (' title="' + Utils.attrSafe(safeTooltip) + '"') : '';
             return (
@@ -3766,6 +3901,7 @@ const CombatAssistant = (() => {
             roll = roll || {};
             const natural = Utils.toInt(roll.natural, 0);
             const total = Utils.toInt(roll.total, natural);
+            const displayTotal = roll.displayTotal !== undefined && roll.displayTotal !== null ? String(roll.displayTotal) : String(total);
             const displayMarker = natural === 1 ? '&#128165;' : marker;
             const isCritical = !!roll.critical || displayMarker === '&#9733;';
             const isNaturalOne = natural === 1;
@@ -3787,7 +3923,7 @@ const CombatAssistant = (() => {
             return Html.div(
                 Html.tooltip(
                     Html.div(
-                        Utils.escapeHtml(String(total)) +
+                        Utils.escapeHtml(displayTotal) +
                         (displayMarker ? Html.span(displayMarker, 'position:absolute;top:' + markerTop + ';right:2px;font-size:' + markerSize + ';line-height:10px;color:' + markerColor + ';font-weight:900;') : ''),
                         'position:relative;width:' + size + 'px;height:' + size + 'px;line-height:' + size + 'px;text-align:center;border:1px solid ' + borderColor + ';border-radius:4px;background:' + bgColor + ';font-family:' + (rollStyle.fontFamily || 'Arial, Helvetica, sans-serif') + ';font-size:' + fontSize + ';font-weight:' + (rollStyle.fontWeight || '900') + ';color:' + textColor + ';'
                     ),
@@ -4105,7 +4241,8 @@ const CombatAssistant = (() => {
         },
 
         buildTurnActionsHtml(info, options) {
-            if (!RuntimeConfig.get('HANDLE_ACTIONS') || !info || !info.tokenId) return '';
+            const opts = options || {};
+            if ((!RuntimeConfig.get('HANDLE_ACTIONS') && !opts.forceActions) || !info || !info.tokenId) return '';
             const buttons = [
                 this.turnActionButtonHtml(info.tokenId, 'Dash', 'dash', { tooltip: 'Take the Dash action', backgroundColor: 'rgba(45,45,45,0.95)' }),
                 this.turnActionButtonHtml(info.tokenId, 'Disen.', 'disengage', { tooltip: 'Take the Disengage action', backgroundColor: 'rgba(45,45,45,0.95)' }),
@@ -4116,6 +4253,211 @@ const CombatAssistant = (() => {
             return '<div style="text-align:center;white-space:nowrap;line-height:normal;">' +
                 buttons.map((button, index) => (index ? '<span style="display:inline-block;width:3px;height:1px;"></span>' : '') + button).join('') +
             '</div>';
+        },
+
+        namedCharacterTitleTextHtml(name, subtitle) {
+            const safeName = String(name || 'Character').trim() || 'Character';
+            const safeSubtitle = String(subtitle || '').trim();
+            return '<div style="color:' + CONFIG.DEFAULT_TEXT_CHARACTER_COLOR + ';font-size:18px;line-height:20px;font-weight:900;overflow-wrap:anywhere;">' + Utils.escapeHtml(safeName) + '</div>' +
+                '<div style="color:rgb(255,255,255);font-size:14px;line-height:16px;font-weight:700;">' + Utils.escapeHtml(safeSubtitle) + '</div>';
+        },
+
+        namedCharacterTitleHtml(name, subtitle, token, character, imageSize) {
+            const textHtml = this.namedCharacterTitleTextHtml(name, subtitle);
+            const size = Math.max(0, Utils.toInt(imageSize, 0));
+            if (!size) return '<div style="width:100%;text-align:center;">' + textHtml + '</div>';
+
+            const imgsrc = token && Utils.isFunction(token.get) ? String(token.get('imgsrc') || '').trim() : '';
+            const avatar = character && Utils.isFunction(character.get) ? String(character.get('avatar') || '').trim() : '';
+            const image = this.chatTokenImageHtml(imgsrc, size, avatar, 0) || '<span style="display:block;width:' + size + 'px;height:' + size + 'px;"></span>';
+            const sideWidth = size + 4;
+            return '<table style="width:100%;border-collapse:collapse;table-layout:fixed;"><tbody><tr>' +
+                '<td style="width:' + sideWidth + 'px;text-align:left;vertical-align:middle;padding:0;">' + image + '</td>' +
+                '<td style="text-align:center;vertical-align:middle;padding:0 2px;">' + textHtml + '</td>' +
+                '<td style="width:' + sideWidth + 'px;text-align:right;vertical-align:middle;padding:0;"></td>' +
+            '</tr></tbody></table>';
+        },
+
+        characterSheetTitleHtml(info) {
+            const token = info && info.token;
+            const character = info && info.character;
+            const tokenId = String(info && info.tokenId || '').trim();
+            const imgsrc = token && Utils.isFunction(token.get) ? String(token.get('imgsrc') || '').trim() : '';
+            const avatar = character && Utils.isFunction(character.get) ? String(character.get('avatar') || '').trim() : '';
+            const image = this.chatTokenImageHtml(imgsrc, 40, avatar, 0) || '<span style="display:block;width:40px;height:40px;"></span>';
+            const focusImage = tokenId
+                ? '<a href="!combatAssistant sheetfocus ' + Utils.attrSafe(tokenId) + '" title="Focus this token" style="display:inline-block;width:40px;height:40px;padding:0;margin:0;border:0;background:transparent;text-decoration:none;line-height:40px;">' + image + '</a>'
+                : image;
+            const name = String(info && (info.characterName || info.name) || 'Character').trim() || 'Character';
+            const hp = String(info && info.hp !== undefined ? info.hp : 0);
+            const ac = String(info && info.ac !== undefined ? info.ac : 0);
+            return '<table style="width:100%;height:40px;border-collapse:collapse;table-layout:fixed;"><tbody><tr>' +
+                '<td style="width:20%;height:40px;text-align:left;vertical-align:middle;padding:0;">' + focusImage + '</td>' +
+                '<td style="width:63%;height:40px;text-align:center;vertical-align:middle;padding:0 2px;overflow:hidden;">' +
+                    this.namedCharacterTitleTextHtml(name, 'Compact Sheet') +
+                '</td>' +
+                '<td style="width:17%;height:40px;text-align:right;vertical-align:middle;padding:0;">' +
+                    '<table style="width:100%;height:40px;border-collapse:collapse;table-layout:fixed;"><tbody>' +
+                        '<tr>' +
+                            '<td style="width:34%;height:20px;padding:0;text-align:left;vertical-align:middle;color:rgb(225,65,65);font-size:14px;line-height:20px;font-weight:900;white-space:nowrap;">&#10084;&#65039;</td>' +
+                            '<td style="width:66%;height:20px;padding:0;text-align:right;vertical-align:middle;color:rgb(225,65,65);font-size:14px;line-height:20px;font-weight:900;white-space:nowrap;">' + Utils.escapeHtml(hp) + '</td>' +
+                        '</tr>' +
+                        '<tr>' +
+                            '<td style="width:34%;height:20px;padding:0;text-align:left;vertical-align:middle;color:rgb(84,186,255);font-size:14px;line-height:20px;font-weight:900;white-space:nowrap;">&#128737;&#65039;</td>' +
+                            '<td style="width:66%;height:20px;padding:0;text-align:right;vertical-align:middle;color:rgb(84,186,255);font-size:14px;line-height:20px;font-weight:900;white-space:nowrap;">' + Utils.escapeHtml(ac) + '</td>' +
+                        '</tr>' +
+                    '</tbody></table>' +
+                '</td>' +
+            '</tr></tbody></table>';
+        },
+
+        characterSheetRollMarkerHtml(mode) {
+            const normalized = String(mode || 'normal').trim().toLowerCase();
+            if (normalized === 'advantage') {
+                return '<span title="Advantage" style="position:absolute;top:0;right:2px;color:rgb(90,220,120);font-size:6px;line-height:6px;font-weight:900;">&#9650;</span>';
+            }
+            if (normalized === 'disadvantage') {
+                return '<span title="Disadvantage" style="position:absolute;top:0;right:2px;color:rgb(230,80,80);font-size:6px;line-height:6px;font-weight:900;">&#9660;</span>';
+            }
+            return '';
+        },
+
+        characterSheetAbilityHeaderHtml() {
+            const cell = (label, align, width) => '<td style="width:' + width + ';height:14px;padding:2px;text-align:' + align + ';vertical-align:middle;color:rgb(155,155,155);font-size:10px;line-height:10px;font-weight:700;white-space:nowrap;">' + label + '</td>';
+            return '<tr>' +
+                cell('Attribute', 'left', '40%') +
+                cell('Stat', 'center', '20%') +
+                cell('Mod', 'center', '20%') +
+                cell('Save', 'center', '20%') +
+            '</tr>';
+        },
+
+        characterSheetRollLinkHtml(value, command, color, marker, tooltip) {
+            const safeCommand = String(command || '').trim();
+            const content = Utils.escapeHtml(String(value || '')) + String(marker || '');
+            const style = 'position:relative;display:block;width:100%;height:16px;padding:0 2px;box-sizing:border-box;text-align:center;vertical-align:middle;color:' + String(color || 'rgb(255,255,255)') + ';font-size:10px;line-height:16px;font-weight:900;white-space:nowrap;border:0;background:transparent;text-decoration:none;';
+            return safeCommand
+                ? '<a href="' + Utils.attrSafe(safeCommand) + '" title="' + Utils.attrSafe(tooltip || 'Roll') + '" style="' + style + '">' + content + '</a>'
+                : '<span style="' + style + '">' + content + '</span>';
+        },
+
+        characterSheetAbilityRowHtml(label, profile) {
+            const data = profile || {};
+            const score = data.score === null || data.score === undefined ? '-' : String(data.score);
+            const modifier = Utils.formatSigned(Utils.toInt(data.modifier, 0));
+            const save = Utils.formatSigned(Utils.toInt(data.save, 0));
+            const saveColor = data.saveProficient ? 'rgb(255,130,130)' : 'rgb(255,255,255)';
+            const checkMarker = this.characterSheetRollMarkerHtml(data.checkMode);
+            const saveMarker = this.characterSheetRollMarkerHtml(data.saveMode);
+            const checkLink = this.characterSheetRollLinkHtml(modifier, data.checkCommand, 'rgb(255,255,255)', checkMarker, 'Roll ' + label + ' ability check');
+            const saveLink = this.characterSheetRollLinkHtml(save, data.saveCommand, saveColor, saveMarker, 'Roll ' + label + ' saving throw');
+            return '<tr>' +
+                '<td style="width:40%;height:16px;text-align:left;vertical-align:middle;padding:2px;color:rgb(235,215,140);font-size:10px;line-height:12px;font-weight:700;white-space:nowrap;">' + Utils.escapeHtml(label) + '</td>' +
+                '<td style="width:20%;height:16px;text-align:center;vertical-align:middle;padding:2px;color:rgb(255,255,255);font-size:10px;line-height:12px;font-weight:900;white-space:nowrap;">' + Utils.escapeHtml(score) + '</td>' +
+                '<td style="position:relative;width:20%;height:16px;text-align:center;vertical-align:middle;padding:0;white-space:nowrap;">' + checkLink + '</td>' +
+                '<td style="position:relative;width:20%;height:16px;text-align:center;vertical-align:middle;padding:0;white-space:nowrap;">' + saveLink + '</td>' +
+            '</tr>';
+        },
+
+        characterSheetSkillHeaderHtml() {
+            return '<tr>' +
+                '<td style="width:72%;height:14px;padding:2px;text-align:left;vertical-align:middle;color:rgb(155,155,155);font-size:10px;line-height:10px;font-weight:700;white-space:nowrap;">Skill</td>' +
+                '<td style="width:28%;height:14px;padding:2px;text-align:center;vertical-align:middle;color:rgb(155,155,155);font-size:10px;line-height:10px;font-weight:700;white-space:nowrap;">Mod</td>' +
+            '</tr>';
+        },
+
+        characterSheetSkillRowHtml(profile) {
+            const data = profile || {};
+            const label = String(data.label || data.skill || 'Skill');
+            const modifier = Utils.formatSigned(Utils.toInt(data.modifier, 0));
+            const valueColor = data.proficient ? 'rgb(255,130,130)' : 'rgb(255,255,255)';
+            const marker = this.characterSheetRollMarkerHtml(data.mode);
+            const link = this.characterSheetRollLinkHtml(modifier, data.command, valueColor, marker, 'Roll ' + label);
+            return '<tr>' +
+                '<td style="width:72%;min-height:18px;text-align:left;vertical-align:middle;padding:2px;color:rgb(235,215,140);font-size:9px;line-height:10px;font-weight:700;white-space:normal;overflow-wrap:anywhere;">' + Utils.escapeHtml(label) + '</td>' +
+                '<td style="position:relative;width:28%;height:18px;text-align:center;vertical-align:middle;padding:1px 0;white-space:nowrap;">' + link + '</td>' +
+            '</tr>';
+        },
+
+        characterSheetSkillsHtml(skillProfiles) {
+            const profiles = skillProfiles || {};
+            const ordered = Object.keys(SKILL_DEFINITIONS).map((skill) => profiles[skill] || Object.assign({ skill }, SKILL_DEFINITIONS[skill]));
+            const columns = [ordered.slice(0, 6), ordered.slice(6, 12), ordered.slice(12, 18)];
+            const box = (entries) => '<div style="height:140px;border:1px solid rgb(235,215,140);border-radius:8px;padding:2px;box-sizing:border-box;overflow:hidden;">' +
+                '<table style="width:100%;border-collapse:collapse;table-layout:fixed;"><tbody>' +
+                    this.characterSheetSkillHeaderHtml() +
+                    entries.map((entry) => this.characterSheetSkillRowHtml(entry)).join('') +
+                '</tbody></table>' +
+            '</div>';
+            return '<table style="width:100%;border-collapse:collapse;table-layout:fixed;margin-top:5px;"><tbody><tr>' +
+                '<td style="width:33.333%;text-align:left;vertical-align:top;padding:0 2px 0 0;">' + box(columns[0]) + '</td>' +
+                '<td style="width:33.334%;text-align:left;vertical-align:top;padding:0 1px;">' + box(columns[1]) + '</td>' +
+                '<td style="width:33.333%;text-align:left;vertical-align:top;padding:0 0 0 2px;">' + box(columns[2]) + '</td>' +
+            '</tr></tbody></table>';
+        },
+
+        buildCharacterSheet(info, abilityProfiles, skillProfiles) {
+            const profiles = abilityProfiles || {};
+            const buildSide = (entries) => '<div style="border:1px solid rgb(235,215,140);border-radius:8px;padding:2px;box-sizing:border-box;overflow:hidden;">' +
+                '<table style="width:100%;border-collapse:collapse;table-layout:fixed;"><tbody>' +
+                    this.characterSheetAbilityHeaderHtml() +
+                    entries.map((entry) => this.characterSheetAbilityRowHtml(entry[0], entry[1])).join('') +
+                '</tbody></table>' +
+            '</div>';
+            const left = buildSide([
+                ['Strength', profiles.strength],
+                ['Dexterity', profiles.dexterity],
+                ['Constitution', profiles.constitution]
+            ]);
+            const right = buildSide([
+                ['Intelligence', profiles.intelligence],
+                ['Wisdom', profiles.wisdom],
+                ['Charisma', profiles.charisma]
+            ]);
+            const actions = this.buildTurnActionsHtml(info, { forceActions: true });
+            const quickBox = (label, value, command, labelColor, valueColor, tooltip, marker) => {
+                const valueHtml = this.characterSheetRollLinkHtml(value, command, valueColor, marker, tooltip || label);
+                return '<div style="height:16px;border:1px solid rgb(235,215,140);border-radius:8px;padding:0;box-sizing:border-box;overflow:hidden;">' +
+                    '<table style="width:100%;height:16px;border-collapse:collapse;table-layout:fixed;"><tbody><tr>' +
+                        '<td style="width:40%;height:16px;text-align:left;vertical-align:middle;padding:2px;color:' + labelColor + ';font-size:10px;line-height:12px;font-weight:700;white-space:nowrap;">' + Utils.escapeHtml(label) + '</td>' +
+                        '<td style="width:20%;height:16px;padding:0;"></td>' +
+                        '<td style="width:20%;height:16px;padding:0;"></td>' +
+                        '<td style="position:relative;width:20%;height:16px;text-align:center;vertical-align:middle;padding:0;white-space:nowrap;">' + valueHtml + '</td>' +
+                    '</tr></tbody></table>' +
+                '</div>';
+            };
+            const initiativeModifier = Utils.toNumber(info && info.initiativeModifier, 0);
+            // Keep the compact control consistent with the Attribute grid. The
+            // full decimal/tie-breaker value is still used by !ca player-init and
+            // the Turn Order service; the quick stat mirrors the sheet's visible
+            // whole-number modifier.
+            const initiativeDisplayModifier = Utils.toInt(initiativeModifier, 0);
+            const initiativeValue = Utils.formatSigned(initiativeDisplayModifier);
+            const initiativeCommand = String(info && info.initiativeCommand || '').trim();
+            const initiativeMarker = this.characterSheetRollMarkerHtml(info && info.initiativeMode);
+            const tempHp = String(Math.max(0, Utils.toInt(info && info.tempHp, 0)));
+            const quickStats = '<table style="width:100%;border-collapse:collapse;table-layout:fixed;margin-bottom:5px;"><tbody><tr>' +
+                '<td style="width:49%;text-align:left;vertical-align:top;padding:0;">' + quickBox('Initiative', initiativeValue, initiativeCommand, 'rgb(235,215,140)', 'rgb(255,255,255)', 'Roll initiative', initiativeMarker) + '</td>' +
+                '<td style="width:2%;padding:0;"></td>' +
+                '<td style="width:49%;text-align:left;vertical-align:top;padding:0;">' + quickBox('HP Temp', tempHp, '', 'rgb(235,215,140)', 'rgb(255,105,180)', 'Temporary Hit Points', '') + '</td>' +
+            '</tr></tbody></table>';
+            const stats = '<table style="width:100%;border-collapse:collapse;table-layout:fixed;"><tbody><tr>' +
+                '<td style="width:49%;text-align:left;vertical-align:top;padding:0;">' + left + '</td>' +
+                '<td style="width:2%;padding:0;"></td>' +
+                '<td style="width:49%;text-align:left;vertical-align:top;padding:0;">' + right + '</td>' +
+            '</tr></tbody></table>';
+            const skills = this.characterSheetSkillsHtml(skillProfiles || {});
+            return Html.card({
+                title: String(info && (info.characterName || info.name) || 'Compact Sheet'),
+                body: actions + '<div style="height:1px;background:rgb(105,105,105);margin:7px 0 5px 0;"></div>' + quickStats + stats + skills,
+                buildOptions: {
+                    titleHtml: this.characterSheetTitleHtml(info),
+                    titleAlign: 'left',
+                    bodyAlign: 'left',
+                    titleColor: CONFIG.DEFAULT_TEXT_CHARACTER_COLOR,
+                    borderColor: 'rgb(127,127,127)'
+                }
+            });
         },
 
         attackDamageButtonHtml(attack) {
@@ -4396,6 +4738,7 @@ const CombatAssistant = (() => {
             if (abilityLabel) profileBits.push('<span style="color:rgb(160,160,160);">' + Utils.escapeHtml(abilityLabel) + '</span> <b style="color:rgb(235,235,235);">' + Utils.escapeHtml(signed(abilityModifier)) + '</b>');
             if (abilityLabel || attackBonus) profileBits.push('<span style="color:rgb(160,160,160);">ATK</span> <b style="color:rgb(235,235,235);">' + Utils.escapeHtml(signed(attackBonus)) + '</b>');
             if (saveDc > 0) profileBits.push('<span style="color:rgb(160,160,160);">DC</span> <b style="color:rgb(235,235,235);">' + Utils.escapeHtml(String(saveDc)) + '</b>');
+            if (Utils.toBoolean(data.consumeSpellSlots, false)) profileBits.push('<span title="Spell slot auto-consumption is armed for the next leveled spell roll" style="color:rgb(235,205,75);font-weight:900;">Slots Auto</span>');
             const profileHtml = profileBits.length
                 ? '<div style="padding:0 0 5px 0;text-align:center;font-size:10px;line-height:13px;">' + profileBits.join('<span style="display:inline-block;width:8px;"></span>') + '</div>'
                 : '';
@@ -4699,6 +5042,16 @@ const CombatAssistant = (() => {
             else R20.whisper('GM', card);
         },
 
+        tokenImageUrlCard(token) {
+            const rawUrl = token && Utils.isFunction(token.get) ? String(token.get('imgsrc') || '').trim() : '';
+            const image = this.chatTokenImageHtml(rawUrl, 40, '', 0) || '<span style="display:block;width:40px;height:40px;"></span>';
+            const body = '<table style="width:100%;border-collapse:collapse;table-layout:fixed;"><tbody><tr>' +
+                '<td style="width:46px;padding:0 6px 0 0;text-align:left;vertical-align:middle;">' + image + '</td>' +
+                '<td style="padding:0;text-align:left;vertical-align:middle;color:rgb(225,225,225);font-size:10px;line-height:13px;word-break:break-all;overflow-wrap:anywhere;">' + Utils.escapeHtml(rawUrl) + '</td>' +
+            '</tr></tbody></table>';
+            return Html.card({ title: 'Token Image URL', body, buildOptions: { bodyAlign: 'left' } });
+        },
+
         showConfigMenu(target) {
             const settings = RuntimeConfig.getAll();
             const fields = RuntimeConfig.fields();
@@ -4711,7 +5064,14 @@ const CombatAssistant = (() => {
                 }
                 const value = settings[field.key];
                 let button = '';
-                if (field.type === 'boolean') {
+                if (field.type === 'action') {
+                    button = this.compactSettingButtonHtml({
+                        label: String(field.buttonLabel || 'Get'),
+                        command: '!combatAssistant ' + Utils.attrSafe(field.action || ''),
+                        tooltip: field.tip || field.label,
+                        backgroundColor: 'rgba(0,86,145,0.95)'
+                    });
+                } else if (field.type === 'boolean') {
                     button = this.compactSettingButtonHtml({
                         label: value ? 'ON' : 'OFF',
                         command: '!combatAssistant toggle ' + Utils.attrSafe(field.key),
@@ -4804,7 +5164,24 @@ const CombatAssistant = (() => {
                 backgroundColor: 'rgba(80,80,120,0.95)',
                 tooltip: 'Reroll active concentration damage and open controls'
             });
-            const body = this.iconButtonTableHtml([dmgButton, healButton, saveButton, initButton, concButton], {
+            const shortcutButtons = [
+                { iconHtml: '&#129706;', label: 'Sheet', command: '!ca sheet', labelSize: 10, backgroundColor: 'rgba(150,135,90,0.85)', tooltip: 'Open the Compact Sheet for the selected token' },
+                { iconHtml: '&#128209;', label: 'Resource', command: '!ca resources', labelSize: 10, backgroundColor: 'rgba(80,120,150,0.85)', tooltip: 'Open Resources for the selected token' },
+                { iconHtml: '&#129518;', label: 'Turn\nRound', command: '!ca turnRound', backgroundColor: 'rgba(145,85,85,0.85)', tooltip: 'Show the Round Counter using its public/GM delivery setting' },
+                { iconHtml: '&#128203;', label: 'Turn\nCard', command: '!ca turnCard', backgroundColor: 'rgba(80,135,95,0.85)', tooltip: 'Open the Turn Card for the selected token' },
+                { iconHtml: '&#10145;&#65039;', label: 'Turn\nNext', command: '!ca turnNext', tooltip: 'Advance to the next turn' }
+            ].map((button) => this.iconButtonHtml(Object.assign({
+                iconSize: 15,
+                labelSize: 9,
+                paddingTop: 1,
+                labelHeight: 18,
+                labelLineHeight: 9,
+                labelPreLine: String(button.label || '').indexOf('\n') >= 0,
+                backgroundColor: 'rgba(45,45,45,0.95)'
+            }, button)));
+            const body = this.iconButtonTableHtml([
+                dmgButton, healButton, saveButton, initButton, concButton
+            ].concat(shortcutButtons), {
                 columns: 5,
                 footer: 'Select target token(s) before pressing a button.'
             });
@@ -4818,39 +5195,52 @@ const CombatAssistant = (() => {
         showHelp(target, isGM) {
             const separator = '<div style="height:1px;background:rgba(125,125,125,0.55);margin:7px 0 6px 0;"></div>';
             const sectionTitle = (title) => '<b style="color:rgb(245,220,80);font-size:12px;">' + Utils.escapeHtml(title) + '</b><br>';
-            const commandHtml = (command) => '<code style="font-size:12px;line-height:15px;">' + command + '</code>';
+            const commandHtml = (command, tokenActionId) => {
+                const action = PLAYER_TOKEN_ACTIONS[String(tokenActionId || '').trim().toLowerCase()];
+                if (!action) return '<code style="font-size:12px;line-height:15px;">' + command + '</code>';
+                const installCommand = this.sanitizeCommand('!ca tokenaction ' + String(tokenActionId || '').trim().toLowerCase());
+                return '<a href="' + installCommand + '" title="Add ' + Utils.attrSafe(action.name) + ' as a Token Action to the selected character" style="display:inline-block;padding:0;margin:0;border:0;background:transparent;color:rgb(85,205,135);font-family:monospace;font-size:12px;line-height:15px;font-weight:700;text-decoration:none;vertical-align:baseline;">' + command + '</a>';
+            };
             const descriptionHtml = (text) => '<span style="font-size:10px;line-height:13px;color:rgb(190,190,190);">' + Utils.escapeHtml(text) + '</span>';
-            const helpLine = (command, description) => commandHtml(command) + (description ? (' <span style="font-size:10px;line-height:13px;color:rgb(190,190,190);">- ' + Utils.escapeHtml(description) + '</span>') : '') + '<br>';
+            const helpLine = (command, description, tokenActionId) => commandHtml(command, tokenActionId) + (description ? (' <span style="font-size:10px;line-height:13px;color:rgb(190,190,190);">- ' + Utils.escapeHtml(description) + '</span>') : '') + '<br>';
+            const tokenActionNote = '<div style="font-size:9px;line-height:12px;color:rgb(155,155,155);padding:2px 0 4px 0;">Player command links add that command as a Token Action to exactly one selected linked token. Existing actions are not duplicated.</div>';
 
             if (!isGM) {
                 const playerBody =
                     '<div style="text-align:left;font-size:12px;line-height:16px;color:rgb(225,225,225);">' +
                         sectionTitle('Main Commands') +
-                        helpLine('!ca help', 'Shows this player help card.') +
+                        helpLine('!ca help', 'Shows this player help card.', 'help') +
+                        tokenActionNote +
 
                         separator +
                         sectionTitle('Combat') +
                         '<div style="padding-bottom:2px;">' + descriptionHtml('Combat and Spells list actions available on a character sheet you control.') + '</div>' +
-                        helpLine('!ca combat', 'Shows the attack list for the selected token.') +
+                        helpLine('!ca sheet', 'Shows the Compact Sheet for the selected token. A controlled token/character id can also be supplied manually.', 'sheet') +
+                        helpLine('!ca player-init', 'Rolls initiative for exactly one selected controlled token and inserts it into Turn Order with Combat Assistant ordering.', 'player-init') +
+                        helpLine('!ca combat', 'Shows the attack list for the selected token.', 'combat') +
                         helpLine('!ca combat &lt;sheet name&gt;', 'Shows the attack list for a character sheet you can access.') +
-                        helpLine('!ca spells', 'Shows the spell list for the selected token.') +
+                        helpLine('!ca spells', 'Shows the spell list for the selected token.', 'spells') +
                         helpLine('!ca spells &lt;sheet name&gt;', 'Shows the spell list for a character sheet you can access.') +
-                        helpLine('!ca dash / !ca disengage / !ca dodge', 'Declares the chosen action for the token currently in turn.') +
+                        helpLine('!ca dash', 'Declares Dash for the token currently in turn.', 'dash') +
+                        helpLine('!ca disengage', 'Declares Disengage for the token currently in turn.', 'disengage') +
+                        helpLine('!ca dodge', 'Declares Dodge for the token currently in turn.', 'dodge') +
 
                         separator +
                         sectionTitle('Turn Tracker') +
-                        helpLine('!ca turn', 'Shows the Turn card for the token currently in turn.') +
-                        helpLine('!ca turnnext', 'Ends the current turn when you control the active token.') +
-                        helpLine('!ca turnfocus', 'Focuses the view on the current turn token when you control it.') +
+                        helpLine('!ca turn', 'Shows the live Turn card only when the current token is yours.', 'turn') +
+                        helpLine('!ca turncard', 'Shows the full Turn card for the selected controlled character. A character id can also be supplied manually.', 'turncard') +
+                        helpLine('!ca turn card [character_id]', 'Alias of !ca turncard. !ca turn-card is also accepted.') +
+                        helpLine('!ca turnnext', 'Ends the current turn when you control the active token.', 'turnnext') +
+                        helpLine('!ca turnfocus', 'Focuses the view on the current turn token when you control it.', 'turnfocus') +
 
                         separator +
                         sectionTitle('Resources') +
-                        helpLine('!ca resources', 'Shows resources for the selected token.') +
+                        helpLine('!ca resources', 'Shows resources for the selected token.', 'resources') +
                         helpLine('!ca resources &lt;sheet name&gt;', 'Shows resources for a character sheet you can access.') +
 
                         separator +
                         sectionTitle('Concentration') +
-                        helpLine('!ca conc', 'Recalls the active concentration controls for a token you control.') +
+                        helpLine('!ca conc', 'Recalls the active concentration controls for a token you control.', 'conc') +
 
                         separator +
                         '<div style="font-size:10px;line-height:13px;color:rgb(160,160,160);padding-top:3px;text-align:center;">' +
@@ -4865,7 +5255,8 @@ const CombatAssistant = (() => {
                 '<div style="text-align:left;font-size:12px;line-height:16px;color:rgb(225,225,225);">' +
                     sectionTitle('Main Commands') +
                     helpLine('!ca menu', 'Opens the main Combat Assistant menu.') +
-                    helpLine('!ca help', 'Shows this help card.') +
+                    helpLine('!ca help', 'Shows this help card.', 'help') +
+                    tokenActionNote +
                     helpLine('!ca settings', 'Opens the Combat Assistant settings.') +
                     helpLine('!ca deal manual &lt;dmg&gt; &lt;type&gt; &lt;DC&gt; &lt;Attr&gt; &lt;half&gt;', 'Applies manual damage to the selected target. Damage type, attack/DC value, saving throw ability, and half damage are optional.') +
                     helpLine('!ca heal manual &lt;hp/temp&gt; &lt;value&gt;', 'Restores Hit Points or grants Temporary Hit Points to the selected target.') +
@@ -4875,23 +5266,33 @@ const CombatAssistant = (() => {
                     separator +
                     sectionTitle('Combat') +
                     '<div style="padding-bottom:2px;">' + descriptionHtml('Combat and Spells list the attacks and spells available on a character sheet.') + '</div>' +
-                    helpLine('!ca combat', 'Shows the attack list for the selected token.') +
+                    helpLine('!ca sheet', 'Shows the Compact Sheet for the selected token.', 'sheet') +
+                    helpLine('!ca player-init', 'Rolls initiative for exactly one selected token and inserts it into Turn Order with Combat Assistant ordering.', 'player-init') +
+                    helpLine('!ca combat', 'Shows the attack list for the selected token.', 'combat') +
                     helpLine('!ca combat &lt;sheet name&gt;', 'Shows the attack list for the named character sheet.') +
-                    helpLine('!ca spells', 'Shows the spell list for the selected token.') +
+                    helpLine('!ca spells', 'Shows the spell list for the selected token.', 'spells') +
                     helpLine('!ca spells &lt;sheet name&gt;', 'Shows the spell list for the named character sheet.') +
-                    helpLine('!ca dash / !ca disengage / !ca dodge', 'Declares the chosen action for the token currently in turn.') +
+                    helpLine('!ca dash', 'Declares Dash for the token currently in turn.', 'dash') +
+                    helpLine('!ca disengage', 'Declares Disengage for the token currently in turn.', 'disengage') +
+                    helpLine('!ca dodge', 'Declares Dodge for the token currently in turn.', 'dodge') +
 
                     separator +
                     sectionTitle('Turn Tracker') +
-                    helpLine('!ca turn', 'Shows the Turn card for the token currently in turn.') +
-                    helpLine('!ca turnnext', 'Ends the current turn and advances to the next token.') +
-                    helpLine('!ca turnfocus', 'Focuses the view on the token currently in turn. Players can use it only during a turn they control.') +
+                    helpLine('!ca turn', 'Shows the normal Turn card for the token currently in turn.', 'turn') +
+                    helpLine('!ca turncard', 'Shows the full Turn card for the selected character. A character id can also be supplied manually; !ca turn card and !ca turn-card are aliases.', 'turncard') +
+                    helpLine('!ca turnround', 'Shows the Round Counter. !ca turn round and !ca turn-round are aliases; Public Round Counter controls public vs GM-only delivery.') +
+                    helpLine('!ca turnnext', 'Ends the current turn and advances to the next token.', 'turnnext') +
+                    helpLine('!ca turnfocus', 'Focuses the view on the token currently in turn. Players can use it only during a turn they control.', 'turnfocus') +
                     helpLine('!ca turnstop yes', 'Ends the active combat and stops the Turn Tracker.') +
 
                     separator +
                     sectionTitle('Resources') +
-                    helpLine('!ca resources', 'Shows resources for the selected token.') +
+                    helpLine('!ca resources', 'Shows resources for the selected token.', 'resources') +
                     helpLine('!ca resources &lt;sheet name&gt;', 'Shows resources for the named character sheet.') +
+
+                    separator +
+                    sectionTitle('Concentration') +
+                    helpLine('!ca conc', 'Recalls the active concentration controls for a token you control.', 'conc') +
 
                     separator +
                     sectionTitle('Examples') +
@@ -5287,9 +5688,10 @@ const CombatAssistant = (() => {
 
         showInitiativeResults(results) {
             const rows = (Array.isArray(results) ? results : []).map((result) => {
-                const modifier = Utils.toInt(result.modifier, 0);
+                const modifier = Utils.toNumber(result.modifier, 0);
+                const modifierText = (modifier >= 0 ? '+' : '') + RollParser.formatInitiativeValue(modifier);
                 const tokenName = Html.span(Utils.escapeHtml(String(result.tokenName || 'Token')), 'color:' + CONFIG.DEFAULT_TEXT_CHARACTER_COLOR + ';font-weight:900;');
-                const bonusHtml = Html.span(' (' + Utils.escapeHtml(Utils.formatSigned(modifier)) + ')', 'color:rgb(145,145,145);font-size:11px;font-weight:700;');
+                const bonusHtml = Html.span(' (' + Utils.escapeHtml(modifierText) + ')', 'color:rgb(145,145,145);font-size:11px;font-weight:700;');
                 const mode = String(result.mode || 'normal');
                 const reasonText = (mode === 'advantage' || mode === 'disadvantage') ? String(result.rollModeReason || mode).trim() : '';
                 const reasonMarker = mode === 'advantage'
@@ -5310,9 +5712,10 @@ const CombatAssistant = (() => {
                     return this.rollBadgeHtml({
                         natural: roll,
                         total: roll + modifier,
+                        displayTotal: RollParser.formatInitiativeValue(roll + modifier),
                         modifier,
                         dimmed: rolls.length > 1 && !isChosen,
-                        tooltip: 'Initiative<br>Roll: (' + String(roll) + ')<br>Modifier: ' + Utils.formatSigned(modifier) + '<br>Total: ' + String(roll + modifier) + (mode !== 'normal' ? ('<br>Mode: ' + mode) : '')
+                        tooltip: 'Initiative<br>Roll: (' + String(roll) + ')<br>Modifier: ' + modifierText + '<br>Total: ' + RollParser.formatInitiativeValue(roll + modifier) + (mode !== 'normal' ? ('<br>Mode: ' + mode) : '')
                     }, marker, { size: 34, fontSize: '18px' });
                 }).reverse().join('');
                 return '<tr>' +
@@ -5386,28 +5789,91 @@ const CombatAssistant = (() => {
 
         renderChatProbe(msg) {
             msg = msg || {};
-            const keys = Object.keys(msg)
-                .filter((key) => ['content', 'inlinerolls'].indexOf(key) < 0)
-                .sort();
+            const compactLines = (value) => String(value === undefined || value === null ? '' : value)
+                .replace(/\r\n?/g, '\n')
+                .split('\n')
+                .map((line) => line.trim())
+                .filter(Boolean)
+                .join('\n')
+                .trim();
+            const isRelevant = (value) => {
+                if (value === undefined || value === null) return false;
+                if (typeof value === 'string') return !!value.trim();
+                if (Array.isArray(value)) return value.length > 0;
+                if (typeof value === 'object') return Object.keys(value).length > 0;
+                return true;
+            };
+            const stringifyValue = (value) => {
+                if (typeof value === 'string') return compactLines(value);
+                if (typeof value === 'object' && value !== null) {
+                    try { return JSON.stringify(value); } catch (ignored) { return String(value); }
+                }
+                return String(value);
+            };
+            const rows = [];
+            const addRow = (label, value, options) => {
+                const opts = options || {};
+                const text = opts.raw ? String(value || '').trim() : stringifyValue(value).trim();
+                if (!text && !opts.always) return;
+                const safeText = Utils.escapeHtml(text || 'Unknown');
+                rows.push(
+                    '<tr>' +
+                        '<td style="width:88px;padding:2px 6px 2px 0;vertical-align:top;color:rgb(235,215,140);font-weight:700;white-space:nowrap;">' + Utils.escapeHtml(label) + ':</td>' +
+                        '<td style="padding:2px 0;vertical-align:top;color:rgb(225,225,225);overflow-wrap:anywhere;">' +
+                            (opts.code ? '<code style="white-space:pre-wrap;overflow-wrap:anywhere;">' + safeText + '</code>' : safeText) +
+                        '</td>' +
+                    '</tr>'
+                );
+            };
+
+            const playerId = String(msg.playerid || '').trim();
+            const player = playerId ? getObj('player', playerId) : null;
+            const playerName = player && Utils.isFunction(player.get)
+                ? String(player.get('_displayname') || player.get('displayname') || '').trim()
+                : '';
+            const speaker = String(msg.who || '').trim();
+
+            addRow('Type', msg.type);
+            addRow('Who', speaker || 'Unknown', { always: true });
+            addRow('Player Name', playerName || playerId || 'Unknown', { always: true });
+            if (playerId) addRow('Player ID', playerId);
+            addRow('Roll Template', msg.rolltemplate);
+
+            const reservedKeys = {
+                type: true,
+                who: true,
+                playerid: true,
+                rolltemplate: true,
+                content: true,
+                inlinerolls: true
+            };
+            Object.keys(msg).sort().forEach((key) => {
+                if (reservedKeys[String(key || '').toLowerCase()]) return;
+                const value = msg[key];
+                if (!isRelevant(value)) return;
+                const rendered = stringifyValue(value);
+                if (!rendered.trim() || rendered === '{}' || rendered === '[]') return;
+                addRow(key, Utils.truncate(rendered, 1000), { code: typeof value === 'object' });
+            });
+
             const inlineRolls = (Array.isArray(msg.inlinerolls) ? msg.inlinerolls : []).map((roll, index) => ({
                 index,
-                expression: roll && roll.expression ? String(roll.expression) : '',
+                expression: roll && roll.expression ? compactLines(roll.expression) : '',
                 total: roll && roll.results && roll.results.total !== undefined ? roll.results.total : ''
-            }));
-            const content = String(msg.content || '');
-            const plain = Utils.stripHtml(content);
-            const body =
-                '<div style="text-align:left;font-size:11px;line-height:14px;color:rgb(225,225,225);">' +
-                    '<b>type:</b> ' + Utils.escapeHtml(msg.type || '') + '<br>' +
-                    '<b>who:</b> ' + Utils.escapeHtml(msg.who || '') + '<br>' +
-                    '<b>rolltemplate:</b> ' + Utils.escapeHtml(msg.rolltemplate || '') + '<br>' +
-                    '<b>keys:</b> ' + Utils.escapeHtml(keys.join(', ')) + '<br>' +
-                    '<b>inlinerolls:</b><br><code style="white-space:pre-wrap;">' + Utils.escapeHtml(Utils.truncate(JSON.stringify(inlineRolls), 900)) + '</code><br>' +
-                    '<b>plain:</b><br><code style="white-space:pre-wrap;">' + Utils.escapeHtml(Utils.truncate(plain, 1400)) + '</code><br>' +
-                    '<b>content:</b><br><code style="white-space:pre-wrap;">' + Utils.escapeHtml(Utils.truncate(content, 1800)) + '</code>' +
-                '</div>';
+            })).filter((roll) => roll.expression || roll.total !== '');
+            if (inlineRolls.length) addRow('Inline Rolls', Utils.truncate(JSON.stringify(inlineRolls), 1200), { code: true });
+
+            const content = compactLines(msg.content || '');
+            const plain = compactLines(Utils.stripHtml(content));
+            if (plain && plain !== content) addRow('Plain', Utils.truncate(plain, 1400), { code: true });
+            if (content) addRow('Content', Utils.truncate(content, 1800), { code: true });
+
+            const body = '<div style="text-align:left;font-size:11px;line-height:14px;">' +
+                '<table style="width:100%;border-collapse:collapse;table-layout:fixed;"><tbody>' + rows.join('') + '</tbody></table>' +
+            '</div>';
             return Html.card({ title: 'Combat Assistant Chat Probe', body });
         },
+
 
         maybeDumpChatProbe(msg) {
             if (!RuntimeConfig.get('CHAT_PROBE')) return;
@@ -5690,6 +6156,8 @@ const CombatAssistant = (() => {
                 const detail = textSource.match(pattern);
                 return detail ? Utils.cleanRoll20Label(detail[1]) : '';
             };
+            const spellLevelText = readInlineDetail('Cast\\s+Level') || readInlineDetail('Spell\\s+Level') || readInlineDetail('Level');
+            const spellLevel = ActionService.normalizeSpellListLevel(spellLevelText, 0);
             return {
                 characterName,
                 attackName,
@@ -5708,6 +6176,8 @@ const CombatAssistant = (() => {
                 saveAbility,
                 halfOnSuccess,
                 halfOnSuccessKnown: saveDc > 0,
+                isSpellDetailsCard,
+                spellLevel,
                 rangeText: readInlineDetail('Range'),
                 durationText: readInlineDetail('Duration'),
                 areaText: readInlineDetail('Area')
@@ -6294,7 +6764,13 @@ const CombatAssistant = (() => {
                 !/^[01]$/.test(attackFieldValue) &&
                 (/\$\[\[\d+\]\]/.test(attackFieldValue) || /\bd20\b/i.test(attackFieldValue) || /^[+-]?\d+(?:\.\d+)?$/.test(attackFieldValue));
             const templateName = String(msg.rolltemplate || '').trim().toLowerCase();
-            const isSpellAction = !!(String(fields.spelllevel || fields.spell_level || fields.spell || '').trim() || /\bspell\s+details\b/i.test(content) || /\bspell-item\b/i.test(content));
+            const isSpellAction = !!((advanced && advanced.isSpellDetailsCard) || String(fields.spelllevel || fields.spell_level || fields.spell || '').trim() || /\bspell\s+details\b/i.test(content) || /\bspell-item\b/i.test(content));
+            const spellLevel = isSpellAction
+                ? Math.max(0, Math.min(9, ActionService.normalizeSpellListLevel(
+                    fields.castlevel || fields.cast_level || fields.spelllevel || fields.spell_level || (advanced && advanced.spellLevel),
+                    advanced && advanced.spellLevel
+                )))
+                : 0;
             const isConcentration = /\bConcentration\b/i.test(content) || /\bDuration\s*:\s*Concentration\b/i.test(content);
             const lightInfo = this.parseLightInfo(fields, advanced, content);
             const areaInfo = this.parseAreaInfo(fields, advanced, content);
@@ -6314,6 +6790,7 @@ const CombatAssistant = (() => {
             const saveAbility = CombatService.normalizeAbilityName((advanced && advanced.saveAbility) || attack.saveAbility || fields.saveability || fields.saveattr || '');
             const saveDc = Math.max(0, Utils.toInt((advanced && advanced.saveDc) || attack.saveDc || 0, 0));
             const hasSpellContext = !!(isSpellAction && !hasDamage && !explicitHealing && (saveDc > 0 || saveAbility || (areaInfo && areaInfo.isArea)));
+            const isSpellCastOnly = !!(isSpellAction && !hasDamage && !explicitHealing && !looksLikeAttack && !hasSpellContext && (advanced && advanced.isSpellDetailsCard));
             const splitSaveDamage = this.splitSecondarySaveDamageRolls(damageRolls, [
                 fields.savedesc,
                 fields.save_success,
@@ -6322,7 +6799,7 @@ const CombatAssistant = (() => {
                 content
             ].filter(Boolean).join(' '), saveDc, saveAbility);
 
-            if (!looksLikeAttack && !looksLikeDamage && !explicitHealing && !hasSpellContext) return null;
+            if (!looksLikeAttack && !looksLikeDamage && !explicitHealing && !hasSpellContext && !isSpellCastOnly) return null;
 
             return {
                 characterName,
@@ -6351,8 +6828,10 @@ const CombatAssistant = (() => {
                 rangeText,
                 durationText,
                 isSpellAction,
+                spellLevel,
                 isConcentration,
                 hasSpellContext,
+                isSpellCastOnly,
                 lightInfo,
                 areaInfo,
                 damageType: damageRolls.length ? damageRolls[0].damageType : ((advanced && advanced.damageType) || 'normal'),
@@ -7306,9 +7785,10 @@ const CombatAssistant = (() => {
 
         getNpcSetSourceInfo(result) {
             const token = R20.resolveRollSourceToken(result || {}, result && result.playerId || '');
+            const sourceCharacterId = String(result && (result.rolledByCharacterId || result.characterId) || '').trim();
             const character = token
                 ? R20.getCharacterFromToken(token)
-                : R20.getCharacterByName(result && (result.characterName || result.tokenName) || '');
+                : ((sourceCharacterId ? getObj('character', sourceCharacterId) : null) || R20.getCharacterByName(result && (result.characterName || result.tokenName) || ''));
             if (token && R20.isPlayerControlledToken(token, character)) return null;
             if (!token && character && R20.isPlayerControlledCharacter(character)) return null;
             if (!token && !character && !RuntimeConfig.get('COMBAT_VISUAL_EFFECTS')) return null;
@@ -7529,13 +8009,27 @@ const CombatAssistant = (() => {
         async handleChatMessage(msg) {
             if (!RuntimeConfig.get('CHAT_TRACKING')) return;
             const parsed = this.parseMessage(msg);
-            if (parsed) parsed.playerId = String(msg && msg.playerid || '').trim();
+            if (parsed) {
+                parsed.playerId = String(msg && msg.playerid || '').trim();
+                parsed.casterName = String(msg && msg.who || '').trim();
+                parsed.rolledByCharacterId = String(msg && msg.rolledByCharacterId || '').trim();
+                parsed.characterId = String(msg && msg.characterId || parsed.rolledByCharacterId || '').trim();
+            }
             if (await this.handlePendingNativeInitiativeCapture(parsed, msg)) return;
             if (await this.handlePendingNativeSaveCapture(msg)) return;
             if (!parsed) return;
             Logger.debug('[Roll capture]', JSON.stringify({ name: parsed.attackName, char: parsed.characterName, attack: parsed.isAttack, damage: parsed.isDamage, healing: parsed.isHealing, total: parsed.attackTotal, damage: parsed.damageTotal }));
 
+            // Utility/native Spell Details cards confirm a cast even when the spell
+            // has no attack, save, damage, or healing payload (for example Shield or
+            // Mirror Image). They still consume the armed spell slot exactly once.
+            if (parsed.isSpellCastOnly) {
+                await ResourceService.consumeTrackedSpellSlot(parsed, msg);
+                return;
+            }
+
             if (parsed.isHealing) {
+                await ResourceService.consumeTrackedSpellSlot(parsed, msg);
                 const healResult = Object.assign({}, parsed, {
                     effectType: 'healing',
                     healMode: parsed.isTempHealing ? 'temp' : 'hp',
@@ -7548,11 +8042,13 @@ const CombatAssistant = (() => {
             }
 
             if (parsed.isAttack && !parsed.isDamage && (parsed.hasAttackRoll || parsed.hasSpellContext)) {
+                await ResourceService.consumeTrackedSpellSlot(parsed, msg);
                 this.rememberAttack(parsed);
                 return;
             }
 
             if (parsed.isAttack && parsed.isDamage) {
+                await ResourceService.consumeTrackedSpellSlot(parsed, msg);
                 this.sendAttackDamagePrompts(parsed);
                 if (parsed.hasAttackRoll) this.rememberAttack(parsed);
                 return;
@@ -7581,6 +8077,7 @@ const CombatAssistant = (() => {
                     rangeText: parsed.rangeText || (prior && prior.rangeText) || '',
                     durationText: parsed.durationText || (prior && prior.durationText) || '',
                     isSpellAction: !!(parsed.isSpellAction || (prior && prior.isSpellAction)),
+                    spellLevel: Math.max(0, Utils.toInt(parsed.spellLevel || (prior && prior.spellLevel), 0)),
                     isConcentration: !!(parsed.isConcentration || (prior && prior.isConcentration)),
                     lightInfo: (parsed.lightInfo && parsed.lightInfo.hasLight ? parsed.lightInfo : null) || (prior && prior.lightInfo) || { hasLight: false },
                     areaInfo: clearSaveFromPriorAttack ? { isArea: false } : ((parsed.areaInfo && parsed.areaInfo.isArea ? parsed.areaInfo : null) || (prior && prior.areaInfo) || { isArea: false }),
@@ -7588,6 +8085,7 @@ const CombatAssistant = (() => {
                     attackDamageRolls: parsed.attackDamageRolls,
                     saveDamageRolls: parsed.saveDamageRolls
                 });
+                await ResourceService.consumeTrackedSpellSlot(result, msg);
                 this.sendAttackDamagePrompts(result);
                 if (prior) this.clearRecentAttack(prior);
             }
@@ -8092,6 +8590,9 @@ const CombatAssistant = (() => {
             const character = token ? R20.getCharacterFromToken(token) : null;
             const hp = token ? this.getTokenHpInfo(token) : { value: 0, max: null, linked: false, hasValue: false };
             const ac = token ? CombatService.readAc(token) : 0;
+            const tempBarNumber = token ? CombatService.getBarNumberForAttribute(token, 'hp_temp', 'TEMP_HP_BAR') : 0;
+            const tempBar = token && tempBarNumber > 0 ? CombatService.getBar(token, tempBarNumber) : null;
+            const tempHp = tempBar && tempBar.ok ? Math.max(0, Utils.toInt(tempBar.value, 0)) : 0;
             const characterId = character ? String(character.id || '').trim() : '';
             return {
                 entry,
@@ -8106,6 +8607,7 @@ const CombatAssistant = (() => {
                 hpMax: hp.max,
                 hpLinked: hp.linked,
                 hasHpValue: hp.hasValue,
+                tempHp,
                 dead: hp.hasValue && hp.value <= 0,
                 ac,
                 speed: this.getTokenSpeed(characterId),
@@ -8193,9 +8695,20 @@ const CombatAssistant = (() => {
             return true;
         },
 
+        sendRoundCounterOnDemand() {
+            const publicCard = this.roundRecipientIsPublic();
+            const card = this.buildRoundCounterCard(this.getCurrentTurnOrder(), {
+                publicCard,
+                includeStop: !publicCard,
+                round: this.getState().round
+            });
+            if (publicCard) R20.send(card);
+            else R20.whisper('GM', card);
+            return true;
+        },
+
         buildTurnCard(info, includeNext, includeRemove, options) {
             const opts = options || {};
-            const tokenName = String(info && info.name || 'Token');
             const displayName = String(info && (info.characterName || info.name) || 'Token');
             const hpColor = info && info.hp > 0 ? 'rgb(52,203,116)' : 'rgb(220,45,45)';
             const tokenFocusButton = this.turnFocusImageButtonHtml(info, 40);
@@ -8288,9 +8801,14 @@ const CombatAssistant = (() => {
                 ? '<div style="height:1px;background:rgb(105,105,105);margin:7px 0 4px 0;"></div>' + turnResourceList
                 : '';
             return Html.card({
-                title: tokenName + '\'s Turn',
+                title: 'Turn Card',
                 body: mainTurnRow + actionSection + resourceSection,
-                buildOptions: { titleColor: CONFIG.DEFAULT_TEXT_CHARACTER_COLOR, borderColor: 'rgb(127,127,127)', bodyAlign: 'left' }
+                buildOptions: {
+                    titleHtml: '<div style="width:100%;text-align:center;color:rgb(255,255,255);font-size:14px;line-height:16px;font-weight:700;">Turn Card</div>',
+                    titleColor: 'rgb(255,255,255)',
+                    borderColor: 'rgb(127,127,127)',
+                    bodyAlign: 'left'
+                }
             });
         },
 
@@ -8340,6 +8858,7 @@ const CombatAssistant = (() => {
 
         removeTurnMarker() {
             const state = this.getState();
+            this.stopTurnMarkerRotation();
             const marker = this.getTurnMarker();
             if (marker && Utils.isFunction(marker.remove)) {
                 try {
@@ -8373,6 +8892,40 @@ const CombatAssistant = (() => {
             };
             move();
             setTimeout(move, 100);
+            return true;
+        },
+
+        stopTurnMarkerRotation() {
+            if (TURN_TRACKER_TIMERS.rotation) {
+                clearInterval(TURN_TRACKER_TIMERS.rotation);
+                TURN_TRACKER_TIMERS.rotation = null;
+            }
+            return true;
+        },
+
+        startTurnMarkerRotation(marker) {
+            this.stopTurnMarkerRotation();
+            if (!marker || !Utils.isFunction(marker.get) || !Utils.isFunction(marker.set)) return false;
+            if (!this.isEnabled() || !RuntimeConfig.get('TURN_MARKER') || !RuntimeConfig.get('TURN_MARKER_ROTATION')) return false;
+            const markerId = R20.getTokenId(marker);
+            const step = Utils.toNumber(RuntimeConfig.get('TURN_MARKER_ROTATION_STEPS'), 1);
+            const speed = Math.max(25, Utils.toInt(RuntimeConfig.get('TURN_MARKER_ROTATION_SPEED'), 100));
+            if (!markerId || !Number.isFinite(step) || step === 0) return false;
+            TURN_TRACKER_TIMERS.rotation = setInterval(() => {
+                const liveMarker = this.getTurnMarker();
+                if (!liveMarker || R20.getTokenId(liveMarker) !== markerId || !RuntimeConfig.get('TURN_MARKER_ROTATION')) {
+                    this.stopTurnMarkerRotation();
+                    return;
+                }
+                try {
+                    const current = Utils.toNumber(liveMarker.get('rotation'), 0);
+                    const next = ((current + step) % 360 + 360) % 360;
+                    liveMarker.set({ rotation: next });
+                } catch (error) {
+                    Logger.debug('[turn-marker:rotation]', error && error.message ? error.message : String(error));
+                    this.stopTurnMarkerRotation();
+                }
+            }, speed);
             return true;
         },
 
@@ -8418,9 +8971,10 @@ const CombatAssistant = (() => {
                 disableTokenMenu: true,
                 gmnotes: 'Managed by Combat Assistant Turn Marker'
             };
+            let marker = this.getTurnMarker();
             const markerUpdateData = Object.assign({}, markerData);
             delete markerUpdateData._pageid;
-            let marker = this.getTurnMarker();
+            if (marker && RuntimeConfig.get('TURN_MARKER_ROTATION')) delete markerUpdateData.rotation;
             try {
                 if (!marker || !Utils.isFunction(marker.get) || String(marker.get('_pageid') || '').trim() !== pageId) {
                     if (marker && Utils.isFunction(marker.remove)) marker.remove();
@@ -8430,8 +8984,10 @@ const CombatAssistant = (() => {
                     marker.set(markerUpdateData);
                 }
                 this.bringTurnMarkerForward(marker);
+                this.startTurnMarkerRotation(marker);
             } catch (error) {
                 Logger.debug('[turn-marker:update]', error && error.message ? error.message : String(error));
+                this.stopTurnMarkerRotation();
                 this.getState().turnMarkerId = '';
                 return false;
             }
@@ -8492,49 +9048,43 @@ const CombatAssistant = (() => {
             }
         },
 
+        focusMapTokenForRequester(token, ctx) {
+            if (typeof sendPing !== 'function' || !token || !Utils.isFunction(token.get)) return false;
+            const pageId = R20.getTokenPageId(token);
+            const playerId = String(ctx && ctx.playerId || '').trim();
+            if (!pageId) return false;
+            try {
+                const left = Utils.toNumber(token.get('left'), 0);
+                const top = Utils.toNumber(token.get('top'), 0);
+                if (playerId && playerId !== 'API') sendPing(left, top, pageId, null, true, [playerId]);
+                else sendPing(left, top, pageId, null, true);
+                return true;
+            } catch (error) {
+                Logger.debug('[sheet-focus]', error && error.message ? error.message : String(error));
+                return false;
+            }
+        },
+
         focusTurnToken(entry, force) {
             if (!force && !RuntimeConfig.get('TURN_AUTO_FOCUS')) return false;
             const info = this.getTokenInfo(entry);
             return this.focusMapToken(info && info.token);
         },
 
-        sendCurrentTurnCardToContext(ctx) {
-            if (!this.isEnabled()) {
-                Render.sendWhisperMessage(ctx && ctx.who || 'GM', 'Turn Tracker', 'Turn Tracker is disabled.', 'warning');
-                return false;
-            }
-            const current = this.tokenEntries(this.getCurrentTurnOrder())[0] || null;
-            const currentId = String(current && current.id || '').trim();
-            if (!current || !currentId) {
-                Render.sendWhisperMessage(ctx && ctx.who || 'GM', 'Turn Tracker', 'There is no current turn.', 'warning');
-                return false;
-            }
-            // GM replays the normal Turn-card delivery: GM always receives it,
-            // and a player-controlled current turn also reaches its controllers.
-            if (ctx && ctx.isGM) return this.sendTurnCard(current);
-
-            const info = this.getTokenInfo(current);
+        sendTurnCardInfoToContext(info, ctx) {
             if (!info || !info.token) {
-                Render.sendWhisperMessage(ctx && ctx.who || 'GM', 'Turn Tracker', 'The current turn token was not found.', 'warning');
+                Render.sendWhisperMessage(ctx && ctx.who || 'GM', 'Turn Card', 'The requested token was not found.', 'warning');
                 return false;
             }
-            const character = info.character || R20.getCharacterFromToken(info.token);
-            if (!R20.tokenIsControlledByPlayer(info.token, character, ctx && ctx.playerId || '')) {
-                Render.sendWhisperMessage(ctx && ctx.who || 'GM', 'Turn Tracker', 'It is not your turn.', 'warning');
-                return false;
-            }
-
-            const expectedTokenId = String(info.tokenId || currentId).trim();
+            const targetId = String(info.tokenId || R20.getTokenId(info.token) || '').trim();
             const deliver = (resolvedInfo) => {
-                const live = this.tokenEntries(this.getCurrentTurnOrder())[0] || null;
-                if (expectedTokenId && live && String(live.id || '').trim() !== expectedTokenId) return false;
                 const finalInfo = resolvedInfo || info;
+                const liveCurrent = this.isEnabled() ? (this.tokenEntries(this.getCurrentTurnOrder())[0] || null) : null;
+                const includeNext = !!(targetId && liveCurrent && String(liveCurrent.id || '').trim() === targetId);
                 this.syncMovementBaseSpeed(finalInfo);
-                const isGmCard = !!(ctx && ctx.isGM);
-                const showRemove = isGmCard && !RuntimeConfig.get('REMOVE_NPC_DEAD_TOKENS') && this.isDeadNpcInfo(finalInfo);
-                const card = this.buildTurnCard(finalInfo, true, showRemove, {
-                    gmCard: isGmCard,
-                    playerCard: !isGmCard
+                const card = this.buildTurnCard(finalInfo, includeNext, false, {
+                    gmCard: !!(ctx && ctx.isGM),
+                    playerCard: !(ctx && ctx.isGM)
                 });
                 R20.whisper(ctx && ctx.who || 'GM', card);
                 return true;
@@ -8553,6 +9103,87 @@ const CombatAssistant = (() => {
                 return true;
             }
             return deliver(info);
+        },
+
+        sendCurrentTurnCardToContext(ctx) {
+            if (!this.isEnabled()) {
+                Render.sendWhisperMessage(ctx && ctx.who || 'GM', 'Turn Tracker', 'Turn Tracker is disabled.', 'warning');
+                return false;
+            }
+            const current = this.tokenEntries(this.getCurrentTurnOrder())[0] || null;
+            const currentId = String(current && current.id || '').trim();
+            if (!current || !currentId) {
+                Render.sendWhisperMessage(ctx && ctx.who || 'GM', 'Turn Tracker', 'There is no current turn.', 'warning');
+                return false;
+            }
+            if (ctx && ctx.isGM) return this.sendTurnCard(current);
+
+            const info = this.getTokenInfo(current);
+            const character = info && info.character || R20.getCharacterFromToken(info && info.token);
+            const playerId = String(ctx && ctx.playerId || '').trim();
+            if (!info || !info.token || !R20.tokenIsControlledByPlayer(info.token, character, playerId)) {
+                Render.sendWhisperMessage(ctx && ctx.who || 'GM', 'Turn Tracker', 'It is not your turn.', 'warning');
+                return false;
+            }
+            return this.sendTurnCardInfoToContext(info, ctx);
+        },
+
+        sendCharacterTurnCardToContext(ctx, explicitCharacterId) {
+            const safeCharacterId = String(explicitCharacterId || '').trim();
+            const selected = R20.getSelectedTokens(ctx && ctx.msg);
+            let token = null;
+            let character = null;
+
+            if (safeCharacterId) {
+                character = getObj('character', safeCharacterId);
+                if (!character) {
+                    Render.sendWhisperMessage(ctx && ctx.who || 'GM', 'Turn Card', 'The requested character id was not found.', 'warning');
+                    return false;
+                }
+                token = selected.find((entry) => String(entry && entry.get && entry.get('represents') || '').trim() === safeCharacterId) || null;
+                if (!token) {
+                    const current = this.isEnabled() ? (this.tokenEntries(this.getCurrentTurnOrder())[0] || null) : null;
+                    const currentToken = current ? R20.getTokenById(current.id) : null;
+                    if (currentToken && String(currentToken.get('represents') || '').trim() === safeCharacterId) token = currentToken;
+                }
+                if (!token) {
+                    const pageId = R20.getPlayerPageId(ctx && ctx.playerId || '');
+                    token = pageId ? R20.findTokenByCharacterIdOnPage(safeCharacterId, pageId) : null;
+                }
+                if (!token) {
+                    const tokens = R20.getTokensByCharacterId(safeCharacterId);
+                    if (tokens.length === 1) token = tokens[0];
+                    else if (tokens.length > 1) {
+                        Render.sendWhisperMessage(ctx && ctx.who || 'GM', 'Turn Card', 'This character has multiple tokens. Select the token you want and use <code>!ca turncard</code>.', 'warning');
+                        return false;
+                    }
+                }
+            } else {
+                if (selected.length !== 1) {
+                    Render.sendWhisperMessage(ctx && ctx.who || 'GM', 'Turn Card', 'Select exactly one linked token, or use <code>!ca turncard character_id</code>.', 'warning');
+                    return false;
+                }
+                token = selected[0];
+                character = R20.getCharacterFromToken(token);
+            }
+
+            if (!token) {
+                Render.sendWhisperMessage(ctx && ctx.who || 'GM', 'Turn Card', 'No token for that character was found.', 'warning');
+                return false;
+            }
+            character = character || R20.getCharacterFromToken(token);
+            if (!character) {
+                Render.sendWhisperMessage(ctx && ctx.who || 'GM', 'Turn Card', 'The selected token must be linked to a character sheet.', 'warning');
+                return false;
+            }
+            if (!(ctx && ctx.isGM) && !R20.tokenIsControlledByPlayer(token, character, ctx && ctx.playerId || '')) {
+                Render.sendWhisperMessage(ctx && ctx.who || 'GM', 'Turn Card', 'You do not control this token.', 'warning');
+                return false;
+            }
+
+            const tokenId = R20.getTokenId(token);
+            const info = this.getTokenInfo({ id: tokenId, pr: '', custom: '' });
+            return this.sendTurnCardInfoToContext(info, ctx);
         },
 
         focusTokenById(tokenId, ctx) {
@@ -8639,6 +9270,7 @@ const CombatAssistant = (() => {
             const tokenId = R20.getTokenId(token);
             const state = this.getState();
             if (tokenId && tokenId === String(state.turnMarkerId || '').trim()) {
+                this.stopTurnMarkerRotation();
                 state.turnMarkerId = '';
                 return true;
             }
@@ -8714,20 +9346,32 @@ const CombatAssistant = (() => {
             if (!safeTokenId) return false;
             const before = this.getCurrentTurnOrder();
             const after = before.filter((entry) => String(entry && entry.id || '').trim() !== safeTokenId);
+            if (before.length === after.length) return false;
+
+            // Keep tracker state synchronized before Roll20 emits change:turnorder.
+            // Removing the already-finished NPC must not be mistaken for a second
+            // turn transition after advanceTurn() has completed.
+            const state = this.getState();
+            const afterIds = this.idsFromOrder(after);
+            state.knownTokenIds = afterIds.slice();
+            state.roundProgressTokenIds = this.unique((state.roundProgressTokenIds || [])
+                .filter((id) => String(id || '').trim() !== safeTokenId));
+            if (String(state.currentTokenId || '').trim() === safeTokenId) state.currentTokenId = this.firstTokenId(after);
+            if (String(state.pivotTokenId || '').trim() === safeTokenId) {
+                const pivot = this.findPivot(after);
+                state.pivotTokenId = String(pivot && pivot.id || '').trim();
+                state.pivotPr = pivot ? String(pivot.pr || '') : '';
+            }
+
             Campaign().set('turnorder', JSON.stringify(after));
-            return before.length !== after.length;
+            if (!afterIds.length) this.resetState();
+            return true;
         },
 
         maybeHandleCurrentDeadNpc(order) {
             const current = this.tokenEntries(order)[0] || null;
-            if (!current || !this.isDeadNpcTurn(current)) return false;
-            if (RuntimeConfig.get('REMOVE_NPC_DEAD_TOKENS')) {
-                this.removeTurn(current.id);
-                return true;
-            }
-            // With automatic removal OFF the normal turn card carries a small red
-            // Remove button below Next. No separate Token Remover card is sent.
-            return false;
+            if (!current || !this.isDeadNpcTurn(current) || !RuntimeConfig.get('REMOVE_NPC_DEAD_TOKENS')) return false;
+            return this.removeCurrentTurnAfterAdvance(current.id, null);
         },
 
         removeCurrentTurnAfterAdvance(tokenId, ctx) {
@@ -8745,17 +9389,25 @@ const CombatAssistant = (() => {
             }
             if (order.length <= 1) return this.removeTurn(safeTokenId);
 
-            // Advance first so all normal next-turn presentation, focus, marker and
-            // round-wrap behavior runs exactly as it would from the Next button.
-            // Remove the old token on the following tick, after that transition.
-            if (!this.advanceTurn(safeTokenId, ctx)) return false;
+            // Use the exact normal Next flow first: rotate Turn Order, update round
+            // state, movement/concentration, marker/focus, and render the next card.
+            // Only after presentation has been triggered do we delete the defeated
+            // NPC's old entry from the list.
+            if (!this.advanceTurn(safeTokenId, ctx, { skipDeadNpcAuto: true })) return false;
             setTimeout(() => {
-                this.removeTurn(safeTokenId);
+                const removed = this.removeTurn(safeTokenId);
+                if (removed && RuntimeConfig.get('REMOVE_NPC_DEAD_TOKENS')) {
+                    // Process a chain of defeated NPCs one transition at a time.
+                    // This runs after the previous dead entry has actually left the
+                    // Turn Order, avoiding recursive rotation through still-present dead entries.
+                    setTimeout(() => this.maybeHandleCurrentDeadNpc(this.getCurrentTurnOrder()), 0);
+                }
             }, 0);
             return true;
         },
 
-        advanceTurn(tokenId, ctx) {
+        advanceTurn(tokenId, ctx, options) {
+            const opts = options || {};
             if (!this.isEnabled()) return false;
             const order = this.getCurrentTurnOrder();
             const entries = this.tokenEntries(order);
@@ -8823,7 +9475,7 @@ const CombatAssistant = (() => {
                 this.sendRoundCounter({ order: rotated, includeStop: true, round: state.round });
             }
             if (next) {
-                if (this.maybeHandleCurrentDeadNpc(rotated)) return true;
+                if (!opts.skipDeadNpcAuto && this.maybeHandleCurrentDeadNpc(rotated)) return true;
                 this.updateCurrentTurnPresentation(next, { sendCard: true, focus: true });
             }
             return true;
@@ -9017,6 +9669,340 @@ const CombatAssistant = (() => {
         abilityNameToShortLabel(value) {
             const ability = this.normalizeAbilityName(value);
             return ABILITIES[ability] || '';
+        },
+
+
+        normalizeSkillTarget(value) {
+            return String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
+        },
+
+        getBeaconIntegrantsFromRoot(root) {
+            return root && root.integrants && root.integrants.integrants && typeof root.integrants.integrants === 'object'
+                ? root.integrants.integrants
+                : {};
+        },
+
+        getBeaconIntegrants(characterId) {
+            const roots = R20.getCharacterStoreDumpRoots(characterId);
+            return roots.length ? this.getBeaconIntegrantsFromRoot(roots[0]) : {};
+        },
+
+        isBeaconIntegrantActive(record, integrants) {
+            if (!record || typeof record !== 'object' || record._enabled === false || record.parentDisabled === true) return false;
+            const seen = Object.create(null);
+            let parentId = String(record.parentID || '').trim();
+            while (parentId && !seen[parentId]) {
+                seen[parentId] = true;
+                const parent = integrants && integrants[parentId];
+                if (!parent) break;
+                if (parent._enabled === false || parent.parentDisabled === true) return false;
+                if (parent.equipData && parent.equipData.equippable === true && parent.equipData.equipped !== true) return false;
+                parentId = String(parent.parentID || '').trim();
+            }
+            return true;
+        },
+
+        get2014AbilityRollModeInfo(characterId) {
+            const raw = String(this.readAttributeRaw(characterId, ['rtype', 'rolltype', 'roll_setting'], '') || '').trim();
+            if (!raw || /\?\{/.test(raw)) return { mode: 'normal', reason: '' };
+            const normalized = raw.toLowerCase().replace(/\s+/g, '');
+            const hasDisadvantage = /disadvantage=1|\{\{disadvantage=1\}\}|2d20k?l1|kl1|lowest/.test(normalized);
+            const hasAdvantage = /advantage=1|\{\{advantage=1\}\}|always=1|\{\{always=1\}\}|2d20k?h1|kh1|highest/.test(normalized);
+            if (hasAdvantage && !hasDisadvantage) return { mode: 'advantage', reason: 'Sheet roll advantage' };
+            if (hasDisadvantage && !hasAdvantage) return { mode: 'disadvantage', reason: 'Sheet roll disadvantage' };
+            return { mode: 'normal', reason: '' };
+        },
+
+        getStoreAbilityRollModeInfo(characterId, ability, kind) {
+            const safeAbility = this.normalizeAbilityName(ability);
+            const safeKind = String(kind || '').trim().toLowerCase() === 'save' ? 'save' : 'check';
+            if (!safeAbility) return { mode: 'normal', reason: '' };
+            const short = String(this.abilityNameToShortLabel(safeAbility) || '').trim().toLowerCase();
+            let advantage = 0;
+            let disadvantage = 0;
+            const advantageReasons = [];
+            const disadvantageReasons = [];
+            this.walkCharacterStoreIntegrants(characterId, (node, inheritedCascades) => {
+                if (!node || inheritedCascades) return;
+                const type = String(node.type || '').trim().toLowerCase();
+                const enabled = !Object.prototype.hasOwnProperty.call(node, '_enabled') || Utils.toBoolean(node._enabled, true);
+                if (!enabled || type !== 'roll bonus') return;
+                const categories = this.parseStoreList(node.bonusCategory).map((entry) => String(entry || '').trim().toLowerCase()).filter(Boolean);
+                const categoryText = categories.join(' ');
+                const categoryMatches = safeKind === 'save'
+                    ? /saving\s*throws?|\bsaves?\b/.test(categoryText)
+                    : /ability\s*checks?|\bchecks?\b/.test(categoryText);
+                if (!categoryMatches) return;
+                // Compact Sheet shows only unconditional roll mode. Situational
+                // bonuses such as War Caster concentration advantage remain
+                // native Roll20 logic and are not permanent sheet advantage.
+                if (String(node.situation || '').trim()) return;
+                const names = this.parseStoreList(node.bonusName).map((entry) => String(entry || '').trim().toLowerCase()).filter(Boolean);
+                if (names.length && !names.some((name) => name === safeAbility || name === short || name.indexOf(safeAbility) >= 0 || name === 'all' || name.indexOf('all ') === 0)) return;
+                const details = [node.bonusDetails, node.rollMode, node.mode].map((value) => {
+                    if (value && typeof value === 'object') {
+                        try { return JSON.stringify(value).toLowerCase(); } catch (error) { return ''; }
+                    }
+                    return String(value || '').trim().toLowerCase();
+                }).join(' ');
+                const reason = String(node.recordName || node.name || node.title || '').trim();
+                if (/highest|advantage/.test(details)) {
+                    advantage += 1;
+                    if (reason && advantageReasons.indexOf(reason) < 0) advantageReasons.push(reason);
+                }
+                if (/lowest|disadvantage/.test(details)) {
+                    disadvantage += 1;
+                    if (reason && disadvantageReasons.indexOf(reason) < 0) disadvantageReasons.push(reason);
+                }
+            });
+            if (advantage > disadvantage) return { mode: 'advantage', reason: advantageReasons.join(', ') || 'Advantage' };
+            if (disadvantage > advantage) return { mode: 'disadvantage', reason: disadvantageReasons.join(', ') || 'Disadvantage' };
+            return { mode: 'normal', reason: '' };
+        },
+
+        getAbilityRollModeInfo(characterId, ability, kind) {
+            return R20.detectSheetVersion(characterId) === '2024'
+                ? this.getStoreAbilityRollModeInfo(characterId, ability, kind)
+                : this.get2014AbilityRollModeInfo(characterId);
+        },
+
+        getSavingThrowProficiencyInfo(characterId, ability) {
+            const safeCharacterId = String(characterId || '').trim();
+            const safeAbility = this.normalizeAbilityName(ability);
+            if (!safeCharacterId || !safeAbility) return { proficient: false, proficiencyBonus: 0 };
+            const proficiencyBonus = this.getProficiencyBonus(safeCharacterId);
+            const short = String(this.abilityNameToShortLabel(safeAbility) || '').trim().toLowerCase();
+            if (R20.detectSheetVersion(safeCharacterId) === '2014') {
+                const profRaw = this.readAttributeRaw(safeCharacterId, [
+                    safeAbility + '_save_prof',
+                    short + '_save_prof',
+                    safeAbility + '_saving_throw_prof'
+                ], '');
+                const numeric = Utils.toInt(profRaw, null);
+                const proficient = (numeric !== null && numeric !== undefined && numeric > 0) || /@\{?pb\}?|proficient|true|yes|on|1/i.test(String(profRaw || ''));
+                return { proficient, proficiencyBonus: proficient ? proficiencyBonus : 0 };
+            }
+            const integrants = this.getBeaconIntegrants(safeCharacterId);
+            let multiplier = 0;
+            Object.keys(integrants).forEach((key) => {
+                if (multiplier >= 2) return;
+                const node = integrants[key];
+                if (!this.isBeaconIntegrantActive(node, integrants)) return;
+                const type = String(node.type || '').trim().toLowerCase();
+                const categories = this.parseStoreList(node.category || node.bonusCategory)
+                    .map((entry) => String(entry || '').trim().toLowerCase())
+                    .filter(Boolean);
+                const saveCategory = categories.some((entry) => /saving\s*throws?|\bsaves?\b/.test(entry));
+                const names = this.parseStoreList(node.bonusName).map((entry) => String(entry || '').trim().toLowerCase()).filter(Boolean);
+                const proficiencyTarget = String(node.proficiency || '').trim().toLowerCase();
+                const abilityText = String(node.ability || node.name || node.recordName || node.label || '').trim().toLowerCase();
+                if (type === 'proficiency' && saveCategory) {
+                    const targetMatches = proficiencyTarget === safeAbility || proficiencyTarget === short || proficiencyTarget.indexOf(safeAbility) >= 0;
+                    if (!targetMatches) return;
+                    const level = String(node.proficiencyLevel || '').trim().toLowerCase();
+                    if (/expert|double/.test(level)) multiplier = Math.max(multiplier, 2);
+                    else if (/proficient/.test(level)) multiplier = Math.max(multiplier, 1);
+                    else if (/half/.test(level)) multiplier = Math.max(multiplier, 0.5);
+                    return;
+                }
+                if (type !== 'saving throw' && !saveCategory) return;
+                if (names.length && names.indexOf(safeAbility) < 0 && names.indexOf(short) < 0 && !names.some((name) => name.indexOf(safeAbility) >= 0)) return;
+                if (!names.length && !abilityText) return;
+                if (!names.length && abilityText !== safeAbility && abilityText !== short && abilityText.indexOf(safeAbility) < 0) return;
+                const formula = node.valueFormula && typeof node.valueFormula === 'object' ? node.valueFormula : {};
+                const formulaProficiency = formula.proficiency && typeof formula.proficiency === 'object' ? formula.proficiency : {};
+                if (Utils.toBoolean(formulaProficiency.add, false)) multiplier = Math.max(multiplier, 1);
+                const level = String(node.proficiencyLevel || '').trim().toLowerCase();
+                if (/expert|double/.test(level)) multiplier = Math.max(multiplier, 2);
+                else if (/proficient/.test(level)) multiplier = Math.max(multiplier, 1);
+            });
+            return {
+                proficient: multiplier > 0,
+                proficiencyBonus: multiplier > 0 ? Math.floor(proficiencyBonus * multiplier) : 0
+            };
+        },
+
+        getAbilityProfile(characterId, ability) {
+            const safeCharacterId = String(characterId || '').trim();
+            const safeAbility = this.normalizeAbilityName(ability);
+            if (!safeCharacterId || !safeAbility) {
+                return { ability: safeAbility, score: null, modifier: 0, save: 0, saveProficient: false, proficiencyBonus: 0, checkMode: 'normal', saveMode: 'normal', checkCommand: '', saveCommand: '' };
+            }
+            const sheetVersion = R20.detectSheetVersion(safeCharacterId);
+            const short = String(this.abilityNameToShortLabel(safeAbility) || '').toLowerCase();
+            let score = sheetVersion === '2024' ? this.getAbilityScoreFromStore(safeCharacterId, safeAbility) : null;
+            if (score === null || score === undefined) score = this.readAttributeNumber(safeCharacterId, [safeAbility, safeAbility + '_score', short], null);
+            const modifier = score === null || score === undefined
+                ? this.readAttributeNumber(safeCharacterId, [safeAbility + '_mod', short + '_mod'], 0)
+                : this.abilityScoreToModifier(score);
+            const proficiency = this.getSavingThrowProficiencyInfo(safeCharacterId, safeAbility);
+            const checkRoll = this.getAbilityRollModeInfo(safeCharacterId, safeAbility, 'check');
+            const saveRoll = this.getAbilityRollModeInfo(safeCharacterId, safeAbility, 'save');
+            const saveCommands = this.getNativeSaveCommandSet(safeCharacterId, safeAbility);
+            const checkCommand = R20.buttonAbilityCommand(safeCharacterId, safeAbility);
+            const saveCommand = sheetVersion === '2014'
+                ? R20.buttonAbilityCommand(safeCharacterId, safeAbility + '_save')
+                : String(saveCommands.buttonCommand || '');
+            return {
+                ability: safeAbility,
+                score,
+                modifier,
+                save: this.readSavingThrowModifier(safeCharacterId, safeAbility),
+                saveProficient: proficiency.proficient,
+                proficiencyBonus: proficiency.proficiencyBonus,
+                checkMode: checkRoll.mode,
+                checkModeReason: checkRoll.reason,
+                saveMode: saveRoll.mode,
+                saveModeReason: saveRoll.reason,
+                checkCommand,
+                saveCommand
+            };
+        },
+
+
+
+        getSkillProfiles(characterId, abilityProfiles) {
+            const safeCharacterId = String(characterId || '').trim();
+            const sheetVersion = R20.detectSheetVersion(safeCharacterId);
+            const suppliedAbilities = abilityProfiles && typeof abilityProfiles === 'object' ? abilityProfiles : {};
+            const definitions = Object.keys(SKILL_DEFINITIONS);
+            const proficiencyBonus = this.getProficiencyBonus(safeCharacterId);
+            const abilityModifier = (ability) => {
+                const supplied = suppliedAbilities[ability];
+                if (supplied && supplied.modifier !== undefined && supplied.modifier !== null) return Utils.toInt(supplied.modifier, 0);
+                if (sheetVersion === '2024') {
+                    const score = this.getAbilityScoreFromStore(safeCharacterId, ability);
+                    if (score !== null && score !== undefined) return this.abilityScoreToModifier(score);
+                }
+                return this.readAttributeNumber(safeCharacterId, [ability + '_mod', this.abilityNameToShortLabel(ability).toLowerCase() + '_mod'], 0);
+            };
+            if (sheetVersion === '2014') {
+                const attrs = findObjs({ _type: 'attribute', _characterid: safeCharacterId }) || [];
+                const attrMap = Object.create(null);
+                attrs.forEach((attr) => {
+                    if (!attr || !Utils.isFunction(attr.get)) return;
+                    const name = String(attr.get('name') || '').trim().toLowerCase();
+                    if (name) attrMap[name] = attr.get('current');
+                });
+                const rollInfo = this.get2014AbilityRollModeInfo(safeCharacterId);
+                const profiles = {};
+                definitions.forEach((skill) => {
+                    const definition = SKILL_DEFINITIONS[skill];
+                    const macro = String(definition.macro || '').trim().toLowerCase();
+                    const profRaw = attrMap[macro + '_prof'];
+                    const numericProf = Utils.toInt(profRaw, null);
+                    const proficient = (numericProf !== null && numericProf !== undefined && numericProf > 0) || /@\{?pb\}?|proficient|true|yes|on/i.test(String(profRaw || ''));
+                    const typeRaw = Utils.toNumber(attrMap[macro + '_type'], 1);
+                    const multiplier = proficient ? Math.max(1, Math.min(2, typeRaw)) : 0;
+                    const profBonus = proficient ? Math.floor(proficiencyBonus * multiplier) : 0;
+                    const storedBonus = Utils.toInt(attrMap[macro + '_bonus'], null);
+                    const flatBonus = Utils.toInt(attrMap[macro + '_flat'], 0);
+                    profiles[skill] = {
+                        skill,
+                        label: definition.label,
+                        ability: definition.ability,
+                        modifier: storedBonus === null || storedBonus === undefined
+                            ? abilityModifier(definition.ability) + profBonus + flatBonus
+                            : storedBonus,
+                        proficient,
+                        proficiencyBonus: profBonus,
+                        proficiencyMultiplier: multiplier,
+                        mode: rollInfo.mode,
+                        modeReason: rollInfo.reason,
+                        command: R20.buttonAbilityCommand(safeCharacterId, macro)
+                    };
+                });
+                return profiles;
+            }
+            const integrants = this.getBeaconIntegrants(safeCharacterId);
+            const states = Object.create(null);
+            definitions.forEach((skill) => {
+                const definition = SKILL_DEFINITIONS[skill];
+                const abilityMode = suppliedAbilities[definition.ability] && suppliedAbilities[definition.ability].checkMode || 'normal';
+                states[skill] = {
+                    targets: [definition.label, definition.macro, skill].map((entry) => this.normalizeSkillTarget(entry)).filter(Boolean),
+                    abilityTarget: this.normalizeSkillTarget(definition.ability),
+                    multiplier: 0,
+                    flatBonus: 0,
+                    advantage: abilityMode === 'advantage',
+                    disadvantage: abilityMode === 'disadvantage',
+                    advantageReasons: [],
+                    disadvantageReasons: []
+                };
+            });
+            Object.keys(integrants).forEach((key) => {
+                const node = integrants[key];
+                if (!this.isBeaconIntegrantActive(node, integrants)) return;
+                const type = String(node.type || '').trim().toLowerCase();
+                const categories = this.parseStoreList(node.category || node.bonusCategory).map((entry) => this.normalizeSkillTarget(entry));
+                const skillCategory = categories.some((entry) => entry === 'skill' || entry === 'skills');
+                const checkCategory = categories.some((entry) => entry === 'abilitycheck' || entry === 'abilitychecks' || entry === 'check' || entry === 'checks');
+                if (type === 'proficiency' && skillCategory) {
+                    const target = this.normalizeSkillTarget(node.proficiency || node.name || node.recordName || '');
+                    definitions.forEach((skill) => {
+                        const state = states[skill];
+                        if (!target || state.targets.indexOf(target) < 0) return;
+                        const level = String(node.proficiencyLevel || '').trim().toLowerCase();
+                        if (/expert|double/.test(level)) state.multiplier = Math.max(state.multiplier, 2);
+                        else if (/proficient/.test(level)) state.multiplier = Math.max(state.multiplier, 1);
+                        else if (/half/.test(level)) state.multiplier = Math.max(state.multiplier, 0.5);
+                    });
+                    return;
+                }
+                if (!skillCategory && !checkCategory) return;
+                if (Object.prototype.hasOwnProperty.call(node, 'cascades')) return;
+                const names = this.parseStoreList(node.bonusName).map((entry) => this.normalizeSkillTarget(entry)).filter(Boolean);
+                const details = [node.bonusDetails, node.rollMode, node.mode].map((value) => String(value || '').trim().toLowerCase()).join(' ');
+                const isAdvantage = /highest|advantage/.test(details);
+                const isDisadvantage = /lowest|disadvantage/.test(details);
+                const reason = String(node.recordName || node.name || node.title || '').trim();
+                let flat = this.readFlatValue(node);
+                if ((flat === null || flat === undefined) && node.bonusValue !== undefined && node.bonusValue !== null && String(node.bonusValue).trim() !== '') flat = Utils.toInt(node.bonusValue, null);
+                definitions.forEach((skill) => {
+                    const state = states[skill];
+                    const targetMatches = !names.length || names.some((name) =>
+                        name === 'all' || name.indexOf('all') === 0 || state.targets.indexOf(name) >= 0 || (checkCategory && name === state.abilityTarget)
+                    );
+                    if (!targetMatches) return;
+                    if (type === 'roll bonus' && isAdvantage) {
+                        state.advantage = true;
+                        if (reason && state.advantageReasons.indexOf(reason) < 0) state.advantageReasons.push(reason);
+                    }
+                    if (type === 'roll bonus' && isDisadvantage) {
+                        state.disadvantage = true;
+                        if (reason && state.disadvantageReasons.indexOf(reason) < 0) state.disadvantageReasons.push(reason);
+                    }
+                    if (!isAdvantage && !isDisadvantage && type !== 'proficiency' && type !== 'ability score' && type !== 'skill' && flat !== null && flat !== undefined) state.flatBonus += flat;
+                });
+            });
+            const profiles = {};
+            definitions.forEach((skill) => {
+                const definition = SKILL_DEFINITIONS[skill];
+                const state = states[skill];
+                const profBonus = state.multiplier > 0 ? Math.floor(proficiencyBonus * state.multiplier) : 0;
+                let mode = 'normal';
+                let modeReason = '';
+                if (state.advantage && !state.disadvantage) {
+                    mode = 'advantage';
+                    modeReason = state.advantageReasons.join(', ') || 'Advantage';
+                } else if (state.disadvantage && !state.advantage) {
+                    mode = 'disadvantage';
+                    modeReason = state.disadvantageReasons.join(', ') || 'Disadvantage';
+                }
+                profiles[skill] = {
+                    skill,
+                    label: definition.label,
+                    ability: definition.ability,
+                    modifier: abilityModifier(definition.ability) + profBonus + state.flatBonus,
+                    proficient: state.multiplier > 0,
+                    proficiencyBonus: profBonus,
+                    proficiencyMultiplier: state.multiplier,
+                    mode,
+                    modeReason,
+                    command: R20.buttonAbilityCommand(safeCharacterId, definition.macro)
+                };
+            });
+            return profiles;
         },
 
         parseActionRangeFeet(value) {
@@ -9892,44 +10878,66 @@ const CombatAssistant = (() => {
         getAbilityScoreFromStore(characterId, ability) {
             const safeAbility = this.normalizeAbilityName(ability);
             if (!safeAbility) return null;
-            const scores = [];
-            this.walkCharacterStoreIntegrants(characterId, (node, inheritedCascades) => {
+            const integrants = this.getBeaconIntegrants(characterId);
+            const entries = [];
+            Object.keys(integrants).forEach((key) => {
+                const node = integrants[key];
+                if (!this.isBeaconIntegrantActive(node, integrants)) return;
                 const type = String(node.type || '').trim().toLowerCase();
-                const abilityName = String(node.ability || node.name || '').trim().toLowerCase();
-                const enabled = !Object.prototype.hasOwnProperty.call(node, '_enabled') || Utils.toBoolean(node._enabled, true);
-                if (type !== 'ability score' || inheritedCascades || !enabled || abilityName !== safeAbility) return;
+                const abilityName = this.normalizeAbilityName(node.ability || node.name || '');
+                if (type !== 'ability score' || abilityName !== safeAbility) return;
                 const flatValue = this.readFlatValue(node);
-                if (flatValue !== null && flatValue !== undefined) scores.push(flatValue);
+                if (flatValue === null || flatValue === undefined) return;
+                entries.push({
+                    calculation: String(node.calculation || '').trim().toLowerCase(),
+                    value: flatValue,
+                    createdTime: Utils.toNumber(node.createdTime, 0)
+                });
             });
-            const usableScores = scores.filter((score) => score >= 3);
-            if (usableScores.length) return Math.max.apply(null, usableScores);
-            return scores.length ? Math.max.apply(null, scores) : null;
+            if (!entries.length) return null;
+            entries.sort((left, right) => left.createdTime - right.createdTime);
+            let base = 10;
+            let hasBase = false;
+            let modifiers = 0;
+            const setValues = [];
+            entries.forEach((entry) => {
+                if (/set\s*base|^set$/.test(entry.calculation)) {
+                    base = entry.value;
+                    hasBase = true;
+                } else if (/set\s*value|override|replace/.test(entry.calculation)) {
+                    setValues.push(entry.value);
+                } else if (/modify|bonus|add|increase/.test(entry.calculation)) {
+                    modifiers += entry.value;
+                } else {
+                    base = entry.value;
+                    hasBase = true;
+                }
+            });
+            const calculated = (hasBase ? base : 10) + modifiers;
+            return setValues.length ? Math.max.apply(null, [calculated].concat(setValues)) : calculated;
         },
 
         getSavingThrowStoreBonus(characterId, ability) {
             const safeAbility = this.normalizeAbilityName(ability);
             if (!safeAbility) return 0;
             const shortAbility = String(this.abilityNameToShortLabel(safeAbility) || '').trim().toLowerCase();
-            let bonus = 0;
-            const seen = Object.create(null);
-            this.walkCharacterStoreIntegrants(characterId, (node, inheritedCascades) => {
+            const proficiency = this.getSavingThrowProficiencyInfo(characterId, safeAbility);
+            const integrants = this.getBeaconIntegrants(characterId);
+            let bonus = Math.max(0, Utils.toInt(proficiency.proficiencyBonus, 0));
+            Object.keys(integrants).forEach((key) => {
+                const node = integrants[key];
+                if (!this.isBeaconIntegrantActive(node, integrants)) return;
                 const type = String(node.type || '').trim().toLowerCase();
-                const enabled = !Object.prototype.hasOwnProperty.call(node, '_enabled') || Utils.toBoolean(node._enabled, true);
-                if (inheritedCascades || !enabled) return;
+                if (type === 'proficiency') return;
                 const abilityText = String(node.ability || node.name || node.recordName || node.label || '').trim().toLowerCase();
                 const bonusNames = this.parseStoreList(node.bonusName).map((entry) => String(entry || '').trim().toLowerCase()).filter(Boolean);
-                const categories = this.parseStoreList(node.bonusCategory).map((entry) => entry.toLowerCase());
-                const isSavingThrowNode = type === 'saving throw' || categories.indexOf('saving throws') >= 0 || categories.indexOf('saving throw') >= 0;
+                const categories = this.parseStoreList(node.category || node.bonusCategory).map((entry) => String(entry || '').trim().toLowerCase());
+                const isSavingThrowNode = type === 'saving throw' || categories.some((entry) => /saving\s*throws?|\bsaves?\b/.test(entry));
                 if (!isSavingThrowNode) return;
-                if (bonusNames.length && bonusNames.indexOf(safeAbility) < 0 && bonusNames.indexOf(shortAbility) < 0) return;
-                if (abilityText && abilityText !== safeAbility && abilityText.indexOf(safeAbility) < 0) return;
-                const key = String(node.shortID || node.id || node.name || JSON.stringify(node)).slice(0, 80);
-                if (seen[key]) return;
-                seen[key] = true;
+                if (bonusNames.length && bonusNames.indexOf(safeAbility) < 0 && bonusNames.indexOf(shortAbility) < 0 && !bonusNames.some((name) => name.indexOf(safeAbility) >= 0)) return;
+                if (!bonusNames.length && abilityText && abilityText !== safeAbility && abilityText.indexOf(safeAbility) < 0) return;
                 const flatValue = this.readFlatValue(node);
                 if (flatValue) bonus += flatValue;
-                const formula = node.valueFormula && typeof node.valueFormula === 'object' ? node.valueFormula : {};
-                if (formula.proficiency && Utils.toBoolean(formula.proficiency.add, false)) bonus += this.getProficiencyBonus(characterId);
             });
             return bonus;
         },
@@ -10137,23 +11145,8 @@ const CombatAssistant = (() => {
             return null;
         },
 
-        getDexterityScoreFromStore(characterId) {
-            const scores = [];
-            this.walkCharacterStoreIntegrants(characterId, (node, inheritedCascades) => {
-                const type = String(node.type || '').trim().toLowerCase();
-                const ability = String(node.ability || node.name || '').trim().toLowerCase();
-                const enabled = !Object.prototype.hasOwnProperty.call(node, '_enabled') || Utils.toBoolean(node._enabled, true);
-                if (type !== 'ability score' || inheritedCascades || !enabled || ability !== 'dexterity') return;
-                const flatValue = this.readFlatValue(node);
-                if (flatValue !== null && flatValue !== undefined) scores.push(flatValue);
-            });
-            const usableScores = scores.filter((score) => score >= 3);
-            if (usableScores.length) return Math.max.apply(null, usableScores);
-            return scores.length ? Math.max.apply(null, scores) : null;
-        },
-
         getDexterityModifierFromStore(characterId) {
-            const score = this.getDexterityScoreFromStore(characterId);
+            const score = this.getAbilityScoreFromStore(characterId, 'dexterity');
             return score === null || score === undefined ? null : this.abilityScoreToModifier(score);
         },
 
@@ -10161,20 +11154,20 @@ const CombatAssistant = (() => {
             const attrLevel = this.readAttributeNumber(characterId, ['level', 'character_level', 'base_level'], null);
             if (attrLevel !== null && attrLevel !== undefined && attrLevel > 0) return attrLevel;
 
-            const totalLevels = [];
-            const classLevels = [];
-            this.walkCharacterStoreIntegrants(characterId, (node, inheritedCascades) => {
-                const type = String(node.type || '').trim().toLowerCase();
-                const enabled = !Object.prototype.hasOwnProperty.call(node, '_enabled') || Utils.toBoolean(node._enabled, true);
-                if (type !== 'class level' || inheritedCascades || !enabled) return;
-                const totalLevel = Utils.toInt(node.totalLevel, null);
+            const integrants = this.getBeaconIntegrants(characterId);
+            const highestLevelByClass = Object.create(null);
+            Object.keys(integrants).forEach((key) => {
+                const node = integrants[key];
+                if (!this.isBeaconIntegrantActive(node, integrants)) return;
+                if (String(node.type || '').trim().toLowerCase() !== 'class level') return;
                 const level = Utils.toInt(node.level, null);
-                if (totalLevel !== null && totalLevel !== undefined && totalLevel > 0) totalLevels.push(totalLevel);
-                if (level !== null && level !== undefined && level > 0) classLevels.push(level);
+                if (level === null || level === undefined || level <= 0) return;
+                const classKey = String(node.classID || node.sourceID || node.name || node.recordName || '').trim().toLowerCase();
+                if (!classKey) return;
+                highestLevelByClass[classKey] = Math.max(Utils.toInt(highestLevelByClass[classKey], 0), level);
             });
-            if (totalLevels.length) return Math.max.apply(null, totalLevels);
-            if (classLevels.length) return classLevels.reduce((sum, level) => sum + level, 0);
-            return 1;
+            const classLevels = Object.keys(highestLevelByClass).map((key) => highestLevelByClass[key]).filter((level) => level > 0);
+            return classLevels.length ? classLevels.reduce((sum, level) => sum + level, 0) : 1;
         },
 
         getStandardProficiencyBonus(level) {
@@ -10220,8 +11213,9 @@ const CombatAssistant = (() => {
             const storeDexMod = this.getDexterityModifierFromStore(characterId);
             const extra = this.getInitiativeExtraBonus(characterId);
             if (storeDexMod !== null && storeDexMod !== undefined) return storeDexMod + extra.bonus;
-            const attrValue = this.readAttributeNumber(characterId, ['initiative_bonus', 'initiative_mod', 'init_bonus'], null);
-            if (attrValue !== null && attrValue !== undefined) return attrValue;
+            const attrRaw = this.readAttributeRaw(characterId, ['initiative_bonus', 'initiative_mod', 'init_bonus'], '');
+            const attrValue = String(attrRaw === undefined || attrRaw === null ? '' : attrRaw).trim() === '' ? null : Utils.toNumber(attrRaw, null);
+            if (attrValue !== null && attrValue !== undefined && Number.isFinite(attrValue)) return attrValue;
             return this.readAttributeNumber(characterId, ['dexterity_mod', 'dex_mod'], 0) + extra.bonus;
         },
 
@@ -12057,6 +13051,29 @@ const CombatAssistant = (() => {
             }
         },
 
+        getTemporaryHpFromSnapshot(snapshot, fallbackValue) {
+            const source = snapshot && typeof snapshot === 'object' ? snapshot : {};
+            const root = source.root && typeof source.root === 'object' ? source.root : {};
+            const hitpoints = (root.hitpoints && typeof root.hitpoints === 'object' && root.hitpoints) ||
+                (root.sheet && root.sheet.hitpoints && typeof root.sheet.hitpoints === 'object' && root.sheet.hitpoints) || {};
+            const beaconValue = ['temporaryHP', 'tempHP', 'temporaryHitPoints', 'hp_temp']
+                .map((key) => hitpoints[key])
+                .find((value) => value !== undefined && value !== null && String(value).trim() !== '');
+            if (beaconValue !== undefined) {
+                const scalar = beaconValue && typeof beaconValue === 'object'
+                    ? (beaconValue.current !== undefined ? beaconValue.current : (beaconValue.value !== undefined ? beaconValue.value : beaconValue.amount))
+                    : beaconValue;
+                return Math.max(0, Utils.toInt(scalar, 0));
+            }
+
+            const tempNames = ['hp_temp', 'temp_hp', 'temporary_hp', 'temporary_hit_points'];
+            const attr = (Array.isArray(source.attrs) ? source.attrs : []).find((candidate) => candidate && Utils.isFunction(candidate.get) &&
+                tempNames.indexOf(String(candidate.get('name') || '').trim().toLowerCase()) >= 0);
+            const attrValue = attr && attr.get('current');
+            if (attrValue !== undefined && attrValue !== null && String(attrValue).trim() !== '') return Math.max(0, Utils.toInt(attrValue, 0));
+            return Math.max(0, Utils.toInt(fallbackValue, 0));
+        },
+
         getLegacyAttackDiagnostics(characterId, attrs, readMs) {
             const started = Date.now();
             const sourceAttrs = Array.isArray(attrs) ? attrs : (findObjs({ _type: 'attribute', _characterid: String(characterId || '').trim() }) || []);
@@ -13504,6 +14521,7 @@ const CombatAssistant = (() => {
 
             const spellCount = spellList && Array.isArray(spellList.spells) ? spellList.spells.length : 0;
             const renderSpellList = isBeacon ? spellList : this.prepareLegacySpellListForSharedRenderer(spellList);
+            renderSpellList.consumeSpellSlots = !!RuntimeConfig.get('CONSUME_SPELL_SLOTS');
             const debugSpells = !!RuntimeConfig.get('CHAT_DEBUG_SPELLS');
             const renderProbe = debugSpells ? this.inspectSpellRender(info.characterName, renderSpellList) : null;
             let spellCards = [];
@@ -13549,6 +14567,9 @@ const CombatAssistant = (() => {
             spellCards.forEach((entry) => {
                 R20.whisper(recipient, entry.html);
             });
+            if (RuntimeConfig.get('CONSUME_SPELL_SLOTS')) {
+                ResourceService.armSpellSlotConsumption(ctx, info, spellList);
+            }
             if (debugSpells) {
                 Logger.info('[spells-debug:send] sheet=' + (isBeacon ? '2024' : '2014') +
                     ' cards=' + String(spellCards.length) +
@@ -13593,6 +14614,135 @@ const CombatAssistant = (() => {
         LEVEL_WORDS: Object.freeze(['', 'FIRST', 'SECOND', 'THIRD', 'FOURTH', 'FIFTH', 'SIXTH', 'SEVENTH', 'EIGHTH', 'NINTH']),
         MAX_STORE_BYTES: 9500000,
         SHEET_WORKER_TIMEOUT_MS: 2500,
+        SPELL_SLOT_TRACKING_TTL_MS: 120000,
+
+        spellSlotTrackingKey(playerId, characterId) {
+            const safePlayerId = String(playerId || '').trim();
+            const safeCharacterId = String(characterId || '').trim();
+            return safePlayerId && safeCharacterId ? (safePlayerId + '::' + safeCharacterId) : '';
+        },
+
+        cleanupSpellSlotTracking(now) {
+            const stamp = Math.max(0, Utils.toInt(now, Date.now()));
+            Object.keys(PENDING_SPELL_SLOT_CASTS).forEach((key) => {
+                const pending = PENDING_SPELL_SLOT_CASTS[key];
+                if (!pending || stamp > Utils.toInt(pending.expiresAt, 0)) delete PENDING_SPELL_SLOT_CASTS[key];
+            });
+        },
+
+        armSpellSlotConsumption(ctx, info, spellList) {
+            if (!RuntimeConfig.get('CONSUME_SPELL_SLOTS')) return false;
+            const playerId = String(ctx && ctx.playerId || '').trim();
+            const characterId = String(info && info.characterId || '').trim();
+            const key = this.spellSlotTrackingKey(playerId, characterId);
+            if (!key) return false;
+            this.cleanupSpellSlotTracking(Date.now());
+            const spellLevelsByName = Object.create(null);
+            (spellList && Array.isArray(spellList.spells) ? spellList.spells : []).forEach((spell) => {
+                const combat = spell && spell.combat && typeof spell.combat === 'object' ? spell.combat : null;
+                const baseLevel = Math.max(0, Math.min(9, this.toResourceInt(spell && spell.level, 0)));
+                const castLevel = Math.max(baseLevel, Math.min(9, this.toResourceInt(combat && combat.castLevel, 0)));
+                [spell && spell.name, combat && combat.name].forEach((name) => {
+                    const normalized = Utils.normalizeName(name || '');
+                    if (normalized) spellLevelsByName[normalized] = castLevel;
+                });
+            });
+            PENDING_SPELL_SLOT_CASTS[key] = {
+                playerId,
+                characterId,
+                characterName: String(info && info.characterName || '').trim(),
+                tokenId: String(info && info.tokenId || '').trim(),
+                who: String(ctx && ctx.who || 'GM').trim() || 'GM',
+                isPact: !!(spellList && spellList.isPact),
+                pactSlotLevel: Math.max(0, this.toResourceInt(spellList && spellList.pactSlotLevel, 0)),
+                spellLevelsByName,
+                expiresAt: Date.now() + this.SPELL_SLOT_TRACKING_TTL_MS
+            };
+            return true;
+        },
+
+        findTrackedSpellCast(parsed, msg) {
+            this.cleanupSpellSlotTracking(Date.now());
+            const playerId = String(msg && msg.playerid || parsed && parsed.playerId || '').trim();
+            const characterId = String(parsed && (parsed.characterId || parsed.rolledByCharacterId) || '').trim();
+            const exactKey = this.spellSlotTrackingKey(playerId, characterId);
+            if (exactKey && PENDING_SPELL_SLOT_CASTS[exactKey]) return { key: exactKey, pending: PENDING_SPELL_SLOT_CASTS[exactKey] };
+            const characterName = Utils.normalizeName(parsed && parsed.characterName || '');
+            const keys = Object.keys(PENDING_SPELL_SLOT_CASTS);
+            for (let i = keys.length - 1; i >= 0; i -= 1) {
+                const key = keys[i];
+                const pending = PENDING_SPELL_SLOT_CASTS[key];
+                if (!pending || String(pending.playerId || '').trim() !== playerId) continue;
+                if (characterName && Utils.normalizeName(pending.characterName || '') === characterName) return { key, pending };
+            }
+            return null;
+        },
+
+        findSpellSlotEntry(characterId, level, preferPact, pactSlotLevel) {
+            const requestedLevel = Math.max(1, Math.min(9, this.toResourceInt(level, 0)));
+            const pactLevelRaw = this.toResourceInt(pactSlotLevel, 0);
+            const pactLevel = pactLevelRaw > 0 ? Math.max(1, Math.min(9, pactLevelRaw)) : 0;
+            const effectiveLevel = preferPact && pactLevel > 0 ? pactLevel : requestedLevel;
+            const entries = this.getEntries(characterId).filter((entry) => {
+                const ref = entry && entry.ref || {};
+                const kind = String(ref.kind || '').trim();
+                if (['legacy-spell', 'beacon-spell', 'beacon-pact'].indexOf(kind) < 0) return false;
+                return this.toResourceInt(ref.level, 0) === effectiveLevel;
+            });
+            if (!entries.length) return null;
+            const preferred = entries.filter((entry) => String(entry && entry.ref && entry.ref.kind || '') === (preferPact ? 'beacon-pact' : 'beacon-spell'));
+            const pool = preferred.length ? preferred : entries;
+            return pool.find((entry) => this.toResourceInt(entry && entry.current, 0) > 0) || pool[0] || null;
+        },
+
+        async consumeTrackedSpellSlot(parsed, msg) {
+            if (!RuntimeConfig.get('CONSUME_SPELL_SLOTS') || !parsed) return false;
+            const tracked = this.findTrackedSpellCast(parsed, msg);
+            if (!tracked) return false;
+            const pending = tracked.pending;
+            const normalizedActionName = Utils.normalizeName(parsed.attackName || '');
+            const spellLevelsByName = pending.spellLevelsByName && typeof pending.spellLevelsByName === 'object'
+                ? pending.spellLevelsByName
+                : Object.create(null);
+            const hasTrackedSpellName = !!(normalizedActionName && Object.prototype.hasOwnProperty.call(spellLevelsByName, normalizedActionName));
+            if (!parsed.isSpellAction && !hasTrackedSpellName) return false;
+            let spellLevel = Math.max(0, Math.min(9, this.toResourceInt(parsed.spellLevel, 0)));
+            if (spellLevel <= 0 && hasTrackedSpellName) spellLevel = Math.max(0, Math.min(9, this.toResourceInt(spellLevelsByName[normalizedActionName], 0)));
+            // A confirmed cantrip consumes the armed session but never a slot.
+            if (spellLevel <= 0) {
+                delete PENDING_SPELL_SLOT_CASTS[tracked.key];
+                return false;
+            }
+
+            delete PENDING_SPELL_SLOT_CASTS[tracked.key];
+            const characterId = String(pending.characterId || '').trim();
+            let token = pending.tokenId ? R20.getTokenById(pending.tokenId) : null;
+            if (token && String(token.get('represents') || '').trim() !== characterId) token = null;
+            if (!token) token = R20.resolveRollSourceToken(parsed, pending.playerId) || null;
+            if (!token) {
+                Render.sendWhisperMessage(pending.who || 'GM', 'Spell Slots', 'The spell was detected, but Combat Assistant could not locate the caster token on the caster page, so no slot was consumed.', 'warning');
+                return false;
+            }
+
+            const entry = this.findSpellSlotEntry(characterId, spellLevel, !!pending.isPact, pending.pactSlotLevel);
+            if (!entry || !entry.ref) {
+                Render.sendWhisperMessage(pending.who || 'GM', 'Spell Slots', 'No matching spell-slot resource was found for level ' + String(spellLevel) + '.', 'warning');
+                return false;
+            }
+            const syntheticCtx = {
+                who: pending.who || String(msg && msg.who || 'GM').replace(/\s+\(GM\)$/i, '').trim() || 'GM',
+                playerId: pending.playerId,
+                isGM: typeof playerIsGM === 'function' ? playerIsGM(pending.playerId) : false,
+                notifySpellSlotFailureToGM: true,
+                msg
+            };
+            return this.adjust(syntheticCtx, [
+                'use',
+                R20.getTokenId(token),
+                Utils.encodeJsonPayload(entry.ref),
+                '1'
+            ]);
+        },
 
         toResourceInt(value, fallback) {
             const n = parseInt(value, 10);
@@ -13921,12 +15071,11 @@ const CombatAssistant = (() => {
         buildResourcesCard(token, character, entries) {
             const tokenId = R20.getTokenId(token);
             const characterName = character && Utils.isFunction(character.get) ? String(character.get('name') || 'Character').trim() : 'Character';
-            const titleHtml = Html.span(Utils.escapeHtml(characterName), 'color:' + CONFIG.DEFAULT_TEXT_CHARACTER_COLOR + ';font-weight:900;') +
-                Html.span('&#39;s Resources', 'color:rgb(235,235,235);font-weight:900;');
+            const titleHtml = Render.namedCharacterTitleHtml(characterName, 'Resources', token, character, 30);
             const resourceList = this.buildResourceListHtml(tokenId, entries);
             const body = resourceList || '<div style="text-align:center;color:rgb(170,170,170);font-size:11px;line-height:14px;padding:4px 0;">No limited resources or spell slots were found.</div>';
             return Html.card({
-                title: characterName + "'s Resources",
+                title: characterName + ' Resources',
                 body,
                 buildOptions: { titleHtml, titleColor: 'rgb(235,235,235)', bodyAlign: 'left' }
             });
@@ -14296,6 +15445,21 @@ const CombatAssistant = (() => {
             return { ok: true, current: safeCurrent, max: safeMax, effective, next: Math.min(safeMax, safeCurrent + effective) };
         },
 
+        sendResourceChangeFailure(ctx, character, label, change) {
+            const safeLabel = String(label || 'Resource').trim() || 'Resource';
+            const message = String(change && change.message || 'Resource update failed.').trim();
+            Render.sendWhisperMessage(ctx && ctx.who || 'GM', 'Resources', Utils.escapeHtml(safeLabel + ': ' + message), 'warning');
+            if (ctx && ctx.notifySpellSlotFailureToGM && !ctx.isGM && message === 'No uses remain.') {
+                const characterName = character && Utils.isFunction(character.get) ? String(character.get('name') || 'Character').trim() : 'Character';
+                const body = '<table style="width:100%;border-collapse:collapse;table-layout:fixed;"><tbody>' +
+                    '<tr><td style="text-align:left;vertical-align:middle;padding:0 0 3px 0;color:' + CONFIG.DEFAULT_TEXT_CHARACTER_COLOR + ';font-size:12px;line-height:15px;font-weight:900;">' + Utils.escapeHtml(characterName) + '</td></tr>' +
+                    '<tr><td style="text-align:left;vertical-align:middle;padding:0;color:rgb(225,225,225);font-size:12px;line-height:15px;">no tiene <span style="color:rgb(235,215,140);font-weight:900;">' + Utils.escapeHtml(safeLabel) + '</span> para hacer esta accion.</td></tr>' +
+                '</tbody></table>';
+                R20.whisper('GM', Html.card({ title: 'Resources', body, buildOptions: { bodyAlign: 'left' } }));
+            }
+            return false;
+        },
+
         buildResourceUpdateCard(token, character, label, direction, quantity, current, max) {
             const characterName = character && Utils.isFunction(character.get) ? String(character.get('name') || 'Character').trim() : 'Character';
             const imgsrc = token && Utils.isFunction(token.get) ? String(token.get('imgsrc') || '').trim() : '';
@@ -14372,10 +15536,7 @@ const CombatAssistant = (() => {
                 const snapshot = this.resolveLegacyRef(info.characterId, trustedRef);
                 snapshot.label = trustedEntry.label;
                 const change = this.calculateChange(snapshot.current, snapshot.max, direction, quantity);
-                if (!change.ok) {
-                    Render.sendWhisperMessage(ctx.who, 'Resources', Utils.escapeHtml(snapshot.label + ': ' + change.message), 'warning');
-                    return false;
-                }
+                if (!change.ok) return this.sendResourceChangeFailure(ctx, info.character, snapshot.label, change);
                 if (!this.writeLegacyCurrent(info.characterId, snapshot.valueAttrName, change.next)) {
                     Render.sendWhisperMessage(ctx.who, 'Resources', 'The 2014 sheet resource could not be updated.', 'failure');
                     return false;
@@ -14399,10 +15560,7 @@ const CombatAssistant = (() => {
                         return false;
                     }
                     const change = this.calculateChange(entry.current, entry.max, direction, quantity);
-                    if (!change.ok) {
-                        Render.sendWhisperMessage(ctx.who, 'Resources', Utils.escapeHtml(entry.label + ': ' + change.message), 'warning');
-                        return false;
-                    }
+                    if (!change.ok) return this.sendResourceChangeFailure(ctx, info.character, entry.label, change);
                     const writeResult = await this.writeBeaconStoreValue(storeEntry, entry.ref, change.next);
                     if (!writeResult || !writeResult.ok) {
                         Render.sendWhisperMessage(ctx.who, 'Resources', Utils.escapeHtml((writeResult && writeResult.message) || 'The 2024 resource store update failed.'), 'warning');
@@ -14457,6 +15615,14 @@ const CombatAssistant = (() => {
             return !!PLAYER_ALLOWED_ACTIONS[String(action || '').trim().toLowerCase()];
         },
 
+        sendUnknownCommand(ctx) {
+            Render.sendWhisperMessage(
+                ctx && ctx.who || 'GM',
+                'Unknown Command',
+                'Use <code style="color:rgb(52,203,116);font-weight:900;">!ca help</code> for more information.',
+                'warning'
+            );
+        },
 
         canUsePlayerActionRequest(ctx, request) {
             if (ctx.isGM) return true;
@@ -14790,7 +15956,7 @@ const CombatAssistant = (() => {
             const args = ctx.args || [];
             const action = String(args[0] || 'menu').trim().toLowerCase();
             if (!ctx.isGM && !this.isPlayerAllowedAction(action)) {
-                Render.sendWhisperMessage(ctx.who, 'Permission Denied', 'Only the GM can use Combat Assistant commands. Use generated player buttons for attacks, healing, and saving throws.', 'failure');
+                this.sendUnknownCommand(ctx);
                 return;
             }
             if (action === 'menu') {
@@ -14799,6 +15965,35 @@ const CombatAssistant = (() => {
             }
             if (action === 'help') {
                 Render.showHelp(ctx.who, ctx.isGM);
+                return;
+            }
+            if (action === 'tokenaction') {
+                this.handleTokenActionInstall(ctx, args.slice(1));
+                return;
+            }
+            if (action === 'gettokenimage') {
+                this.handleGetTokenImageUrl(ctx);
+                return;
+            }
+            if (action === 'button-create') {
+                const match = String(ctx.raw || '').match(/^\s*\S+\s+button-create\s+"([\s\S]*)"\s*$/i);
+                const literalCommand = match ? String(match[1] || '') : '';
+                if (!literalCommand.trim()) {
+                    Render.sendWhisperMessage(ctx.who, 'Button Create', 'Use <code>!ca button-create "command"</code>.', 'warning');
+                    return;
+                }
+                const button = Render.iconButtonHtml({
+                    iconHtml: '&#9654;&#65039;',
+                    label: 'Use',
+                    command: Render.deferButtonCommand(literalCommand),
+                    backgroundColor: 'rgba(55,55,55,0.95)',
+                    tooltip: 'Run the literal test command'
+                });
+                const body = Render.iconButtonTableHtml([button], {
+                    columns: 1,
+                    footer: 'Literal Button Test. Press Use to run exactly the quoted command.'
+                });
+                R20.whisper(ctx.who, Html.card({ title: 'Button Test', body }));
                 return;
             }
             if (action === 'advancemode' || action === 'advancedmode') {
@@ -14873,6 +16068,14 @@ const CombatAssistant = (() => {
                 ActionService.narrativeAction(ctx, args[1] || '', args[2] || '');
                 return;
             }
+            if (action === 'sheet') {
+                this.handleCharacterSheet(ctx, args.slice(1));
+                return;
+            }
+            if (action === 'sheetfocus') {
+                this.handleSheetFocus(ctx, args.slice(1));
+                return;
+            }
             if (action === 'combat') {
                 await ActionService.showCombatForContext(ctx, args.slice(1));
                 return;
@@ -14889,10 +16092,30 @@ const CombatAssistant = (() => {
                 await ResourceService.adjust(ctx, args.slice(1));
                 return;
             }
+            if (action === 'turncard' || action === 'turn-card') {
+                TurnTracker.sendCharacterTurnCardToContext(ctx, args[1] || '');
+                return;
+            }
+            if (action === 'turnround' || action === 'turn-round') {
+                TurnTracker.sendRoundCounterOnDemand();
+                return;
+            }
             if (action === 'turn') {
                 const turnAction = String(args[1] || '').trim().toLowerCase();
                 if (!turnAction) {
                     TurnTracker.sendCurrentTurnCardToContext(ctx);
+                    return;
+                }
+                if (turnAction === 'card') {
+                    TurnTracker.sendCharacterTurnCardToContext(ctx, args[2] || '');
+                    return;
+                }
+                if (turnAction === 'round') {
+                    if (!ctx.isGM) {
+                        this.sendUnknownCommand(ctx);
+                        return;
+                    }
+                    TurnTracker.sendRoundCounterOnDemand();
                     return;
                 }
                 if (turnAction === 'next') {
@@ -14905,7 +16128,7 @@ const CombatAssistant = (() => {
                 }
                 if (turnAction === 'remove') {
                     if (!ctx.isGM) {
-                        Render.sendWhisperMessage(ctx.who, 'Permission Denied', 'Only the GM can remove turns.', 'failure');
+                        this.sendUnknownCommand(ctx);
                         return;
                     }
                     TurnTracker.removeCurrentTurnAfterAdvance(args[2] || '', ctx);
@@ -14913,13 +16136,14 @@ const CombatAssistant = (() => {
                 }
                 if (turnAction === 'stop') {
                     if (!ctx.isGM) {
-                        Render.sendWhisperMessage(ctx.who, 'Permission Denied', 'Only the GM can stop combat.', 'failure');
+                        this.sendUnknownCommand(ctx);
                         return;
                     }
                     TurnTracker.stopCombat(args[2] || '');
                     return;
                 }
-                Render.sendWhisperMessage(ctx.who, 'Turn Tracker', 'Use !ca turn next, !ca turn focus, !ca turn remove, or !ca turn stop yes.', 'warning');
+                if (!ctx.isGM) this.sendUnknownCommand(ctx);
+                else Render.sendWhisperMessage(ctx.who, 'Turn Tracker', 'Use !ca turn card, !ca turn next, !ca turn focus, !ca turn remove, or !ca turn stop yes.', 'warning');
                 return;
             }
             if (action === 'turnnext') {
@@ -15010,6 +16234,10 @@ const CombatAssistant = (() => {
                 await this.handleInitiative(ctx, args.slice(1));
                 return;
             }
+            if (action === 'player-init') {
+                this.handlePlayerInitiative(ctx, args.slice(1));
+                return;
+            }
             if (action === 'rollinit') {
                 await this.handleCombatAssistantInitiativeRoll(ctx, args.slice(1));
                 return;
@@ -15022,7 +16250,7 @@ const CombatAssistant = (() => {
                 this.handleTestRun(ctx, args.slice(1));
                 return;
             }
-            Render.sendWhisperMessage(ctx.who, 'Unknown Command', 'Use <code style="color:rgb(52,203,116);font-weight:900;">!ca menu</code> or <code>!ca help</code>.', 'warning');
+            this.sendUnknownCommand(ctx);
         },
 
         getAccessibleConcentrationEntries(ctx, explicitTokenId) {
@@ -16006,6 +17234,174 @@ const CombatAssistant = (() => {
             return !!access.controlAccess;
         },
 
+        handleTokenActionInstall(ctx, args) {
+            const actionId = String(args && args[0] || '').trim().toLowerCase();
+            const definition = PLAYER_TOKEN_ACTIONS[actionId];
+            if (!definition || !this.isPlayerAllowedAction(actionId)) {
+                this.sendUnknownCommand(ctx);
+                return false;
+            }
+
+            const selected = R20.getSelectedTokens(ctx && ctx.msg);
+            if (selected.length !== 1) {
+                Render.sendWhisperMessage(ctx.who, 'Token Action', 'Select exactly one linked token, then press the command in Help.', 'warning');
+                return false;
+            }
+            const token = selected[0];
+            const character = R20.getCharacterFromToken(token);
+            if (!character) {
+                Render.sendWhisperMessage(ctx.who, 'Token Action', 'The selected token is not linked to a character sheet.', 'warning');
+                return false;
+            }
+            if (!this.canUseTokenButton(ctx, token)) {
+                Render.sendWhisperMessage(ctx.who, 'Token Action', 'You do not control this character.', 'failure');
+                return false;
+            }
+
+            const characterId = String(character.id || (Utils.isFunction(token.get) ? token.get('represents') : '') || '').trim();
+            if (!characterId || typeof createObj !== 'function') {
+                Render.sendWhisperMessage(ctx.who, 'Token Action', 'Combat Assistant could not update this character sheet.', 'failure');
+                return false;
+            }
+            const normalizedCommand = String(definition.command || '').trim().replace(/\s+/g, ' ').toLowerCase();
+            const abilities = findObjs({ _type: 'ability', _characterid: characterId }) || [];
+            const existingAction = abilities.find((ability) => {
+                if (!ability || !Utils.isFunction(ability.get)) return false;
+                return String(ability.get('action') || '').trim().replace(/\s+/g, ' ').toLowerCase() === normalizedCommand;
+            });
+            const characterName = String(character.get('name') || 'Character').trim() || 'Character';
+            const macroNameHtml = Html.span(Utils.escapeHtml(definition.name), 'color:rgb(235,215,140);font-weight:900;');
+            const characterNameHtml = Html.span(Utils.escapeHtml(characterName), 'color:' + CONFIG.DEFAULT_TEXT_CHARACTER_COLOR + ';font-weight:900;');
+            if (existingAction) {
+                if (!Utils.toBoolean(existingAction.get('istokenaction'), false) && Utils.isFunction(existingAction.set)) {
+                    existingAction.set('istokenaction', true);
+                    Render.sendWhisperMessage(ctx.who, 'Macro Added', macroNameHtml + ' is now visible as a Token Action for ' + characterNameHtml + '.', 'normal');
+                } else {
+                    Render.sendWhisperMessage(ctx.who, 'Macro Added', macroNameHtml + ' is already a Token Action for ' + characterNameHtml + '.', 'normal');
+                }
+                return true;
+            }
+
+            const reservedName = abilities.find((ability) => ability && Utils.isFunction(ability.get) && Utils.normalizeName(ability.get('name')) === Utils.normalizeName(definition.name));
+            if (reservedName) {
+                Render.sendWhisperMessage(ctx.who, 'Token Action', 'An Ability named <strong>' + Utils.escapeHtml(definition.name) + '</strong> already exists with a different action. Combat Assistant left it unchanged.', 'warning');
+                return false;
+            }
+
+            const created = createObj('ability', {
+                _characterid: characterId,
+                name: definition.name,
+                action: definition.command,
+                istokenaction: true
+            });
+            if (!created) {
+                Render.sendWhisperMessage(ctx.who, 'Token Action', 'Combat Assistant could not create this Token Action.', 'failure');
+                return false;
+            }
+            Render.sendWhisperMessage(ctx.who, 'Macro Added', macroNameHtml + ' was added to ' + characterNameHtml + '. It will appear when a linked token for that character is selected.', 'normal');
+            return true;
+        },
+
+
+        getAuthorizedTargetTokens(ctx, tokens, title) {
+            const source = Array.isArray(tokens) ? tokens.filter(Boolean) : [];
+            if (ctx && ctx.isGM) return source;
+            const allowed = source.filter((token) => this.canUseTokenButton(ctx, token));
+            const denied = source.length - allowed.length;
+            if (denied > 0) {
+                Render.sendWhisperMessage(
+                    ctx && ctx.who || 'GM',
+                    title || 'Permission Denied',
+                    'Skipped ' + String(denied) + ' token' + (denied === 1 ? '' : 's') + ' you do not control.',
+                    'warning'
+                );
+            }
+            return allowed;
+        },
+
+        resolveCharacterSheetTokens(ctx, explicitId) {
+            const safeId = String(explicitId || '').trim();
+            if (!safeId) return R20.getSelectedTokens(ctx && ctx.msg);
+            const token = R20.getTokenById(safeId);
+            if (token) return [token];
+            const character = getObj('character', safeId);
+            if (!character) return [];
+            const representative = ActionService.findRepresentativeToken(safeId, ctx || {});
+            return representative ? [representative] : [];
+        },
+
+        handleCharacterSheet(ctx, args) {
+            const tokens = this.getAuthorizedTargetTokens(
+                ctx,
+                this.resolveCharacterSheetTokens(ctx, args && args[0]),
+                'Compact Sheet'
+            );
+            if (!tokens.length) {
+                Render.sendWhisperMessage(ctx.who, 'Compact Sheet', 'Select one or more linked tokens, or provide a character id you control.', 'warning');
+                return false;
+            }
+            let rendered = 0;
+            tokens.forEach((token) => {
+                const tokenId = R20.getTokenId(token);
+                const characterId = token && Utils.isFunction(token.get) ? String(token.get('represents') || '').trim() : '';
+                const character = characterId ? getObj('character', characterId) : null;
+                if (!tokenId || !characterId || !character) return;
+                const info = TurnTracker.getTokenInfo({ id: tokenId, pr: '', custom: '' });
+                const sheetSnapshot = ActionService.getStoreDiagnosticSnapshot(characterId);
+                info.tempHp = ActionService.getTemporaryHpFromSnapshot(sheetSnapshot, info.tempHp);
+                const sheetVersion = R20.detectSheetVersion(characterId);
+                const initiativeRollInfo = sheetVersion === '2014'
+                    ? CombatService.get2014InitiativeStyleRollInfo(characterId)
+                    : CombatService.getInitiativeRollInfo(characterId);
+                info.initiativeModifier = CombatService.getInitiativeModifier(characterId);
+                info.initiativeMode = initiativeRollInfo.mode;
+                info.initiativeCommand = '!ca player-init ' + tokenId;
+                const profiles = {};
+                Object.keys(ABILITIES).forEach((ability) => {
+                    profiles[ability] = CombatService.getAbilityProfile(characterId, ability);
+                });
+                const skills = CombatService.getSkillProfiles(characterId, profiles);
+                R20.whisper(ctx.who, Render.buildCharacterSheet(info, profiles, skills));
+                rendered += 1;
+            });
+            if (!rendered) {
+                Render.sendWhisperMessage(ctx.who, 'Compact Sheet', 'No selected token was linked to a character sheet.', 'warning');
+                return false;
+            }
+            return true;
+        },
+
+        handleSheetFocus(ctx, args) {
+            const token = R20.getTokenById(args && args[0]);
+            if (!token) {
+                Render.sendWhisperMessage(ctx.who, 'Compact Sheet', 'The requested token was not found.', 'warning');
+                return false;
+            }
+            if (!this.canUseTokenButton(ctx, token)) {
+                Render.sendWhisperMessage(ctx.who, 'Permission Denied', 'You do not control this token.', 'failure');
+                return false;
+            }
+            return TurnTracker.focusMapTokenForRequester(token, ctx);
+        },
+
+
+
+        handleGetTokenImageUrl(ctx) {
+            const tokens = R20.getSelectedTokens(ctx && ctx.msg);
+            if (tokens.length !== 1) {
+                Render.sendWhisperMessage(ctx.who, 'Token Image URL', 'Select exactly one token before pressing Get.', 'warning');
+                return false;
+            }
+            const token = tokens[0];
+            const url = token && Utils.isFunction(token.get) ? String(token.get('imgsrc') || '').trim() : '';
+            if (!url) {
+                Render.sendWhisperMessage(ctx.who, 'Token Image URL', 'The selected token does not have an image URL.', 'warning');
+                return false;
+            }
+            R20.whisper(ctx.who, Render.tokenImageUrlCard(token));
+            return true;
+        },
+
         whisperCombatAssistantInitiativeButton(token, ctx) {
             const character = R20.getCharacterFromToken(token);
             if (!character) return false;
@@ -16064,6 +17460,52 @@ const CombatAssistant = (() => {
             if (failed.length) Render.sendWhisperMessage(ctx.who, 'Initiative', Utils.escapeHtml(failed.join(' ')), 'warning');
         },
 
+        getNativeInitiativeBatchOptions(rollMode) {
+            return {
+                title: 'Initiative Roll',
+                individualTitle: 'Initiative Roll',
+                rollName: 'Initiative',
+                label: 'Init',
+                batchLabel: 'Init',
+                batchTitle: 'Initiative Rolls',
+                batchIntro: 'Roll <strong>Initiative</strong> for:',
+                iconHtml: '&#127922;',
+                tooltip: 'Roll initiative',
+                batchTooltip: 'Roll initiative for all listed tokens',
+                trackInitiative: true,
+                rollMode: String(rollMode || '')
+            };
+        },
+
+        handlePlayerInitiative(ctx, args) {
+            const explicitTokenId = String(args && args[0] || '').trim();
+            const tokens = explicitTokenId ? this.getTargetTokens(ctx, explicitTokenId) : R20.getSelectedTokens(ctx && ctx.msg);
+            if (tokens.length !== 1) {
+                Render.sendWhisperMessage(ctx.who, 'Initiative', 'Select exactly one linked token before rolling initiative.', 'warning');
+                return false;
+            }
+            const token = tokens[0];
+            if (!this.canUseTokenButton(ctx, token)) {
+                Render.sendWhisperMessage(ctx.who, 'Initiative', 'You do not control this token.', 'failure');
+                return false;
+            }
+            const character = R20.getCharacterFromToken(token);
+            if (!character) {
+                Render.sendWhisperMessage(ctx.who, 'Initiative', 'The selected token must be linked to a character.', 'warning');
+                return false;
+            }
+            const characterId = String(character.id || (Utils.isFunction(token.get) ? token.get('represents') : '') || '').trim();
+            const sheetVersion = characterId ? R20.detectSheetVersion(characterId) : '';
+            const result = CombatService.rollInitiativeForToken(token, sheetVersion === '2014' ? 'auto' : '');
+            if (!result.ok) {
+                Render.sendWhisperMessage(ctx.who, 'Initiative', result.message || 'Initiative roll failed.', 'failure');
+                return false;
+            }
+            CombatService.applyInitiativeResults([result]);
+            R20.direct(Render.showInitiativeResults([result]));
+            return true;
+        },
+
         async handleCombatAssistantInitiativeRoll(ctx, args) {
             const tokenId = String(args[0] || '').trim();
             const rollModeArg = String(args[1] || '').trim();
@@ -16081,9 +17523,13 @@ const CombatAssistant = (() => {
             }
             const character = R20.getCharacterFromToken(token);
             const characterId = character ? String(character.id || (Utils.isFunction(token.get) ? token.get('represents') : '') || '').trim() : '';
-            const forcedMode = characterId && R20.detectSheetVersion(characterId) === '2014' && RuntimeConfig.get('SHEET_2014_CA_ROLLS')
-                ? rollMode
-                : '';
+            const sheetVersion = characterId ? R20.detectSheetVersion(characterId) : '';
+            if (sheetVersion === '2014' && !RuntimeConfig.get('SHEET_2014_CA_ROLLS')) {
+                const nativeResult = this.sendNativeRollBatchForTokens([token], 'initiative', this.getNativeInitiativeBatchOptions(''));
+                if (nativeResult.failed.length) Render.sendWhisperMessage(ctx.who, 'Initiative', Utils.escapeHtml(nativeResult.failed.join(' ')), 'warning');
+                return;
+            }
+            const forcedMode = sheetVersion === '2014' && RuntimeConfig.get('SHEET_2014_CA_ROLLS') ? rollMode : '';
             const result = CombatService.rollInitiativeForToken(token, forcedMode);
             if (!result.ok) {
                 Render.sendWhisperMessage(ctx.who, 'Initiative', result.message || 'Initiative roll failed.', 'failure');
@@ -16104,8 +17550,21 @@ const CombatAssistant = (() => {
                 Render.sendWhisperMessage(ctx.who, 'Initiative', 'Select one or more linked tokens.', 'warning');
                 return;
             }
+            const nativeOptions = this.getNativeInitiativeBatchOptions(rollMode);
             if (RuntimeConfig.get('CA_ROLLS_INITIATIVE')) {
-                this.runCombatAssistantInitiative(tokens, ctx, rollMode);
+                const native2014Tokens = [];
+                const combatAssistantTokens = [];
+                tokens.forEach((token) => {
+                    const character = R20.getCharacterFromToken(token);
+                    const characterId = character ? String(character.id || (Utils.isFunction(token.get) ? token.get('represents') : '') || '').trim() : '';
+                    if (characterId && R20.detectSheetVersion(characterId) === '2014' && !RuntimeConfig.get('SHEET_2014_CA_ROLLS')) native2014Tokens.push(token);
+                    else combatAssistantTokens.push(token);
+                });
+                if (combatAssistantTokens.length) this.runCombatAssistantInitiative(combatAssistantTokens, ctx, rollMode);
+                if (native2014Tokens.length) {
+                    const native2014Result = this.sendNativeRollBatchForTokens(native2014Tokens, 'initiative', nativeOptions);
+                    if (native2014Result.failed.length) Render.sendWhisperMessage(ctx.who, 'Initiative', Utils.escapeHtml(native2014Result.failed.join(' ')), 'warning');
+                }
                 return;
             }
             if (RuntimeConfig.get('DEBUG')) {
@@ -16117,20 +17576,7 @@ const CombatAssistant = (() => {
                     'normal'
                 );
             }
-            const result = this.sendNativeRollBatchForTokens(tokens, 'initiative', {
-                title: 'Initiative Roll',
-                individualTitle: 'Initiative Roll',
-                rollName: 'Initiative',
-                label: 'Init',
-                batchLabel: 'Init',
-                batchTitle: 'Initiative Rolls',
-                batchIntro: 'Roll <strong>Initiative</strong> for:',
-                iconHtml: '&#127922;',
-                tooltip: 'Roll initiative',
-                batchTooltip: 'Roll initiative for all listed tokens',
-                trackInitiative: true,
-                rollMode
-            });
+            const result = this.sendNativeRollBatchForTokens(tokens, 'initiative', nativeOptions);
             if (result.failed.length) Render.sendWhisperMessage(ctx.who, 'Initiative', Utils.escapeHtml(result.failed.join(' ')), 'warning');
         },
 
@@ -16321,11 +17767,7 @@ const CombatAssistant = (() => {
             }
 
             Render.showBootstrapCard();
-            Logger.info(
-                'Ready v' + META.VERSION +
-                ' sheetWriter=' + String(capabilities.sheetWriter) +
-                '. Use !combatAssistant menu or !combat-assistant help'
-            );
+            Logger.info('Ready v' + META.VERSION + '. Use !ca menu or !ca help');
         }
     };
 
