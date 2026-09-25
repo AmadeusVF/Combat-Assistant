@@ -15453,7 +15453,7 @@ const CombatAssistant = (() => {
                 const characterName = character && Utils.isFunction(character.get) ? String(character.get('name') || 'Character').trim() : 'Character';
                 const body = '<table style="width:100%;border-collapse:collapse;table-layout:fixed;"><tbody>' +
                     '<tr><td style="text-align:left;vertical-align:middle;padding:0 0 3px 0;color:' + CONFIG.DEFAULT_TEXT_CHARACTER_COLOR + ';font-size:12px;line-height:15px;font-weight:900;">' + Utils.escapeHtml(characterName) + '</td></tr>' +
-                    '<tr><td style="text-align:left;vertical-align:middle;padding:0;color:rgb(225,225,225);font-size:12px;line-height:15px;">no tiene <span style="color:rgb(235,215,140);font-weight:900;">' + Utils.escapeHtml(safeLabel) + '</span> para hacer esta accion.</td></tr>' +
+                    '<tr><td style="text-align:left;vertical-align:middle;padding:0;color:rgb(225,225,225);font-size:12px;line-height:15px;">Do not has <span style="color:rgb(235,215,140);font-weight:900;">' + Utils.escapeHtml(safeLabel) + '</span> to do this action.</td></tr>' +
                 '</tbody></table>';
                 R20.whisper('GM', Html.card({ title: 'Resources', body, buildOptions: { bodyAlign: 'left' } }));
             }
