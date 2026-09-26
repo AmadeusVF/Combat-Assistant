@@ -4,7 +4,7 @@
  * @Project     Combat Assistant
  * @Description Lightweight Roll20 combat assistance extracted from T&T ideas.
  * @Author      AmadeusVF
- * @Version     1.2.10
+ * @Version     1.2.11
  * =========================================================
  *
  * Design goals:
@@ -39,7 +39,7 @@ const CombatAssistant = (() => {
         SHORT_NAME: 'CA',
         LOG_NAME: 'Combat Assistant',
         CHAT_NAME: 'Combat Assistant',
-        VERSION: '1.2.10',
+        VERSION: '1.2.11',
         SCHEMA_VERSION: 7,
         STATE_KEY: 'COMBAT_ASSISTANT',
         LEGACY_STATE_KEY: 'COMBAT_TRACKER',
@@ -370,12 +370,12 @@ const CombatAssistant = (() => {
         { key: 'TURN_TRACKER', label: 'Turn Tracker', type: 'boolean', tip: 'Track combat rounds and current turns from the Turn Order. Player Next buttons are always active while Turn Tracker is ON.' },
         { key: 'TURN_AUTO_FOCUS', label: 'Turn Auto Focus', type: 'boolean', tip: 'Ping and focus everyone on the current turn token.' },
         { key: 'TURN_FOCUS_FOR_EVERYONE', label: 'Turn Focus For Everyone', type: 'boolean', tip: 'ON moves everyone when Turn Focus runs. OFF moves only GMs and the players who control the current token or its character.' },
-        { key: 'HANDLE_ACTIONS', label: 'Turn Token Action', type: 'boolean', tip: 'Show Dash, Disengage, Dodge, Combat, and Spells controls on every token Turn card.' },
+        { key: 'HANDLE_ACTIONS', label: 'Turn Token Action', type: 'boolean', tip: "Show Dash, Disengage, Dodge, Combat, and Spells controls on every token's Turn Card." },
         { key: 'TURN_MOVEMENT_TRACKER', label: 'Turn Movement Tracker', type: 'boolean', tip: 'Track movement spent by the current-turn token, warn its controller and the GM when it exceeds available speed, and let Dash add another base-speed allowance.' },
         { key: 'CONC_TURN_TRACKER', label: 'Conc. Turn Tracker', type: 'boolean', tip: 'Decrease finite concentration duration once when the concentrating token reaches its turn, and end concentration automatically at 0 turns left.' },
         { key: 'ROUND_COUNTER', label: 'Round Counter', type: 'boolean', tip: 'Whisper the GM the Round Counter card with all tokens currently in combat.' },
         { key: 'PUBLIC_ROUND_COUNTER', label: 'Public Round Counter', type: 'boolean', tip: 'Also show the Round Counter card publicly. Round Counter must be ON.' },
-        { key: 'REMOVE_NPC_DEAD_TOKENS', label: 'Remove NPC Dead Tokens', type: 'boolean', tip: 'ON automatically removes unlinked NPC turns with 0 HP. OFF shows a red Remove button below Next on that token turn card.' },
+        { key: 'REMOVE_NPC_DEAD_TOKENS', label: 'Remove NPC Dead Tokens', type: 'boolean', tip: "ON automatically removes unlinked NPC turns with 0 HP. OFF shows a red Remove button below Next on that token's Turn Card." },
         { key: 'TURN_MARKER', label: 'Turn Marker', type: 'boolean', tip: 'Spawn a marker token on the current turn token.' },
         { key: 'PUBLIC_TURN_MARKER', label: 'Turn Marker Token Public', type: 'boolean', tip: 'OFF puts the turn marker on the GM layer. ON puts it on the map layer and brings it forward.' },
         { key: 'TURN_MARKER_IMAGE_URL', label: 'Turn Marker Token Image', type: 'roll20image', tip: 'Roll20 uploaded image used for the turn marker token. Must start with https://files.d20.io/images/.' },
@@ -385,8 +385,8 @@ const CombatAssistant = (() => {
         { key: 'TURN_MARKER_ROTATION_STEPS', label: 'Turn Marker Rotation Steps', type: 'number', tip: 'Degrees applied on every rotation update. Default 1.' },
         { key: 'TURN_MARKER_ROTATION_SPEED', label: 'Turn Marker Rotation Speed', type: 'number', tip: 'Milliseconds between rotation updates. Default 100 ms.' },
         { type: 'section', label: 'Resources' },
-        { key: 'SHOW_PLAYER_RESOURCES', label: 'Show Player Resources', type: 'boolean', tip: 'Show the current player-controlled token\'s limited resources and spell slots directly on its Turn card.' },
-        { key: 'SHOW_NPC_RESOURCES', label: 'Show NPC Resources', type: 'boolean', tip: 'Show limited resources and spell slots for non-player-controlled tokens on the GM Turn card only.' },
+        { key: 'SHOW_PLAYER_RESOURCES', label: 'Show Player Resources', type: 'boolean', tip: 'Show the current player-controlled token\'s limited resources and spell slots directly on its Turn Card.' },
+        { key: 'SHOW_NPC_RESOURCES', label: 'Show NPC Resources', type: 'boolean', tip: 'Show limited resources and spell slots for non-player-controlled tokens on the GM Turn Card only.' },
         { key: 'CONSUME_SPELL_SLOTS', label: 'Consume Spell Slots', type: 'boolean', tip: 'When ON, opening Spells arms one spell cast for that character. The next confirmed leveled spell roll from that Spells session consumes one matching spell slot through ResourceService.' },
         { key: 'SHOW_PREPARED_SPELLS_ONLY_2024', label: '2024 Prepared Spells Only', type: 'boolean', tip: 'When ON, the 2024 Spells list shows only spells marked Prepared or Always Prepared. Cantrips are included only when Roll20 marks them prepared or always prepared.' },
         { key: 'PLAYER_PUBLIC_RESOURCE_USAGE', label: 'Player Public Usage', type: 'boolean', tip: 'When a player uses or recovers a resource, send the Resource Update card to public chat instead of private whispers.' },
@@ -1729,6 +1729,8 @@ const CombatAssistant = (() => {
                 return {
                     ok: true,
                     command: this.buttonAbilityCommand(helperId, abilityName),
+                    executionCommand: this.chatAbilityCommand(helperId, abilityName),
+                    helperId,
                     abilityName,
                     count: safeCommands.length
                 };
@@ -4225,11 +4227,14 @@ const CombatAssistant = (() => {
             const opts = options || {};
             const safeTokenId = String(tokenId || '').trim();
             const safeAction = String(action || '').trim().toLowerCase();
+            const isNarrativeAction = safeAction === 'dash' || safeAction === 'disengage' || safeAction === 'dodge';
             const command = safeAction === 'combat'
                 ? ('!combatAssistant combat ' + Utils.attrSafe(safeTokenId))
                 : (safeAction === 'spells'
                     ? ('!combatAssistant spells ' + Utils.attrSafe(safeTokenId))
-                    : ('!combatAssistant ' + safeAction));
+                    : (isNarrativeAction && safeTokenId
+                        ? ('!combatAssistant turnaction ' + safeAction + ' ' + Utils.attrSafe(safeTokenId))
+                        : ('!combatAssistant ' + safeAction)));
             return this.compactSettingButtonHtml({
                 label: String(label || ''),
                 command,
@@ -4314,10 +4319,10 @@ const CombatAssistant = (() => {
         characterSheetRollMarkerHtml(mode) {
             const normalized = String(mode || 'normal').trim().toLowerCase();
             if (normalized === 'advantage') {
-                return '<span title="Advantage" style="position:absolute;top:0;right:2px;color:rgb(90,220,120);font-size:6px;line-height:6px;font-weight:900;">&#9650;</span>';
+                return '<span title="Advantage" style="position:absolute;top:0;right:4px;color:rgb(90,220,120);font-size:6px;line-height:6px;font-weight:900;">&#9650;</span>';
             }
             if (normalized === 'disadvantage') {
-                return '<span title="Disadvantage" style="position:absolute;top:0;right:2px;color:rgb(230,80,80);font-size:6px;line-height:6px;font-weight:900;">&#9660;</span>';
+                return '<span title="Disadvantage" style="position:absolute;top:0;right:4px;color:rgb(230,80,80);font-size:6px;line-height:6px;font-weight:900;">&#9660;</span>';
             }
             return '';
         },
@@ -4428,9 +4433,9 @@ const CombatAssistant = (() => {
             };
             const initiativeModifier = Utils.toNumber(info && info.initiativeModifier, 0);
             // Keep the compact control consistent with the Attribute grid. The
-            // full decimal/tie-breaker value is still used by !ca player-init and
-            // the Turn Order service; the quick stat mirrors the sheet's visible
-            // whole-number modifier.
+            // The quick stat mirrors the sheet's visible whole-number modifier. The
+            // clickable control itself remains the native sheet Initiative ability,
+            // so Roll20 owns the actual roll, modifiers, and tie-breaker behavior.
             const initiativeDisplayModifier = Utils.toInt(initiativeModifier, 0);
             const initiativeValue = Utils.formatSigned(initiativeDisplayModifier);
             const initiativeCommand = String(info && info.initiativeCommand || '').trim();
@@ -5155,7 +5160,7 @@ const CombatAssistant = (() => {
                 command: '!combatAssistant init' +
                     (RuntimeConfig.get('SHEET_2014_CA_ROLLS') ? ' &#63;{2014 Roll Mode|Normal,normal|Advantage,advantage|Disadvantage,disadvantage}' : ''),
                 backgroundColor: 'rgba(70,115,170,0.85)',
-                tooltip: 'Roll initiative for selected token(s)'
+                tooltip: 'Roll initiative for the selected token(s)'
             });
             const concButton = this.iconButtonHtml({
                 iconHtml: '&#9203;',
@@ -5203,7 +5208,7 @@ const CombatAssistant = (() => {
             };
             const descriptionHtml = (text) => '<span style="font-size:10px;line-height:13px;color:rgb(190,190,190);">' + Utils.escapeHtml(text) + '</span>';
             const helpLine = (command, description, tokenActionId) => commandHtml(command, tokenActionId) + (description ? (' <span style="font-size:10px;line-height:13px;color:rgb(190,190,190);">- ' + Utils.escapeHtml(description) + '</span>') : '') + '<br>';
-            const tokenActionNote = '<div style="font-size:9px;line-height:12px;color:rgb(155,155,155);padding:2px 0 4px 0;">Player command links add that command as a Token Action to exactly one selected linked token. Existing actions are not duplicated.</div>';
+            const tokenActionNote = '<div style="font-size:9px;line-height:12px;color:rgb(155,155,155);padding:2px 0 4px 0;">Player command links add that command as a Token Action to the character linked to exactly one selected token. Existing actions are not duplicated.</div>';
 
             if (!isGM) {
                 const playerBody =
@@ -5214,21 +5219,21 @@ const CombatAssistant = (() => {
 
                         separator +
                         sectionTitle('Combat') +
-                        '<div style="padding-bottom:2px;">' + descriptionHtml('Combat and Spells list actions available on a character sheet you control.') + '</div>' +
-                        helpLine('!ca sheet', 'Shows the Compact Sheet for the selected token. A controlled token/character id can also be supplied manually.', 'sheet') +
-                        helpLine('!ca player-init', 'Rolls initiative for exactly one selected controlled token and inserts it into Turn Order with Combat Assistant ordering.', 'player-init') +
+                        '<div style="padding-bottom:2px;">' + descriptionHtml('Combat and Spells list the attacks and spells available on a character sheet you control.') + '</div>' +
+                        helpLine('!ca sheet', 'Shows the Compact Sheet for the selected token. A controlled token or character ID can also be supplied manually.', 'sheet') +
+                        helpLine('!ca player-init', 'Requests the native sheet initiative roll when CA initiative rolls are OFF; otherwise Combat Assistant rolls it. The result is tracked in Turn Order.', 'player-init') +
                         helpLine('!ca combat', 'Shows the attack list for the selected token.', 'combat') +
                         helpLine('!ca combat &lt;sheet name&gt;', 'Shows the attack list for a character sheet you can access.') +
                         helpLine('!ca spells', 'Shows the spell list for the selected token.', 'spells') +
                         helpLine('!ca spells &lt;sheet name&gt;', 'Shows the spell list for a character sheet you can access.') +
-                        helpLine('!ca dash', 'Declares Dash for the token currently in turn.', 'dash') +
-                        helpLine('!ca disengage', 'Declares Disengage for the token currently in turn.', 'disengage') +
-                        helpLine('!ca dodge', 'Declares Dodge for the token currently in turn.', 'dodge') +
+                        helpLine('!ca dash', 'Declares Dash for the selected token. During its active turn, Dash also increases its Movement Tracker allowance.', 'dash') +
+                        helpLine('!ca disengage', 'Declares Disengage narratively for the selected token, even outside its turn.', 'disengage') +
+                        helpLine('!ca dodge', 'Declares Dodge narratively for the selected token, even outside its turn.', 'dodge') +
 
                         separator +
                         sectionTitle('Turn Tracker') +
-                        helpLine('!ca turn', 'Shows the live Turn card only when the current token is yours.', 'turn') +
-                        helpLine('!ca turncard', 'Shows the full Turn card for the selected controlled character. A character id can also be supplied manually.', 'turncard') +
+                        helpLine('!ca turn', 'Shows the live Turn Card only when the current token is yours.', 'turn') +
+                        helpLine('!ca turncard', 'Shows the full Turn Card for the selected controlled character. A character ID can also be supplied manually.', 'turncard') +
                         helpLine('!ca turn card [character_id]', 'Alias of !ca turncard. !ca turn-card is also accepted.') +
                         helpLine('!ca turnnext', 'Ends the current turn when you control the active token.', 'turnnext') +
                         helpLine('!ca turnfocus', 'Focuses the view on the current turn token when you control it.', 'turnfocus') +
@@ -5267,19 +5272,19 @@ const CombatAssistant = (() => {
                     sectionTitle('Combat') +
                     '<div style="padding-bottom:2px;">' + descriptionHtml('Combat and Spells list the attacks and spells available on a character sheet.') + '</div>' +
                     helpLine('!ca sheet', 'Shows the Compact Sheet for the selected token.', 'sheet') +
-                    helpLine('!ca player-init', 'Rolls initiative for exactly one selected token and inserts it into Turn Order with Combat Assistant ordering.', 'player-init') +
+                    helpLine('!ca player-init', 'Requests the native sheet initiative roll when CA initiative rolls are OFF; otherwise Combat Assistant rolls it. The result is tracked in Turn Order.', 'player-init') +
                     helpLine('!ca combat', 'Shows the attack list for the selected token.', 'combat') +
                     helpLine('!ca combat &lt;sheet name&gt;', 'Shows the attack list for the named character sheet.') +
                     helpLine('!ca spells', 'Shows the spell list for the selected token.', 'spells') +
                     helpLine('!ca spells &lt;sheet name&gt;', 'Shows the spell list for the named character sheet.') +
-                    helpLine('!ca dash', 'Declares Dash for the token currently in turn.', 'dash') +
-                    helpLine('!ca disengage', 'Declares Disengage for the token currently in turn.', 'disengage') +
-                    helpLine('!ca dodge', 'Declares Dodge for the token currently in turn.', 'dodge') +
+                    helpLine('!ca dash', 'Declares Dash for the selected token. During its active turn, Dash also increases its Movement Tracker allowance.', 'dash') +
+                    helpLine('!ca disengage', 'Declares Disengage narratively for the selected token, even outside its turn.', 'disengage') +
+                    helpLine('!ca dodge', 'Declares Dodge narratively for the selected token, even outside its turn.', 'dodge') +
 
                     separator +
                     sectionTitle('Turn Tracker') +
-                    helpLine('!ca turn', 'Shows the normal Turn card for the token currently in turn.', 'turn') +
-                    helpLine('!ca turncard', 'Shows the full Turn card for the selected character. A character id can also be supplied manually; !ca turn card and !ca turn-card are aliases.', 'turncard') +
+                    helpLine('!ca turn', 'Shows the normal Turn Card for the token whose turn it currently is.', 'turn') +
+                    helpLine('!ca turncard', 'Shows the full Turn Card for the selected character. A character ID can also be supplied manually; !ca turn card and !ca turn-card are aliases.', 'turncard') +
                     helpLine('!ca turnround', 'Shows the Round Counter. !ca turn round and !ca turn-round are aliases; Public Round Counter controls public vs GM-only delivery.') +
                     helpLine('!ca turnnext', 'Ends the current turn and advances to the next token.', 'turnnext') +
                     helpLine('!ca turnfocus', 'Focuses the view on the token currently in turn. Players can use it only during a turn they control.', 'turnfocus') +
@@ -9137,7 +9142,7 @@ const CombatAssistant = (() => {
             if (safeCharacterId) {
                 character = getObj('character', safeCharacterId);
                 if (!character) {
-                    Render.sendWhisperMessage(ctx && ctx.who || 'GM', 'Turn Card', 'The requested character id was not found.', 'warning');
+                    Render.sendWhisperMessage(ctx && ctx.who || 'GM', 'Turn Card', 'The requested character ID was not found.', 'warning');
                     return false;
                 }
                 token = selected.find((entry) => String(entry && entry.get && entry.get('represents') || '').trim() === safeCharacterId) || null;
@@ -12222,20 +12227,39 @@ const CombatAssistant = (() => {
             };
         },
 
-        narrativeAction(ctx, action, tokenId) {
-            // Dash / Disengage / Dodge are generic current-turn commands now. The
-            // tokenId remains in old rendered buttons only for backward compatibility.
-            const info = this.getCurrentTurnActionToken(ctx);
-            if (!info.ok) {
-                Render.sendWhisperMessage(ctx && ctx.who || 'GM', 'Turn Action', info.message, 'warning');
-                return false;
+        resolveNarrativeActionToken(ctx, tokenId) {
+            const safeTokenId = String(tokenId || '').trim();
+            if (safeTokenId) return this.getActionToken(safeTokenId, ctx);
+
+            const selected = R20.getSelectedTokens(ctx && ctx.msg);
+            if (selected.length === 1) return this.getActionToken(R20.getTokenId(selected[0]), ctx);
+            if (selected.length > 1) return { ok: false, message: 'Select exactly one token to use this action.' };
+
+            // Keep the old no-selection behavior as a convenience: when possible,
+            // use the current-turn token. Off-turn narrative use should bind an
+            // explicit token from the rendered button or a selected token.
+            const current = this.getCurrentTurnActionToken(ctx);
+            if (current.ok) return current;
+            if (String(current.message || '') === 'It is not your turn.') {
+                return { ok: false, message: 'Select a token you control to use this action.' };
             }
+            return { ok: false, message: 'Select exactly one token to use this action.' };
+        },
+
+        narrativeAction(ctx, action, tokenId) {
             const normalized = String(action || '').trim().toLowerCase();
             const labels = { dash: 'Dash', disengage: 'Disengage', dodge: 'Dodge' };
             if (!labels[normalized]) {
                 Render.sendWhisperMessage(ctx && ctx.who || 'GM', 'Turn Action', 'Unknown turn action.', 'warning');
                 return false;
             }
+
+            const info = this.resolveNarrativeActionToken(ctx, tokenId);
+            if (!info.ok) {
+                Render.sendWhisperMessage(ctx && ctx.who || 'GM', 'Turn Action', info.message, 'warning');
+                return false;
+            }
+
             const revealNames = RuntimeConfig.get('REVEAL_TOKEN_NAMES_IN_LOG');
             const displayName = revealNames ? info.characterName : 'Character';
             const nameHtml = '<strong style="color:' + CONFIG.DEFAULT_TEXT_CHARACTER_COLOR + ';">' + Utils.escapeHtml(displayName) + '</strong>';
@@ -12245,9 +12269,16 @@ const CombatAssistant = (() => {
                 'normal',
                 { titleHtml: Render.turnActionTitleHtml(info.token, info.character) }
             );
+
+            // Dash is always narratively valid, but it changes Movement Tracker
+            // allowance only when the acting token is the actual current turn.
             if (normalized === 'dash' && TurnTracker.isMovementEnabled()) {
-                const result = TurnTracker.applyDashToCurrentTurn(info.tokenId);
-                if (result && result.ok) TurnTracker.sendTurnCard(info.entry);
+                const currentEntry = TurnTracker.tokenEntries(TurnTracker.getCurrentTurnOrder())[0] || null;
+                const currentId = String(currentEntry && currentEntry.id || '').trim();
+                if (currentId && currentId === String(info.tokenId || '').trim()) {
+                    const result = TurnTracker.applyDashToCurrentTurn(info.tokenId);
+                    if (result && result.ok) TurnTracker.sendTurnCard(currentEntry);
+                }
             }
             return true;
         },
@@ -15452,10 +15483,10 @@ const CombatAssistant = (() => {
             if (ctx && ctx.notifySpellSlotFailureToGM && !ctx.isGM && message === 'No uses remain.') {
                 const characterName = character && Utils.isFunction(character.get) ? String(character.get('name') || 'Character').trim() : 'Character';
                 const body = '<table style="width:100%;border-collapse:collapse;table-layout:fixed;"><tbody>' +
-                    '<tr><td style="text-align:left;vertical-align:middle;padding:0 0 3px 0;color:' + CONFIG.DEFAULT_TEXT_CHARACTER_COLOR + ';font-size:12px;line-height:15px;font-weight:900;">' + Utils.escapeHtml(characterName) + '</td></tr>' +
-                    '<tr><td style="text-align:left;vertical-align:middle;padding:0;color:rgb(225,225,225);font-size:12px;line-height:15px;">Do not has <span style="color:rgb(235,215,140);font-weight:900;">' + Utils.escapeHtml(safeLabel) + '</span> to do this action.</td></tr>' +
+                    '<tr><td style="text-align:center;vertical-align:middle;padding:0 0 3px 0;color:' + CONFIG.DEFAULT_TEXT_CHARACTER_COLOR + ';font-size:12px;line-height:15px;font-weight:900;">' + Utils.escapeHtml(characterName) + '</td></tr>' +
+                    '<tr><td style="text-align:center;vertical-align:middle;padding:0;color:rgb(225,225,225);font-size:12px;line-height:15px;">does not have enough <span style="color:rgb(235,215,140);font-weight:900;">' + Utils.escapeHtml(safeLabel) + '</span> to perform this action.</td></tr>' +
                 '</tbody></table>';
-                R20.whisper('GM', Html.card({ title: 'Resources', body, buildOptions: { bodyAlign: 'left' } }));
+                R20.whisper('GM', Html.card({ title: 'Resources', body, buildOptions: { bodyAlign: 'center' } }));
             }
             return false;
         },
@@ -15471,13 +15502,13 @@ const CombatAssistant = (() => {
                 '<td style="text-align:center;vertical-align:middle;font-weight:900;color:rgb(235,235,235);padding-right:34px;">Resource Update</td>' +
                 '</tr></tbody></table>';
             const currentColor = current > 0 ? 'rgb(52,203,116)' : 'rgb(220,45,45)';
-            const verb = direction === 'use' ? 'Used' : 'Recover';
+            const verb = direction === 'use' ? 'Used' : 'Recovered';
             const body = '<div style="text-align:center;font-size:12px;line-height:17px;color:rgb(225,225,225);">' +
                 '<div style="color:' + CONFIG.DEFAULT_TEXT_CHARACTER_COLOR + ';font-weight:900;">' + Utils.escapeHtml(characterName) + '</div>' +
                 '<div>' + Utils.escapeHtml(verb) + ' <span style="color:rgb(52,203,116);font-weight:900;">' + Utils.escapeHtml(String(quantity)) + 'x</span> ' +
                     '<span style="color:rgb(245,220,80);font-weight:900;">' + Utils.escapeHtml(label) + '</span></div>' +
                 '<div>Has <span style="color:' + currentColor + ';font-weight:900;">' + Utils.escapeHtml(String(current)) + '</span> <span style="color:rgb(225,225,225);font-weight:900;">/</span> ' +
-                    '<span style="color:rgb(52,203,116);font-weight:900;">' + Utils.escapeHtml(String(max)) + '</span> left.</div>' +
+                    '<span style="color:rgb(52,203,116);font-weight:900;">' + Utils.escapeHtml(String(max)) + '</span> remaining.</div>' +
                 '</div>';
             return Html.card({ title: 'Resource Update', body, buildOptions: { titleHtml } });
         },
@@ -15529,7 +15560,7 @@ const CombatAssistant = (() => {
                         String(trustedRef.valueAttr || '').trim().toLowerCase() === String(ref && ref.valueAttr || '').trim().toLowerCase();
                 }) || null;
                 if (!trustedEntry) {
-                    Render.sendWhisperMessage(ctx.who, 'Resources', 'Invalid or stale 2014 resource reference. Re-open !ca resource.', 'warning');
+                    Render.sendWhisperMessage(ctx.who, 'Resources', 'Invalid or stale 2014 resource reference. Re-open !ca resources.', 'warning');
                     return false;
                 }
                 const trustedRef = trustedEntry.ref;
@@ -15556,7 +15587,7 @@ const CombatAssistant = (() => {
                     }
                     const entry = this.resolveBeaconRef(info.characterId, ref, storeEntry.root);
                     if (!entry) {
-                        Render.sendWhisperMessage(ctx.who, 'Resources', 'The 2024 sheet resource could not be found anymore. Re-open !ca resource.', 'warning');
+                        Render.sendWhisperMessage(ctx.who, 'Resources', 'The 2024 sheet resource could no longer be found. Re-open !ca resources.', 'warning');
                         return false;
                     }
                     const change = this.calculateChange(entry.current, entry.max, direction, quantity);
@@ -15571,7 +15602,7 @@ const CombatAssistant = (() => {
                 });
             }
 
-            Render.sendWhisperMessage(ctx.who, 'Resources', 'Invalid resource reference. Re-open !ca resource.', 'failure');
+            Render.sendWhisperMessage(ctx.who, 'Resources', 'Invalid resource reference. Re-open !ca resources.', 'failure');
             return false;
         }
     };
@@ -15724,7 +15755,7 @@ const CombatAssistant = (() => {
             }
             const characterId = String(character.id || token.get('represents') || '').trim();
             if (!characterId) {
-                plan.failed.push(CombatService.getTokenName(token) + ' has no character id.');
+                plan.failed.push(CombatService.getTokenName(token) + ' has no character ID.');
                 return;
             }
 
@@ -15767,12 +15798,36 @@ const CombatAssistant = (() => {
                 });
             }
 
-            const shouldAskPlayer = R20.isPlayerControlledToken(token, character) &&
-                RuntimeConfig.get('PLAYER_MANUAL_ROLL') &&
-                !!playerCommand;
+            const forcePlayerRequest = Utils.toBoolean(plan.options.forcePlayerRequest, false);
+            const forcedRecipients = Array.isArray(plan.options.requestRecipients)
+                ? plan.options.requestRecipients.map((recipient) => String(recipient || '').trim()).filter(Boolean)
+                : [];
+            const shouldAskPlayer = !!playerCommand && (forcePlayerRequest || (
+                R20.isPlayerControlledToken(token, character) && RuntimeConfig.get('PLAYER_MANUAL_ROLL')
+            ));
+            if (shouldAskPlayer && Utils.toBoolean(plan.options.executePlayerRequestImmediately, false)) {
+                if (commandSet.requiresButton) {
+                    const batch = R20.createNativeRollBatchAbility([batchCommand]);
+                    if (!batch.ok || !batch.executionCommand) {
+                        if (common.requestId) RollParser.removePendingNativeInitiativeById(common.requestId);
+                        plan.failed.push(batch.message || (tokenName + ' native roll could not be started.'));
+                        return;
+                    }
+                    common.nativeCommand = batch.executionCommand;
+                } else {
+                    common.nativeCommand = nativeCommand || batchCommand;
+                }
+                if (!common.nativeCommand) {
+                    if (common.requestId) RollParser.removePendingNativeInitiativeById(common.requestId);
+                    plan.failed.push(tokenName + ' native roll command could not be resolved.');
+                    return;
+                }
+                plan.autoRolls.push(common);
+                return;
+            }
             if (shouldAskPlayer) {
                 plan.playerRolls.push({
-                    recipients: this.getNativeRollRecipients(token, character),
+                    recipients: forcedRecipients.length ? forcedRecipients : this.getNativeRollRecipients(token, character),
                     card: Render.showNativeSheetRollRequest({
                         title: plan.options.individualTitle || plan.options.title || 'Roll20 Roll',
                         tokenName,
@@ -17337,7 +17392,7 @@ const CombatAssistant = (() => {
                 'Compact Sheet'
             );
             if (!tokens.length) {
-                Render.sendWhisperMessage(ctx.who, 'Compact Sheet', 'Select one or more linked tokens, or provide a character id you control.', 'warning');
+                Render.sendWhisperMessage(ctx.who, 'Compact Sheet', 'Select one or more linked tokens, or provide a character ID you control.', 'warning');
                 return false;
             }
             let rendered = 0;
@@ -17355,7 +17410,7 @@ const CombatAssistant = (() => {
                     : CombatService.getInitiativeRollInfo(characterId);
                 info.initiativeModifier = CombatService.getInitiativeModifier(characterId);
                 info.initiativeMode = initiativeRollInfo.mode;
-                info.initiativeCommand = '!ca player-init ' + tokenId;
+                info.initiativeCommand = R20.buttonAbilityCommand(characterId, 'initiative');
                 const profiles = {};
                 Object.keys(ABILITIES).forEach((ability) => {
                     profiles[ability] = CombatService.getAbilityProfile(characterId, ability);
@@ -17496,6 +17551,24 @@ const CombatAssistant = (() => {
             }
             const characterId = String(character.id || (Utils.isFunction(token.get) ? token.get('represents') : '') || '').trim();
             const sheetVersion = characterId ? R20.detectSheetVersion(characterId) : '';
+            const caRollEnabled = sheetVersion === '2014'
+                ? !!RuntimeConfig.get('SHEET_2014_CA_ROLLS')
+                : !!RuntimeConfig.get('CA_ROLLS_INITIATIVE');
+
+            if (!caRollEnabled) {
+                const nativeOptions = Object.assign(this.getNativeInitiativeBatchOptions(''), {
+                    forcePlayerRequest: true,
+                    executePlayerRequestImmediately: !ctx.isGM,
+                    requestRecipients: [ctx.who]
+                });
+                const nativeResult = this.sendNativeRollBatchForTokens([token], 'initiative', nativeOptions);
+                if (nativeResult.failed.length) {
+                    Render.sendWhisperMessage(ctx.who, 'Initiative', Utils.escapeHtml(nativeResult.failed.join(' ')), 'warning');
+                    return false;
+                }
+                return nativeResult.sent > 0;
+            }
+
             const result = CombatService.rollInitiativeForToken(token, sheetVersion === '2014' ? 'auto' : '');
             if (!result.ok) {
                 Render.sendWhisperMessage(ctx.who, 'Initiative', result.message || 'Initiative roll failed.', 'failure');
