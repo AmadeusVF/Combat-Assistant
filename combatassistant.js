@@ -8947,7 +8947,8 @@ const CombatAssistant = (() => {
 
         buildTurnCard(info, includeNext, includeRemove, options) {
             const opts = options || {};
-            const displayName = String(info && (info.characterName || info.name) || 'Token');
+            const tokenName = info && info.token && Utils.isFunction(info.token.get) ? String(info.token.get('name') || '').trim() : '';
+            const displayName = tokenName || String(info && (info.characterName || info.name) || 'Token');
             const hpColor = info && info.hp > 0 ? 'rgb(52,203,116)' : 'rgb(220,45,45)';
             const tokenFocusButton = this.turnFocusImageButtonHtml(info, 40);
             const concentration = info && info.tokenId ? State.getConcentrationByTokenId(info.tokenId) : null;
