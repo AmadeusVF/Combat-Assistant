@@ -16220,7 +16220,10 @@ const CombatAssistant = (() => {
         readNotes(token) {
             if (!token || !Utils.isFunction(token.get)) return '';
             const raw = String(token.get('gmnotes') || '');
-            if (!/^%3Cp%3E/i.test(raw)) return raw;
+            const encodedEditorHtml = /^%3C(?:p|div|br)(?:%20|%3E|%2F)/i.test(raw.trim());
+            const encodedResourceBlock = /%5BCA%3ARESOURCES%3A(?:START|END)/i.test(raw);
+            const encodedLegacyBlock = /%3C!--(?:%20|\+)CombatAssistant(?:%20|\+)NPC(?:%20|\+)Resources(?:%20|\+)v1%3A/i.test(raw);
+            if (!encodedEditorHtml && !encodedResourceBlock && !encodedLegacyBlock) return raw;
             try {
                 return decodeURIComponent(raw.replace(/\+/g, ' '));
             } catch (error) {
@@ -16247,17 +16250,25 @@ const CombatAssistant = (() => {
 
         readMetadata(token, characterId) {
             const notes = this.readNotes(token);
-            const start = notes.indexOf(this.BLOCK_START_PREFIX);
-            if (start < 0) return null;
-            const headerEnd = notes.indexOf(']', start + this.BLOCK_START_PREFIX.length);
-            if (headerEnd < 0) return null;
-            const end = notes.indexOf(this.BLOCK_END, headerEnd + 1);
-            if (end < 0) return null;
-            const headerCharacterId = notes.slice(start + this.BLOCK_START_PREFIX.length, headerEnd).trim();
-            const safeCharacterId = String(characterId || headerCharacterId || '').trim();
-            if (!safeCharacterId || (headerCharacterId && headerCharacterId !== safeCharacterId)) return null;
+            const requestedCharacterId = String(characterId || '').trim();
+            const blocks = notes.split(this.BLOCK_START_PREFIX);
+            let headerCharacterId = '';
+            let body = null;
+            for (let index = blocks.length - 1; index >= 1; index -= 1) {
+                const block = blocks[index];
+                const headerEnd = block.indexOf(']');
+                const end = headerEnd >= 0 ? block.indexOf(this.BLOCK_END, headerEnd + 1) : -1;
+                if (headerEnd < 0 || end < 0) continue;
+                const candidateCharacterId = block.slice(0, headerEnd).trim();
+                if (requestedCharacterId && candidateCharacterId && candidateCharacterId !== requestedCharacterId) continue;
+                headerCharacterId = candidateCharacterId;
+                body = block.slice(headerEnd + 1, end);
+                break;
+            }
+            const safeCharacterId = String(requestedCharacterId || headerCharacterId || '').trim();
+            if (!safeCharacterId || body === null) return null;
 
-            const body = notes.slice(headerEnd + 1, end)
+            body = body
                 .replace(/<br\s*\/?>/gi, '\n')
                 .replace(/<\/(?:p|div|li)>/gi, '\n')
                 .replace(/<(?:p|div|li)\b[^>]*>/gi, '');
@@ -16289,7 +16300,12 @@ const CombatAssistant = (() => {
                     entry.ref = candidates.length ? candidates.shift() : {};
                 });
             }
-            return { version: 2, characterId: safeCharacterId, resources: resources.filter((entry) => this.refKey(entry.ref)) };
+            return {
+                version: 2,
+                characterId: safeCharacterId,
+                resources: resources.filter((entry) => this.refKey(entry.ref)),
+                blockCount: blocks.length - 1
+            };
         },
 
         writeMetadata(token, metadata) {
@@ -16347,7 +16363,10 @@ const CombatAssistant = (() => {
             const safeCharacterId = String(characterId || (Utils.isFunction(token.get) ? token.get('represents') : '') || '').trim();
             if (!safeCharacterId) return [];
             const metadata = this.readMetadata(token, safeCharacterId);
-            if (metadata) return metadata.resources;
+            if (metadata) {
+                if (metadata.blockCount > 1) this.writeMetadata(token, metadata);
+                return metadata.resources;
+            }
             const legacy = this.readLegacyMetadata(token);
             if (legacy && legacy.characterId === safeCharacterId) {
                 this.writeMetadata(token, { version: 2, characterId: safeCharacterId, resources: legacy.resources });
@@ -16363,11 +16382,7 @@ const CombatAssistant = (() => {
             const character = R20.getCharacterFromToken(token);
             const characterId = character ? String(character.id || '').trim() : '';
             if (!characterId) return false;
-            const metadata = this.readMetadata(token, characterId);
-            if (metadata) return true;
-            const legacy = this.readLegacyMetadata(token);
-            if (legacy && legacy.characterId === characterId) return this.writeMetadata(token, { version: 2, characterId, resources: legacy.resources });
-            this.initialize(token, characterId);
+            this.getEntries(token, characterId);
             return !!this.readMetadata(token, characterId);
         },
 
