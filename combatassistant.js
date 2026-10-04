@@ -4,7 +4,7 @@
  * @Project     Combat Assistant
  * @Description Lightweight Roll20 combat assistance extracted from T&T ideas.
  * @Author      AmadeusVF
- * @Version     1.2.11
+ * @Version     1.2.12
  * =========================================================
  *
  * Design goals:
@@ -39,7 +39,7 @@ const CombatAssistant = (() => {
         SHORT_NAME: 'CA',
         LOG_NAME: 'Combat Assistant',
         CHAT_NAME: 'Combat Assistant',
-        VERSION: '1.2.11',
+        VERSION: '1.2.12',
         SCHEMA_VERSION: 7,
         STATE_KEY: 'COMBAT_ASSISTANT',
         LEGACY_STATE_KEY: 'COMBAT_TRACKER',
@@ -50,6 +50,34 @@ const CombatAssistant = (() => {
         '!combat-assistant',
         '!ca'
     ]);
+
+    const COMBAT_VIEW_DEFINITIONS = Object.freeze({
+        combat: Object.freeze({ title: 'Combat' }),
+        'combat-special': Object.freeze({ title: 'Special Actions' })
+    });
+    const COMBAT_SPECIAL_SECTIONS = Object.freeze({
+        bonus: Object.freeze({ actionType: 'Bonus Action', dataKey: 'bonusActions', title: 'Bonus Actions', nameColor: 'rgb(90,170,215)', abilityPrefix: 'repeating_npcbonusaction', legacySection: 'npcbonusaction' }),
+        reactions: Object.freeze({ actionType: 'Reaction', dataKey: 'reactions', title: 'Reactions', nameColor: 'rgb(220,145,70)', abilityPrefix: 'repeating_npcreaction', legacySection: 'npcreaction' }),
+        free: Object.freeze({ actionType: 'Free Action', dataKey: 'freeActions', title: 'Free Actions', nameColor: 'rgb(105,185,105)', abilityPrefix: 'repeating_npcfreeaction', legacySection: '' }),
+        legendary: Object.freeze({ actionType: 'Legendary Action', dataKey: 'legendaryActions', title: 'Legendary Actions', nameColor: 'rgb(230,195,65)', abilityPrefix: 'repeating_npcaction-l', legacySection: 'npcaction-l' }),
+        mythic: Object.freeze({ actionType: 'Mythic Action', dataKey: 'mythicActions', title: 'Mythic Actions', nameColor: 'rgb(220,70,70)', abilityPrefix: 'repeating_npcaction-m', legacySection: 'npcaction-m' })
+    });
+    const COMBAT_SPECIAL_SECTION_KEYS = Object.freeze(['bonus', 'reactions', 'free', 'legendary', 'mythic']);
+    const COMBAT_SPECIAL_SECTION_BY_TYPE = Object.freeze({
+        'bonus action': 'bonus',
+        reaction: 'reactions',
+        'free action': 'free',
+        'legendary action': 'legendary',
+        'legendary actions': 'legendary',
+        legendary: 'legendary',
+        'mythic action': 'mythic',
+        'mythic actions': 'mythic',
+        mythic: 'mythic'
+    });
+    const normalizeCombatViewKey = (value) => {
+        const key = String(value || 'combat').trim().toLowerCase();
+        return COMBAT_VIEW_DEFINITIONS[key] ? key : 'combat';
+    };
 
     const PLAYER_TOKEN_ACTIONS = Object.freeze({
         help: Object.freeze({ name: 'CA Help', command: '!ca help' }),
@@ -74,6 +102,9 @@ const CombatAssistant = (() => {
             return allowed;
         }, {}),
         {
+            'combat-special': true,
+            combatheal: true,
+            legacyspecial: true,
             use: true,
             usearea: true,
             concopen: true,
@@ -95,6 +126,7 @@ const CombatAssistant = (() => {
     const INITIATIVE_AUTO_COMPLETIONS = Object.create(null);
     const TOKEN_MUTATION_QUEUES = Object.create(null);
     const PENDING_SPELL_SLOT_CASTS = Object.create(null);
+    const RECENT_ACTION_RESOURCE_USES = Object.create(null);
     const NATIVE_SAVE_CAPTURE_BUFFER = {
         timer: null,
         rolls: []
@@ -307,7 +339,9 @@ const CombatAssistant = (() => {
         TURN_MOVEMENT_TRACKER: false,
         SHOW_PLAYER_RESOURCES: false,
         SHOW_NPC_RESOURCES: true,
+        NPC_RESOURCE_MANAGEMENT: false,
         CONSUME_SPELL_SLOTS: false,
+        CONSUME_ACTION_RESOURCES: false,
         SHOW_PREPARED_SPELLS_ONLY_2024: false,
         PLAYER_PUBLIC_RESOURCE_USAGE: false,
         PUBLIC_PRESENTATION_CARD: true,
@@ -330,77 +364,85 @@ const CombatAssistant = (() => {
         DAMAGE_ROUND_UP: true,
         REQUIRE_AC_FOR_ATTACK: true,
         USE_SHEET_DAMAGE_TRAITS: true,
+        HIDE_COMBAT_LOG: false,
+        HIDE_RESISTANCE_DETAILS: false,
+        HIDE_DAMAGE_DETAILS: false,
         REVEAL_DAMAGE_SOURCE: true,
         REVEAL_TOKEN_NAMES_IN_LOG: true,
-        HIDE_TOKEN_NAMES_IN_LOG: false,
         CHAT_BACKGROUND_IMAGE_URL: DEFAULT_CARD_CONFIG.bodyImageUrl
     });
 
+
     const RUNTIME_CONFIG_FIELDS = Object.freeze([
-        { type: 'section', label: 'Main' },
-        { key: 'CHAT_TRACKING', label: 'Chat Tracking', type: 'boolean', tip: 'Read Roll20 attack, damage, and healing rolls.' },
-        { key: 'CONCENTRATION_TRACKING', label: 'Concentration Tracking', type: 'boolean', tip: 'Track concentration spells, keep their area markers active, and request concentration saves when the caster takes damage.' },
-        { key: 'CA_ROLLS_INITIATIVE', label: '2024 Combat Assistant Rolls Initiative', type: 'boolean', tip: 'Combat Assistant rolls initiative from sheet data and writes the turn order directly.' },
-        { key: 'SHEET_2014_CA_ROLLS', label: '2014 Combat Assistant Rolls', type: 'boolean', tip: 'OFF uses Roll20 buttons for 2014 NPC saving throws and initiative. ON rolls 2014 NPC saving throws and initiative with Combat Assistant after asking normal, advantage, or disadvantage.' },
-        { key: 'HP_BAR', label: 'HP Bar', type: 'bar', tip: 'Token bar used for hit points.' },
-        { key: 'AC_BAR', label: 'AC Bar', type: 'bar', tip: 'Token bar used for armor class.' },
-        { key: 'TEMP_HP_BAR', label: 'Temp HP Bar', type: 'bar0', tip: 'Token bar used for temporary HP. Use 0 to disable.' },
+        { key: 'CHAT_TRACKING', section: 'Main', label: 'Chat Tracking', type: 'boolean', tip: 'Read Roll20 attack, damage, healing, and related combat rolls.' },
+        { key: 'CONCENTRATION_TRACKING', label: 'Concentration Tracking', type: 'boolean', tip: 'Track concentration spells, area markers, persistent actions, targets, and concentration saves.' },
+        { key: 'CA_ROLLS_INITIATIVE', label: '2024 Combat Assistant Rolls Initiative', type: 'boolean', tip: 'ON lets Combat Assistant roll 2024 initiative from sheet data; OFF keeps native Roll20 initiative.' },
+        { key: 'SHEET_2014_CA_ROLLS', label: '2014 Combat Assistant Rolls', type: 'boolean', tip: 'OFF keeps native 2014 saving throws and initiative; ON lets Combat Assistant perform those supported rolls.' },
+
+        { key: 'HIDE_COMBAT_LOG', section: 'Privacy', label: 'Hide Combat Log', type: 'boolean', tip: 'Whisper Combat Assistant combat-result logs to the GM instead of publishing them to players.' },
+        { key: 'HIDE_RESISTANCE_DETAILS', label: 'Hide Resistance Details', type: 'boolean', tip: 'Keep final damage amount and type visible, but hide resistance, immunity, and vulnerability explanations in public Combat Logs.' },
+        { key: 'HIDE_DAMAGE_DETAILS', label: 'Hide Damage Details', type: 'boolean', tip: 'Hide damage amount and damage type from public Combat Log narration. This also suppresses resistance-detail text.' },
+        { key: 'REVEAL_DAMAGE_SOURCE', label: 'Reveal Damage Source in Log', type: 'boolean', tip: 'Show who caused damage or healing and which attack, spell, or ability caused it.' },
+        { key: 'REVEAL_TOKEN_NAMES_IN_LOG', label: 'Reveal Token Names in Log', type: 'boolean', tip: 'Show token names in Combat Logs. OFF uses generic Target, Attacker, Caster, or Healer labels.' },
+        { key: 'PUBLIC_PRESENTATION_CARD', label: 'Public Presentation Card', type: 'boolean', tip: 'ON shows the startup presentation card publicly. OFF whispers it only to the GM.' },
+
+        { key: 'HP_BAR', section: 'Combat', label: 'HP Bar', type: 'bar', tip: 'Choose the token bar Combat Assistant uses for hit points.' },
+        { key: 'AC_BAR', label: 'AC Bar', type: 'bar', tip: 'Choose the token bar Combat Assistant uses for armor class.' },
+        { key: 'TEMP_HP_BAR', label: 'Temp HP Bar', type: 'bar0', tip: 'Choose the token bar used for temporary HP, or 0 to disable token-bar Temp HP.' },
         { key: 'DAMAGE_ROUND_UP', label: 'Damage Round Up', type: 'boolean', tip: 'Round halved damage up instead of down.' },
-        //{ key: 'REQUIRE_AC_FOR_ATTACK', label: 'Require AC for Attack', type: 'boolean', tip: 'Block automatic attack resolution when the configured AC bar is empty or zero.' },
-        { key: 'USE_SHEET_DAMAGE_TRAITS', label: 'Read Sheet Resistances', type: 'boolean', tip: 'Read Roll20 sheet damage resistances, immunities, and vulnerabilities.' },
-        { key: 'REVEAL_DAMAGE_SOURCE', label: 'Reveal Damage Source in Log', type: 'boolean', tip: 'Show who caused damage and which attack or spell caused it.' },
-        { key: 'REVEAL_TOKEN_NAMES_IN_LOG', label: 'Reveal Token Names in Log', type: 'boolean', tip: 'Show token names in public combat logs. OFF uses generic Target and Attacker labels.' },
-        { type: 'section', label: 'Players' },
-        { key: 'PLAYER_MANUAL_ROLL', label: 'Player Manual Roll', type: 'boolean', tip: 'Ask player-controlled tokens to make their own saving throws and initiative rolls when Roll20 can expose a usable sheet button.' },
-        { key: 'PLAYER_HEALING_BUTTON', label: 'Player Healing Button', type: 'boolean', tip: 'When possible, captured healing buttons are whispered to the controlling player, allowing them to select a target and apply healing.' },
-        { key: 'PLAYER_ATTACK_BUTTON', label: 'Player Attack Button', type: 'boolean', tip: 'When possible, captured attack buttons are whispered to the controlling player, allowing them to select a target, resolve the attack against its AC, and automatically apply damage.' },
-        { key: 'PLAYER_ACTION_RANGE_CHECK', label: 'Player Target Range Check', type: 'boolean', tip: 'For generated player spell buttons, measure the spell range from the caster token to the chosen target before applying healing or damage.' },
-        { key: 'PLAYER_TOKEN_AREA_MARK', label: 'Player Token Area Mark', type: 'boolean', tip: 'For generated player area spell buttons, spawn a movable area marker token and resolve all tokens inside it when the player presses Roll.' },
-        { type: 'section', label: 'Effects' },
-        { key: 'PLAYER_AREA_MARKER_KEEP_UNTIL_ROLLED', label: 'Keep Marker Until Rolls Finish', type: 'boolean', tip: 'When an area marker triggers saving throws, keep the marker visible until every affected token has resolved its roll and damage.' },
-        { key: 'AREA_MARKER_FREE_MOVEMENT', label: 'Marker Free Movement', type: 'boolean', tip: 'ON lets area markers move freely. OFF snaps area markers to the Roll20 grid when they are moved.' },
-        { key: 'PLAYER_MARKER_SQUARE_URL', label: 'Square Marker Roll20 URL', type: 'roll20image', tip: 'Roll20 uploaded image URL used for square, cube, cone, or line player area markers.' },
-        { key: 'PLAYER_MARKER_RADIUS_URL', label: 'Radius Marker Roll20 URL', type: 'roll20image', tip: 'Roll20 uploaded image URL used for radius, sphere, cylinder, or emanation player area markers.' },
-        { key: 'PLAYER_MARKER_OPACITY', label: 'Marker Opacity', type: 'percent', tip: 'Opacity percentage for player area marker tokens.' },
-        { key: 'COMBAT_VISUAL_EFFECTS', label: 'Combat Visual Effects', type: 'boolean', tip: 'Show automatic Roll20 FX when Combat Assistant applies damage, healing, temporary HP, projectile attacks, or area spells.' },
-        { key: 'PROJECTILE_EFFECT_NAME', label: 'Projectile Effect Name', type: 'text', tip: 'Optional built-in or Custom FX name used from the attacker to the selected target for ranged projectile attacks. Leave empty to disable projectile FX.' },
-        { key: 'DIRECT_HIT_EFFECT_NAME', label: 'Direct Hit Effect Name', type: 'text', tip: 'Built-in base effect or exact Custom FX name used when damage is applied without a saving throw. Built-in effects use the blood color. Leave empty to disable.' },
-        { key: 'AREA_HIT_EFFECT_NAME', label: 'Area Hit Effect Name', type: 'text', tip: 'Built-in base effect or exact Custom FX name used when damage is applied through a saving throw. Built-in effects use the damage type color. Leave empty to disable.' },
-        { type: 'section', label: 'Turn Tracker' },
-        { key: 'TURN_TRACKER', label: 'Turn Tracker', type: 'boolean', tip: 'Track combat rounds and current turns from the Turn Order. Player Next buttons are always active while Turn Tracker is ON.' },
-        { key: 'TURN_AUTO_FOCUS', label: 'Turn Auto Focus', type: 'boolean', tip: 'Ping and focus everyone on the current turn token.' },
-        { key: 'TURN_FOCUS_FOR_EVERYONE', label: 'Turn Focus For Everyone', type: 'boolean', tip: 'ON moves everyone when Turn Focus runs. OFF moves only GMs and the players who control the current token or its character.' },
-        { key: 'HANDLE_ACTIONS', label: 'Turn Token Action', type: 'boolean', tip: "Show Dash, Disengage, Dodge, Combat, and Spells controls on every token's Turn Card." },
-        { key: 'TURN_MOVEMENT_TRACKER', label: 'Turn Movement Tracker', type: 'boolean', tip: 'Track movement spent by the current-turn token, warn its controller and the GM when it exceeds available speed, and let Dash add another base-speed allowance.' },
-        { key: 'CONC_TURN_TRACKER', label: 'Conc. Turn Tracker', type: 'boolean', tip: 'Decrease finite concentration duration once when the concentrating token reaches its turn, and end concentration automatically at 0 turns left.' },
-        { key: 'ROUND_COUNTER', label: 'Round Counter', type: 'boolean', tip: 'Whisper the GM the Round Counter card with all tokens currently in combat.' },
-        { key: 'PUBLIC_ROUND_COUNTER', label: 'Public Round Counter', type: 'boolean', tip: 'Also show the Round Counter card publicly. Round Counter must be ON.' },
-        { key: 'REMOVE_NPC_DEAD_TOKENS', label: 'Remove NPC Dead Tokens', type: 'boolean', tip: "ON automatically removes unlinked NPC turns with 0 HP. OFF shows a red Remove button below Next on that token's Turn Card." },
-        { key: 'TURN_MARKER', label: 'Turn Marker', type: 'boolean', tip: 'Spawn a marker token on the current turn token.' },
-        { key: 'PUBLIC_TURN_MARKER', label: 'Turn Marker Token Public', type: 'boolean', tip: 'OFF puts the turn marker on the GM layer. ON puts it on the map layer and brings it forward.' },
-        { key: 'TURN_MARKER_IMAGE_URL', label: 'Turn Marker Token Image', type: 'roll20image', tip: 'Roll20 uploaded image used for the turn marker token. Must start with https://files.d20.io/images/.' },
-        { key: 'TURN_MARKER_IMG_SIZE', label: 'Turn Marker Token Size %', type: 'number', tip: 'Percentage added to the current token width and height. 20 means the marker is 20% larger than the token. Default 20.' },
-        { key: 'TURN_MARKER_FOLLOW', label: 'Turn Marker Follow', type: 'boolean', tip: 'Keep the marker centered and scaled when the current turn token moves or resizes.' },
+        { key: 'REQUIRE_AC_FOR_ATTACK', label: 'Require AC for Attack', type: 'boolean', tip: 'Require a valid AC value before resolving attack-roll damage. OFF allows attack damage to continue when the configured AC bar is empty.' },
+        { key: 'USE_SHEET_DAMAGE_TRAITS', label: 'Read Sheet Resistances', type: 'boolean', tip: 'Read sheet damage resistances, immunities, and vulnerabilities when applying damage.' },
+        { key: 'PLAYER_MANUAL_ROLL', section: 'Player', label: 'Player Manual Roll', type: 'boolean', tip: 'Ask player-controlled tokens to make their own supported saving throws and initiative rolls when Roll20 exposes a usable native button.' },
+        { key: 'PLAYER_HEALING_BUTTON', label: 'Player Healing Button', type: 'boolean', tip: 'Whisper supported healing controls to the controlling player so they can select a target and apply healing.' },
+        { key: 'PLAYER_ATTACK_BUTTON', label: 'Player Attack Button', type: 'boolean', tip: 'Whisper supported attack controls to the controlling player so they can select a target and resolve the attack.' },
+        { key: 'PLAYER_ACTION_RANGE_CHECK', label: 'Player Target Range Check', type: 'boolean', tip: 'Check caster-to-target range before generated player spell controls apply healing or damage.' },
+        { key: 'PLAYER_TOKEN_AREA_MARK', label: 'Player Token Area Mark', type: 'boolean', tip: 'Allow generated player area-spell controls to place a movable area marker and resolve tokens inside it.' },
+
+        { key: 'PLAYER_AREA_MARKER_KEEP_UNTIL_ROLLED', section: 'Effects', label: 'Keep Marker Until Rolls Finish', type: 'boolean', tip: 'Keep an area marker visible until every affected saving throw and damage resolution is complete.' },
+        { key: 'AREA_MARKER_FREE_MOVEMENT', label: 'Marker Free Movement', type: 'boolean', tip: 'ON lets area markers move freely; OFF snaps them to the Roll20 grid.' },
+        { key: 'PLAYER_MARKER_SQUARE_URL', label: 'Square Marker Roll20 URL', type: 'roll20image', tip: 'Roll20 uploaded image URL used for square, cube, cone, or line area markers.' },
+        { key: 'PLAYER_MARKER_RADIUS_URL', label: 'Radius Marker Roll20 URL', type: 'roll20image', tip: 'Roll20 uploaded image URL used for radius, sphere, cylinder, or emanation area markers.' },
+        { key: 'PLAYER_MARKER_OPACITY', label: 'Marker Opacity', type: 'percent', tip: 'Set the opacity percentage for player area-marker tokens.' },
+        { key: 'COMBAT_VISUAL_EFFECTS', label: 'Combat Visual Effects', type: 'boolean', tip: 'Show automatic Roll20 FX when Combat Assistant applies damage, healing, temporary HP, projectile attacks, or area effects.' },
+        { key: 'PROJECTILE_EFFECT_NAME', label: 'Projectile Effect Name', type: 'text', tip: 'Built-in or Custom FX name used from attacker to target for ranged projectile attacks. Leave empty to disable.' },
+        { key: 'DIRECT_HIT_EFFECT_NAME', label: 'Direct Hit Effect Name', type: 'text', tip: 'Built-in base effect or exact Custom FX name used when damage is applied without a saving throw. Leave empty to disable.' },
+        { key: 'AREA_HIT_EFFECT_NAME', label: 'Area Hit Effect Name', type: 'text', tip: 'Built-in base effect or exact Custom FX name used when damage is applied through a saving throw. Leave empty to disable.' },
+
+        { key: 'TURN_TRACKER', section: 'Turn Tracker', label: 'Turn Tracker', type: 'boolean', tip: 'Track combat rounds and current turns from the Roll20 Turn Order.' },
+        { key: 'TURN_AUTO_FOCUS', label: 'Turn Auto Focus', type: 'boolean', tip: 'Ping and focus eligible users on the current-turn token.' },
+        { key: 'TURN_FOCUS_FOR_EVERYONE', label: 'Turn Focus For Everyone', type: 'boolean', tip: 'ON focuses everyone; OFF focuses only GMs and controllers of the current token or character.' },
+        { key: 'HANDLE_ACTIONS', label: 'Turn Token Action', type: 'boolean', tip: 'Show Dash, Special, C. Sheet, Combat, and Spells controls on Turn Cards.' },
+        { key: 'TURN_MOVEMENT_TRACKER', label: 'Turn Movement Tracker', type: 'boolean', tip: 'Track movement spent by the current-turn token and warn when it exceeds available speed.' },
+        { key: 'CONC_TURN_TRACKER', label: 'Conc. Turn Tracker', type: 'boolean', tip: 'Decrease finite concentration duration when the caster reaches its turn and end it automatically at 0.' },
+        { key: 'ROUND_COUNTER', label: 'Round Counter', type: 'boolean', tip: 'Enable the Round Counter card and current-combat token summary.' },
+        { key: 'PUBLIC_ROUND_COUNTER', label: 'Public Round Counter', type: 'boolean', tip: 'Also publish the Round Counter card to players. Round Counter must be ON.' },
+        { key: 'REMOVE_NPC_DEAD_TOKENS', label: 'Remove NPC Dead Tokens', type: 'boolean', tip: 'Automatically remove unlinked NPC turns at 0 HP; OFF leaves a red manual Remove control.' },
+        { key: 'TURN_MARKER', label: 'Turn Marker', type: 'boolean', tip: 'Spawn a marker token on the current-turn token.' },
+        { key: 'PUBLIC_TURN_MARKER', label: 'Turn Marker Token Public', type: 'boolean', tip: 'OFF keeps the turn marker on the GM layer; ON puts it on the map layer and brings it forward.' },
+        { key: 'TURN_MARKER_IMAGE_URL', label: 'Turn Marker Token Image', type: 'roll20image', tip: 'Roll20 uploaded image used for the turn marker token.' },
+        { key: 'TURN_MARKER_IMG_SIZE', label: 'Turn Marker Token Size %', type: 'number', tip: 'Percentage added to current token width and height for the Turn Marker. Default 20.' },
+        { key: 'TURN_MARKER_FOLLOW', label: 'Turn Marker Follow', type: 'boolean', tip: 'Keep the Turn Marker centered and scaled when the current token moves or resizes.' },
         { key: 'TURN_MARKER_ROTATION', label: 'Turn Marker Rotation', type: 'boolean', tip: 'Rotate the Turn Marker while combat is active.' },
-        { key: 'TURN_MARKER_ROTATION_STEPS', label: 'Turn Marker Rotation Steps', type: 'number', tip: 'Degrees applied on every rotation update. Default 1.' },
-        { key: 'TURN_MARKER_ROTATION_SPEED', label: 'Turn Marker Rotation Speed', type: 'number', tip: 'Milliseconds between rotation updates. Default 100 ms.' },
-        { type: 'section', label: 'Resources' },
-        { key: 'SHOW_PLAYER_RESOURCES', label: 'Show Player Resources', type: 'boolean', tip: 'Show the current player-controlled token\'s limited resources and spell slots directly on its Turn Card.' },
-        { key: 'SHOW_NPC_RESOURCES', label: 'Show NPC Resources', type: 'boolean', tip: 'Show limited resources and spell slots for non-player-controlled tokens on the GM Turn Card only.' },
-        { key: 'CONSUME_SPELL_SLOTS', label: 'Consume Spell Slots', type: 'boolean', tip: 'When ON, opening Spells arms one spell cast for that character. The next confirmed leveled spell roll from that Spells session consumes one matching spell slot through ResourceService.' },
-        { key: 'SHOW_PREPARED_SPELLS_ONLY_2024', label: '2024 Prepared Spells Only', type: 'boolean', tip: 'When ON, the 2024 Spells list shows only spells marked Prepared or Always Prepared. Cantrips are included only when Roll20 marks them prepared or always prepared.' },
-        { key: 'PLAYER_PUBLIC_RESOURCE_USAGE', label: 'Player Public Usage', type: 'boolean', tip: 'When a player uses or recovers a resource, send the Resource Update card to public chat instead of private whispers.' },
-        { type: 'section', label: 'Extra' },
-        { key: 'PUBLIC_PRESENTATION_CARD', label: 'Public Presentation Card', type: 'boolean', tip: 'ON shows the startup presentation card publicly. OFF whispers the presentation card only to the GM.' },
-        { key: 'USE_ROLL20_DAMAGE_ICON', label: 'Use Roll20 Damage Icon', type: 'boolean', tip: "OFF uses Combat Assistant's current damage-type icons. ON uses the Roll20-style SVG damage icons." },
-        { key: 'APPLY_ROLL20_ICON_DAMAGE_COLOR', label: 'Apply Roll20 Icon Damage Color', type: 'boolean', tip: 'When Roll20 damage icons are enabled, recolor each SVG icon to the configured Combat Assistant color for that damage type.' },
-        { key: 'DEBUG', label: 'Debug', type: 'boolean', temporary: true, advancedOnly: true, tip: 'Temporary API-console debug logging. Resets to OFF whenever the API sandbox restarts.' },
-        { key: 'CHAT_DEBUG_ATTACKS', label: 'Chat Debug Attacks', type: 'boolean', temporary: true, advancedOnly: true, tip: 'Temporarily print full attack diagnostics in chat after opening Combat. Resets to OFF whenever the API sandbox restarts.' },
-        { key: 'CHAT_DEBUG_SPELLS', label: 'Chat Debug Spells', type: 'boolean', temporary: true, advancedOnly: true, tip: 'Temporarily print full spell diagnostics in chat after opening Spells. Resets to OFF whenever the API sandbox restarts.' },
-        { key: 'AREA_RADIUS_DEBUG_DRAW', label: 'Area Radius Debug Draw', type: 'boolean', temporary: true, advancedOnly: true, tip: 'Draw temporary GM-only reference circles when resolving radius, sphere, cylinder, or emanation area markers. Resets to OFF whenever the API sandbox restarts.' },
-        { key: 'CHAT_BACKGROUND_IMAGE_URL', label: 'Change Background URL', type: 'text', tip: 'Background image used by Combat Assistant cards.' },
-        { key: 'CHAT_PROBE', label: 'Chat Probe', type: 'boolean', temporary: true, advancedOnly: true, tip: 'Whisper compact Roll20 chat message diagnostics to the GM for parser testing. Resets to OFF whenever the API sandbox restarts.' },
-        { key: 'GET_TOKEN_IMAGE_URL', label: 'Get Token Image URL', type: 'action', action: 'gettokenimage', buttonLabel: 'Get', tip: 'Select exactly one token and return its current token image URL.' },
+        { key: 'TURN_MARKER_ROTATION_STEPS', label: 'Turn Marker Rotation Steps', type: 'number', tip: 'Degrees applied on every Turn Marker rotation update. Default 1.' },
+        { key: 'TURN_MARKER_ROTATION_SPEED', label: 'Turn Marker Rotation Speed', type: 'number', tip: 'Milliseconds between Turn Marker rotation updates. Default 100 ms.' },
+
+        { key: 'SHOW_PLAYER_RESOURCES', section: 'Resource', label: 'Show Player Resources', type: 'boolean', tip: 'Show player-controlled token resources and spell slots directly on its Turn Card.' },
+        { key: 'SHOW_NPC_RESOURCES', label: 'Show NPC Resources', type: 'boolean', tip: 'Show limited resources and spell slots for non-player-controlled tokens on the GM Turn Card.' },
+        { key: 'NPC_RESOURCE_MANAGEMENT', label: 'NPC Resource Management', type: 'boolean', tip: 'Give eligible unlinked NPC tokens independent resource pools stored in Token GM Notes.' },
+        { key: 'CONSUME_SPELL_SLOTS', label: 'Consume Spell Slots', type: 'boolean', tip: 'Automatically consume the confirmed spell cost, preferring an exact linked Beacon spell Resource before a generic spell slot.' },
+        { key: 'CONSUME_ACTION_RESOURCES', label: 'Consume Action Resources', type: 'boolean', tip: 'Automatically consume one matching non-spell resource when a confirmed action with the same normalized name is used.' },
+        { key: 'SHOW_PREPARED_SPELLS_ONLY_2024', label: '2024 Prepared Spells Only', type: 'boolean', tip: 'Show only 2024 spells marked Prepared or Always Prepared, including cantrips only when Roll20 marks them prepared.' },
+        { key: 'PLAYER_PUBLIC_RESOURCE_USAGE', label: 'Player Public Usage', type: 'boolean', tip: 'Publish player Resource Update cards instead of whispering them privately.' },
+
+        { key: 'USE_ROLL20_DAMAGE_ICON', section: 'Extra', label: 'Use Roll20 Damage Icon', type: 'boolean', tip: 'Use Roll20-style SVG damage icons instead of the default Combat Assistant icons.' },
+        { key: 'APPLY_ROLL20_ICON_DAMAGE_COLOR', label: 'Apply Roll20 Icon Damage Color', type: 'boolean', tip: 'Recolor Roll20-style damage icons using Combat Assistant damage-type colors.' },
+        { key: 'DEBUG', label: 'Debug', type: 'boolean', temporary: true, advancedOnly: true, tip: 'Temporary API-console debug logging. Resets to OFF whenever the sandbox restarts.' },
+        { key: 'CHAT_DEBUG_ATTACKS', label: 'Chat Debug Attacks', type: 'boolean', temporary: true, advancedOnly: true, tip: 'Temporarily print full attack diagnostics in chat after opening Combat.' },
+        { key: 'CHAT_DEBUG_SPELLS', label: 'Chat Debug Spells', type: 'boolean', temporary: true, advancedOnly: true, tip: 'Temporarily print full spell diagnostics in chat after opening Spells.' },
+        { key: 'AREA_RADIUS_DEBUG_DRAW', label: 'Area Radius Debug Draw', type: 'boolean', temporary: true, advancedOnly: true, tip: 'Draw temporary GM-only reference circles while resolving supported radius area markers.' },
+        { key: 'CHAT_BACKGROUND_IMAGE_URL', label: 'Change Background URL', type: 'text', tip: 'Set the background image used by Combat Assistant cards.' },
+        { key: 'CHAT_PROBE', label: 'Chat Probe', type: 'boolean', temporary: true, advancedOnly: true, tip: 'Whisper compact Roll20 chat-message diagnostics to the GM for parser testing.' },
+        { key: 'GET_TOKEN_IMAGE_URL', label: 'Get Token Image URL', type: 'action', action: 'gettokenimage', buttonLabel: 'Get', tip: 'Select exactly one token and return its current live token image URL.' }
     ]);
 
 
@@ -496,6 +538,9 @@ const CombatAssistant = (() => {
                 CONSUME_SPELL_SLOTS: 'CONSUME_SPELL_SLOTS',
                 SPELL_SLOT_CONSUMPTION: 'CONSUME_SPELL_SLOTS',
                 AUTO_CONSUME_SPELL_SLOTS: 'CONSUME_SPELL_SLOTS',
+                CONSUME_ACTION_RESOURCES: 'CONSUME_ACTION_RESOURCES',
+                ACTION_RESOURCE_CONSUMPTION: 'CONSUME_ACTION_RESOURCES',
+                AUTO_CONSUME_ACTION_RESOURCES: 'CONSUME_ACTION_RESOURCES',
                 HANDLE_ACTIONS: 'HANDLE_ACTIONS',
                 TURN_TOKEN_ACTION: 'HANDLE_ACTIONS',
                 TURN_TOKEN_ACTIONS: 'HANDLE_ACTIONS',
@@ -535,9 +580,6 @@ const CombatAssistant = (() => {
                 REVEAL_NAMES: 'REVEAL_TOKEN_NAMES_IN_LOG',
                 REVEAL_TOKEN_NAMES: 'REVEAL_TOKEN_NAMES_IN_LOG',
                 REVEAL_TOKEN_NAMES_IN_LOG: 'REVEAL_TOKEN_NAMES_IN_LOG',
-                HIDE_NAMES: 'HIDE_TOKEN_NAMES_IN_LOG',
-                HIDE_TOKEN_NAMES: 'HIDE_TOKEN_NAMES_IN_LOG',
-                HIDE_TOKEN_NAMES_IN_LOG: 'HIDE_TOKEN_NAMES_IN_LOG',
                 BG: 'CHAT_BACKGROUND_IMAGE_URL',
                 BACKGROUND: 'CHAT_BACKGROUND_IMAGE_URL',
                 CHAT_BACKGROUND_IMAGE_URL: 'CHAT_BACKGROUND_IMAGE_URL',
@@ -611,6 +653,11 @@ const CombatAssistant = (() => {
             delete root.settings.CHAT_DEBUG_SPELLS;
             delete root.settings.CHAT_PROBE;
             delete root.settings.AREA_RADIUS_DEBUG_DRAW;
+            if (!Object.prototype.hasOwnProperty.call(root.settings, 'REVEAL_TOKEN_NAMES_IN_LOG') &&
+                    Object.prototype.hasOwnProperty.call(root.settings, 'HIDE_TOKEN_NAMES_IN_LOG')) {
+                root.settings.REVEAL_TOKEN_NAMES_IN_LOG = !Utils.toBoolean(root.settings.HIDE_TOKEN_NAMES_IN_LOG, false);
+            }
+            delete root.settings.HIDE_TOKEN_NAMES_IN_LOG;
             Object.keys(RUNTIME_CONFIG_DEFAULTS).forEach((key) => {
                 if (!Object.prototype.hasOwnProperty.call(root.settings, key)) {
                     root.settings[key] = RUNTIME_CONFIG_DEFAULTS[key];
@@ -725,20 +772,6 @@ const CombatAssistant = (() => {
             return true;
         },
 
-        markPlayerActionUsed(id) {
-            const key = '__legacy__';
-            return this.reservePlayerAction(id, key) && this.commitPlayerAction(id, key);
-        },
-
-        markPlayerActionTargetUsed(id, targetId) {
-            const request = this.getPlayerActionRequest(id);
-            if (!request || request.used) return false;
-            const safeTargetId = String(targetId || '').trim();
-            request.usedTargetIds = Array.isArray(request.usedTargetIds) ? request.usedTargetIds : [];
-            if (safeTargetId && request.usedTargetIds.indexOf(safeTargetId) < 0) request.usedTargetIds.push(safeTargetId);
-            return true;
-        },
-
         setConcentration(entry) {
             const root = this.get();
             root.concentration = root.concentration || {};
@@ -768,6 +801,18 @@ const CombatAssistant = (() => {
                 if (String(entry.actionId || '').trim() === safeActionId) return entry;
             }
             return null;
+        },
+
+        setConcentrationTargets(tokenId, targetIds) {
+            const entry = this.getConcentrationByTokenId(tokenId);
+            if (!entry) return false;
+            const next = [];
+            (Array.isArray(targetIds) ? targetIds : [targetIds]).forEach((id) => {
+                const safeId = String(id || '').trim();
+                if (safeId && next.indexOf(safeId) < 0) next.push(safeId);
+            });
+            entry.targetTokenIds = next;
+            return true;
         },
 
         removeConcentrationByTokenId(tokenId) {
@@ -882,11 +927,6 @@ const CombatAssistant = (() => {
                 AREA_MARKER_DESTROY_ACTIVE = false;
             }
             return removed;
-        },
-
-        findAreaMarkerGroupByTokenId(tokenId) {
-            const found = this.findAreaMarkerRequestByTokenId(tokenId);
-            return found && found.group ? found : null;
         },
 
         findAreaMarkerRequestByTokenId(tokenId) {
@@ -1097,6 +1137,21 @@ const CombatAssistant = (() => {
             return typeof value === 'string' && value.trim().length > 0;
         },
 
+        normalizeAbilityName(value) {
+            return ABILITY_ALIASES[String(value || '').trim().toLowerCase()] || '';
+        },
+
+        abilityShortLabel(value) {
+            return ABILITIES[this.normalizeAbilityName(value)] || '';
+        },
+
+        getBeaconIntegrants(root) {
+            if (!root || typeof root !== 'object') return {};
+            const wrapped = root.integrants;
+            if (wrapped && typeof wrapped === 'object' && wrapped.integrants && typeof wrapped.integrants === 'object') return wrapped.integrants;
+            return wrapped && typeof wrapped === 'object' ? wrapped : {};
+        },
+
         escapeHtml(value) {
             return Utils.asString(value)
                 .replace(/&/g, '&amp;')
@@ -1208,6 +1263,12 @@ const CombatAssistant = (() => {
             return text.replace(/\s+/g, ' ').trim();
         },
 
+        isInitiativeLabel(value) {
+            const normalized = this.normalizeName(value || '');
+            if (!normalized) return false;
+            return normalized.split(' ').some((part) => part === 'initiative' || part === 'init');
+        },
+
         uniqueNames(list) {
             const seen = Object.create(null);
             const out = [];
@@ -1289,14 +1350,9 @@ const CombatAssistant = (() => {
             delete root.settings.CHAT_DEBUG_SPELLS;
             delete root.settings.CHAT_PROBE;
             delete root.settings.AREA_RADIUS_DEBUG_DRAW;
-            const hadRevealTokenNames = Object.prototype.hasOwnProperty.call(root.settings, 'REVEAL_TOKEN_NAMES_IN_LOG');
             Object.keys(RUNTIME_CONFIG_DEFAULTS).forEach((key) => {
                 if (!Object.prototype.hasOwnProperty.call(root.settings, key)) root.settings[key] = RUNTIME_CONFIG_DEFAULTS[key];
             });
-            if (!hadRevealTokenNames) {
-                root.settings.REVEAL_TOKEN_NAMES_IN_LOG = !Utils.toBoolean(root.settings.HIDE_TOKEN_NAMES_IN_LOG, false);
-            }
-            root.settings.HIDE_TOKEN_NAMES_IN_LOG = !Utils.toBoolean(root.settings.REVEAL_TOKEN_NAMES_IN_LOG, true);
             return root.settings;
         },
 
@@ -1341,7 +1397,7 @@ const CombatAssistant = (() => {
             if (field.type === 'percent') return Utils.clamp(Utils.toInt(value, fallback), 0, 100);
             if (field.type === 'number') return Math.max(0, Utils.toInt(value, fallback));
             if (field.type === 'roll20image') return Utils.extractUrl(value);
-            if (field.type === 'image' || field.key === 'CHAT_BACKGROUND_IMAGE_URL') {
+            if (field.key === 'CHAT_BACKGROUND_IMAGE_URL') {
                 const url = String(value === undefined || value === null ? '' : value).trim();
                 return Utils.isSafeImageUrl(url) ? url : (fallback || '');
             }
@@ -1353,7 +1409,6 @@ const CombatAssistant = (() => {
             const field = this.getField(safeKey);
             if (!field) return { ok: false, message: 'Unknown setting: ' + key + '.' };
             if (field.advancedOnly && !ADVANCED_MODE) return { ok: false, message: 'Enable advanced mode first with !ca advancemode yes.' };
-            if (field.type === 'section') return { ok: false, message: 'Setting is not editable: ' + key + '.' };
             if (field.type === 'bar' || field.type === 'bar0') {
                 const raw = String(value === undefined || value === null ? '' : value).trim();
                 const bar = Utils.toInt(raw, null);
@@ -1385,8 +1440,6 @@ const CombatAssistant = (() => {
             } else {
                 const config = this.persistedSettings();
                 config[safeKey] = normalized;
-                if (safeKey === 'REVEAL_TOKEN_NAMES_IN_LOG') config.HIDE_TOKEN_NAMES_IN_LOG = !Utils.toBoolean(config[safeKey], true);
-                if (safeKey === 'HIDE_TOKEN_NAMES_IN_LOG') config.REVEAL_TOKEN_NAMES_IN_LOG = !Utils.toBoolean(config[safeKey], false);
             }
             return { ok: true, key: safeKey, value: normalized, field };
         },
@@ -1424,9 +1477,6 @@ const CombatAssistant = (() => {
             return this.getAll();
         },
 
-        isAdvancedMode() {
-            return ADVANCED_MODE;
-        }
     };
 
     /** -----------------------------------------------------------------------
@@ -1536,10 +1586,6 @@ const CombatAssistant = (() => {
 
         hasSheetWriter() {
             return typeof setSheetItem === 'function';
-        },
-
-        hasSheetApi() {
-            return this.hasSheetWriter();
         },
 
         getRuntimeCapabilities() {
@@ -1854,10 +1900,6 @@ const CombatAssistant = (() => {
             };
         },
 
-        getPageScaleFeet(pageId) {
-            return this.getPageGeometry(pageId).scaleFeet;
-        },
-
         pixelsToPageFeet(pageId, pixels) {
             const geometry = this.getPageGeometry(pageId);
             return (Math.max(0, Utils.toNumber(pixels, 0)) / geometry.pixelsPerUnit) * geometry.scaleFeet;
@@ -1995,33 +2037,6 @@ const CombatAssistant = (() => {
             };
         },
 
-        measureTokenDistanceFeet(sourceToken, targetToken) {
-            if (!sourceToken || !targetToken) return { ok: false, message: 'Source or target token was not found.' };
-            const sourcePageId = this.getTokenPageId(sourceToken);
-            const targetPageId = this.getTokenPageId(targetToken);
-            if (!sourcePageId || !targetPageId || sourcePageId !== targetPageId) {
-                return { ok: false, message: 'Source and target tokens must be on the same page.' };
-            }
-            const geometry = this.getPageGeometry(sourcePageId);
-            const feetPerCell = geometry.scaleFeet;
-            const pxPerCell = geometry.pixelsPerUnit;
-            const sx = Utils.toNumber(sourceToken.get('left'), 0);
-            const sy = Utils.toNumber(sourceToken.get('top'), 0);
-            const tx = Utils.toNumber(targetToken.get('left'), 0);
-            const ty = Utils.toNumber(targetToken.get('top'), 0);
-            const sourceWidthCells = Math.max(1, Math.round(Math.max(1, Utils.toNumber(sourceToken.get('width'), 70)) / pxPerCell));
-            const sourceHeightCells = Math.max(1, Math.round(Math.max(1, Utils.toNumber(sourceToken.get('height'), 70)) / pxPerCell));
-            const targetWidthCells = Math.max(1, Math.round(Math.max(1, Utils.toNumber(targetToken.get('width'), 70)) / pxPerCell));
-            const targetHeightCells = Math.max(1, Math.round(Math.max(1, Utils.toNumber(targetToken.get('height'), 70)) / pxPerCell));
-            const centerDxCells = Math.abs(sx - tx) / pxPerCell;
-            const centerDyCells = Math.abs(sy - ty) / pxPerCell;
-            const occupiedDxCells = Math.max(0, centerDxCells - ((sourceWidthCells - 1) / 2) - ((targetWidthCells - 1) / 2));
-            const occupiedDyCells = Math.max(0, centerDyCells - ((sourceHeightCells - 1) / 2) - ((targetHeightCells - 1) / 2));
-            const distanceCells = Math.ceil(Math.max(occupiedDxCells, occupiedDyCells));
-            const feet = distanceCells * feetPerCell;
-            return { ok: true, feet, pixels: distanceCells * pxPerCell, sourcePageId };
-        },
-
         measureTokenCenterDistanceFeet(sourceToken, targetToken) {
             if (!sourceToken || !targetToken) return { ok: false, message: 'Source or target token was not found.' };
             const sourcePageId = this.getTokenPageId(sourceToken);
@@ -2054,18 +2069,6 @@ const CombatAssistant = (() => {
             const pixels = Math.sqrt((dx * dx) + (dy * dy));
             const feet = this.pixelsToPageFeet(sourcePageId, pixels);
             return { ok: true, feet, pixels, sourcePageId };
-        },
-
-        getTokensWithinFeet(sourceToken, rangeFeet) {
-            const sourceId = this.getTokenId(sourceToken);
-            const pageId = this.getTokenPageId(sourceToken);
-            const maxFeet = Math.max(0, Utils.toNumber(rangeFeet, 0));
-            if (!sourceId || !pageId || maxFeet <= 0) return [];
-            return this.getTokensOnPage(pageId).filter((token) => {
-                if (!token || this.getTokenId(token) === sourceId) return false;
-                const measured = this.measureTokenCenterToTargetEdgeFeet(sourceToken, token);
-                return measured.ok && measured.feet <= Math.max(0, maxFeet - 0.1);
-            });
         },
 
         isSquareAreaShape(shape) {
@@ -2481,7 +2484,7 @@ const CombatAssistant = (() => {
         playerAreaMarkerTooltip(request, payload, areaInfo) {
             const sourceName = String(payload && payload.sourceName || request && request.characterName || 'Caster').trim() || 'Caster';
             const actionName = String(payload && payload.sourceAction || request && request.attackName || '').trim();
-            const saveAbility = CombatService.abilityNameToShortLabel(payload && payload.saveAbility || '') || '';
+            const saveAbility = Utils.abilityShortLabel(payload && payload.saveAbility || '') || '';
             const challenge = Math.max(0, Utils.toInt(payload && payload.challenge, 0));
             const check = saveAbility && challenge ? (saveAbility + ' DC ' + String(challenge)) : (challenge ? ('Roll ' + String(challenge)) : '');
             const damageRolls = Array.isArray(payload && payload.damageRolls) ? payload.damageRolls : [];
@@ -2909,7 +2912,6 @@ const CombatAssistant = (() => {
             const request = found.request;
             const alternative = found.alternative;
             const concentrationCasterTokenId = String(request.concentrationCasterTokenId || '').trim();
-            const shouldEndConcentration = !!(request.concentrationAreaActive && concentrationCasterTokenId);
             const ids = alternative
                 ? (Array.isArray(alternative.markerTokenIds) ? alternative.markerTokenIds.slice() : [alternative.markerTokenId].filter(Boolean))
                 : State.getPlayerActionMarkerIds(request);
@@ -2936,7 +2938,10 @@ const CombatAssistant = (() => {
             } finally {
                 AREA_MARKER_DESTROY_ACTIVE = false;
             }
-            if (shouldEndConcentration && typeof CombatService !== 'undefined' && CombatService.endConcentrationByTokenId) {
+            const remainingAlternatives = this.getActiveAreaMarkerAlternatives(request);
+            if (remainingAlternatives.length === 1) this.activateAreaMarkerAlternative(request, remainingAlternatives[0]);
+            if (!remainingAlternatives.length && request.concentrationAreaActive && concentrationCasterTokenId &&
+                typeof CombatService !== 'undefined' && CombatService.endConcentrationByTokenId) {
                 CombatService.endConcentrationByTokenId(concentrationCasterTokenId, 'area marker removed');
             }
             return true;
@@ -2945,11 +2950,15 @@ const CombatAssistant = (() => {
         findTokenByCharacterIdOnPage(characterId, pageId) {
             const safePageId = String(pageId || '').trim();
             if (!safePageId) return null;
-            const tokens = this.getTokensByCharacterId(characterId);
-            for (let i = 0; i < tokens.length; i += 1) {
-                if (this.getTokenPageId(tokens[i]) === safePageId) return tokens[i];
-            }
-            return null;
+            const matches = this.getTokensByCharacterId(characterId).filter((token) =>
+                this.getTokenPageId(token) === safePageId && this.getTokenLayer(token) === 'objects'
+            );
+            return matches.length === 1 ? matches[0] : null;
+        },
+
+        findTokenByCharacterIdOnPlayerPage(characterId, playerId) {
+            const pageId = this.getPlayerPageId(playerId);
+            return pageId ? this.findTokenByCharacterIdOnPage(characterId, pageId) : null;
         },
 
         getPlayerPageId(playerId) {
@@ -3213,6 +3222,11 @@ const CombatAssistant = (() => {
                 Logger.debug('[store dump]', error && error.message ? error.message : String(error));
                 return [];
             }
+        },
+
+        getCharacterStoreRoot(characterId) {
+            const roots = this.getCharacterStoreDumpRoots(characterId);
+            return roots.length ? roots[0] : null;
         },
 
         detectSheetVersion(characterId) {
@@ -3572,27 +3586,32 @@ const CombatAssistant = (() => {
             return bgColorByType[String(type || 'normal').toLowerCase()] || bgColorByType.normal;
         },
 
-        sendWhisperMessage(target, title, body, type) {
-            const cardStyle = this.getMessageCardStyle(type || 'normal');
-            R20.whisper(target || 'GM', Html.card({
-                title: title || META.NAME,
-                body: '<div style="font-size:14px;margin:0;line-height:17px;">' + String(body || '') + '</div>',
-                buildOptions: { titleColor: cardStyle.titleColor, borderColor: cardStyle.borderColor }
-            }));
-        },
-
-        sendPublicMessage(title, body, type, buildOptions) {
+        messageCardHtml(title, body, type, buildOptions) {
             const cardStyle = this.getMessageCardStyle(type || 'normal');
             const options = Object.assign({ titleColor: cardStyle.titleColor, borderColor: cardStyle.borderColor }, buildOptions || {});
-            R20.send(Html.card({
+            return Html.card({
                 title: title || META.NAME,
                 body: '<div style="font-size:14px;margin:0;line-height:17px;">' + String(body || '') + '</div>',
                 buildOptions: options
-            }));
+            });
+        },
+
+        sendWhisperMessage(target, title, body, type) {
+            R20.whisper(target || 'GM', this.messageCardHtml(title, body, type));
+        },
+
+        sendPublicMessage(title, body, type, buildOptions) {
+            R20.send(this.messageCardHtml(title, body, type, buildOptions));
+        },
+
+        sendCombatLogMessage(title, body, type, buildOptions) {
+            const card = this.messageCardHtml(title, body, type, buildOptions);
+            if (RuntimeConfig.get('HIDE_COMBAT_LOG')) R20.whisper('GM', card);
+            else R20.send(card);
         },
 
         sendDamageResult(result, type) {
-            this.sendPublicMessage(
+            this.sendCombatLogMessage(
                 'Combat Log',
                 this.buildDamageNarrative(result),
                 type || (result && result.missed ? 'warning' : (result && result.noDamage ? 'warning' : 'normal')),
@@ -3606,7 +3625,7 @@ const CombatAssistant = (() => {
             const sourceName = String(result.sourceName || '').trim();
             const sourceAction = String(result.sourceAction || '').trim();
             const isManual = /^manual$/i.test(sourceName) || /^manual(?:\s+healing)?$/i.test(sourceAction);
-            const title = result.mode === 'temp' ? 'Temporary HP' : 'Healing';
+            const fallbackTitle = result.mode === 'temp' ? 'Temporary HP' : 'Healing';
             if (isManual) {
                 const cardStyle = this.getMessageCardStyle('success');
                 R20.whisper(requestedBy || 'GM', Html.card({
@@ -3615,12 +3634,20 @@ const CombatAssistant = (() => {
                     buildOptions: {
                         titleColor: cardStyle.titleColor,
                         borderColor: cardStyle.borderColor,
-                        titleHtml: this.combatLogTitleHtml(result, title)
+                        titleHtml: this.combatLogTitleHtml(result, fallbackTitle)
                     }
                 }));
                 return;
             }
-            this.sendPublicMessage('Combat Log', narrative, 'success', { titleHtml: this.combatLogTitleHtml(result, title) });
+            const revealSource = RuntimeConfig.get('REVEAL_DAMAGE_SOURCE');
+            const title = revealSource && sourceAction ? sourceAction : fallbackTitle;
+            const rolledAmount = Math.max(0, Utils.toInt(result.rolledAmount !== undefined ? result.rolledAmount : result.amount, 0));
+            const rollFormula = String(result.rollFormula || '').trim();
+            const rollDetail = String(result.rollDetail || '').trim();
+            const rollTooltip = rollDetail || (rollFormula ? (rollFormula + '<br>Total: ' + String(rolledAmount)) : ('Healing total: ' + String(rolledAmount)));
+            const rollBox = this.numericRollBoxHtml(rolledAmount, rollTooltip, { size: 34, fontSize: '18px', success: true });
+            const body = this.combatLogResultRowHtml(narrative, rollBox, { rollWidth: 48 });
+            this.sendCombatLogMessage(title, body, 'success', { titleHtml: this.combatLogTitleHtml(result, title) });
         },
 
 
@@ -3750,15 +3777,6 @@ const CombatAssistant = (() => {
             ]);
         },
 
-        playerAreaFooterHtml(targetCount, areaInfo) {
-            const count = Math.max(0, Utils.toInt(targetCount, 0));
-            const label = areaInfo && areaInfo.label ? String(areaInfo.label) : 'Area';
-            return '<span style="color:rgb(105,220,120);font-weight:900;">' + Utils.escapeHtml(String(count)) + '</span> ' +
-                'Targets found in a ' +
-                '<span style="color:rgb(235,205,75);font-weight:900;">' + Utils.escapeHtml(label) + '</span>, ' +
-                'use this button once per target.';
-        },
-
         playerAreaMarkerFooterHtml(areaInfo, payload) {
             const options = payload && Array.isArray(payload.areaOptions) && payload.areaOptions.length
                 ? payload.areaOptions
@@ -3798,7 +3816,7 @@ const CombatAssistant = (() => {
         },
 
         saveAbilityQuery(defaultAbility) {
-            const normalized = CombatService.normalizeAbilityName(defaultAbility || '');
+            const normalized = Utils.normalizeAbilityName(defaultAbility || '');
             return this.queryOptionsWithDefault('Save', normalized || 'no', [
                 ['No', 'no'],
                 ['Strength', 'strength'],
@@ -3853,6 +3871,19 @@ const CombatAssistant = (() => {
             );
         },
 
+        concentrationEndButtonHtml(actionId, casterTokenId, tooltip) {
+            const safeActionId = String(actionId || '').trim();
+            const safeCasterTokenId = String(casterTokenId || '').trim();
+            if (!safeCasterTokenId) return '';
+            return this.iconButtonHtml({
+                iconHtml: '&#9201;&#65039;',
+                label: 'End',
+                command: '!combatAssistant conend ' + Utils.attrSafe(safeCasterTokenId) + ' ' + Utils.attrSafe(safeActionId),
+                backgroundColor: 'rgba(80,80,80,0.95)',
+                tooltip: String(tooltip || 'End concentration and remove any linked area marker')
+            });
+        },
+
         areaRollControlButtons(buildOptions) {
             const options = buildOptions || {};
             const actionId = String(options.actionId || '').trim();
@@ -3865,15 +3896,14 @@ const CombatAssistant = (() => {
                 tooltip: options.rollTooltip || 'Move the area marker, then roll every token inside it'
             })];
             if (options.isConcentration && casterTokenId) {
-                buttons.push(this.iconButtonHtml({
-                    iconHtml: '&#9201;&#65039;',
-                    label: 'End',
-                    command: '!combatAssistant conend ' + Utils.attrSafe(casterTokenId) + ' ' + Utils.attrSafe(actionId),
-                    backgroundColor: 'rgba(80,80,80,0.95)',
-                    tooltip: options.endTooltip || 'End concentration and remove the area marker'
-                }));
+                buttons.push(this.concentrationEndButtonHtml(actionId, casterTokenId, options.endTooltip));
             }
             return buttons;
+        },
+
+        smallGrayDescriptorHtml(contentHtml) {
+            const content = String(contentHtml || '').trim();
+            return content ? '<div style="padding-top:5px;color:rgb(170,170,170);font-size:10px;line-height:12px;text-align:center;">' + content + '</div>' : '';
         },
 
         iconButtonTableHtml(buttons, options) {
@@ -3894,7 +3924,7 @@ const CombatAssistant = (() => {
             }
             return (
                 '<table style="width:100%;border-collapse:collapse;table-layout:fixed;"><tbody>' + rows.join('') + '</tbody></table>' +
-                (footerHtml || footer ? '<div style="padding-top:5px;color:rgb(170,170,170);font-size:10px;line-height:12px;text-align:center;">' + (footerHtml || Utils.escapeHtml(footer)) + '</div>' : '')
+                this.smallGrayDescriptorHtml(footerHtml || (footer ? Utils.escapeHtml(footer) : ''))
             );
         },
 
@@ -3972,6 +4002,17 @@ const CombatAssistant = (() => {
             }, options.marker || '', { size: options.size || 40, fontSize: options.fontSize || '20px' });
         },
 
+        combatLogResultRowHtml(narrativeHtml, rollHtml, options) {
+            const safeOptions = options && typeof options === 'object' ? options : {};
+            const safeRollHtml = String(rollHtml || '');
+            const rollWidth = Math.max(34, Utils.toInt(safeOptions.rollWidth, 78));
+            const rollVertical = String(safeOptions.rollVertical || 'middle').trim() || 'middle';
+            return '<table style="width:100%;border-collapse:collapse;table-layout:fixed;"><tr>' +
+                '<td style="text-align:center;vertical-align:middle;font-size:14px;line-height:16px;">' + String(narrativeHtml || '') + '</td>' +
+                (safeRollHtml ? ('<td style="width:' + rollWidth + 'px;text-align:right;vertical-align:' + Utils.attrSafe(rollVertical) + ';white-space:nowrap;">' + safeRollHtml + '</td>') : '') +
+            '</tr></table>';
+        },
+
         attackPromptTitleHtml(result) {
             result = result || {};
             const imgsrc = String(result.tokenImgsrc || '').trim();
@@ -4007,7 +4048,7 @@ const CombatAssistant = (() => {
             const challengeValue = isSaveAttack ? (result.saveDc || result.attackTotal || 0) : (result.attackTotal || result.saveDc || 0);
             const damageValue = result.damageTotal || result.healTotal || 0;
             const topTooltip = isSaveAttack
-                ? ((CombatService.abilityNameToShortLabel(result.saveAbility || '') || 'SAVE') + ' Saving Throw DC ' + String(challengeValue))
+                ? ((Utils.abilityShortLabel(result.saveAbility || '') || 'SAVE') + ' Saving Throw DC ' + String(challengeValue))
                 : 'Attack Roll';
             return (
                 '<table style="width:100%;border-collapse:collapse;table-layout:fixed;">' +
@@ -4034,18 +4075,33 @@ const CombatAssistant = (() => {
             );
         },
 
-        showAttackDamagePrompt(result) {
+        showAttackDamagePrompt(result, options) {
             result = result || {};
+            const safeOptions = options && typeof options === 'object' ? options : {};
             if (result.effectType === 'healing' || result.isHealing) {
                 const healAmount = Math.max(0, Utils.toInt(result.healTotal || result.damageTotal, 0));
                 const isTempHealing = Utils.toBoolean(result.isTempHealing, false) || String(result.healMode || '').toLowerCase() === 'temp';
+                const titleResult = Object.assign({}, result, { damageTotal: healAmount, damageType: isTempHealing ? 'temp healing' : 'healing', attackTotal: 0 });
+                if (safeOptions.readOnly) {
+                    return Html.card({
+                        title: META.NAME,
+                        body: this.smallGrayDescriptorHtml(Utils.escapeHtml(String(safeOptions.note || 'Healing roll completed. The GM can apply it.'))),
+                        buildOptions: { titleHtml: this.attackPromptTitleHtml(titleResult) }
+                    });
+                }
+                const healingRolls = Array.isArray(result.damageRolls) ? result.damageRolls.filter(Boolean) : [];
+                const rollFormula = healingRolls.map((entry) => String(entry && entry.formula || '').trim()).filter(Boolean).join(' + ') || String(result.damageFormula || '').trim();
+                const rollDetail = healingRolls.map((entry) => String(entry && entry.detail || '').trim()).filter(Boolean).join('<br>') || rollFormula;
                 const payload = Utils.encodeJsonPayload({
                     type: 'heal',
                     mode: isTempHealing ? 'temp' : 'hp',
                     amount: healAmount,
                     sourceName: String(result.tokenName || result.characterName || 'Caster'),
                     sourceAction: String(result.attackName || 'Healing'),
-                    sourceImgsrc: String(result.tokenImgsrc || '')
+                    sourceImgsrc: String(result.tokenImgsrc || ''),
+                    sourceDescription: String(result.sourceDescription || ''),
+                    rollFormula,
+                    rollDetail
                 });
                 const healButton = this.iconButtonHtml({
                     iconHtml: isTempHealing ? '&#128151;' : '&#128154;',
@@ -4065,7 +4121,7 @@ const CombatAssistant = (() => {
                 return Html.card({
                     title: META.NAME,
                     body,
-                    buildOptions: { titleHtml: this.attackPromptTitleHtml(Object.assign({}, result, { damageTotal: healAmount, damageType: isTempHealing ? 'temp healing' : 'healing', attackTotal: 0 })) }
+                    buildOptions: { titleHtml: this.attackPromptTitleHtml(titleResult) }
                 });
             }
 
@@ -4074,7 +4130,7 @@ const CombatAssistant = (() => {
                 : [{ total: result.damageTotal, damageType: result.damageType || 'normal', formula: result.damageFormula || 'Roll20' }];
             const primaryDamage = damageRolls[0] || {};
             const challenge = Math.max(0, Utils.toInt(result.saveDc || result.attackTotal, 0));
-            const saveAbility = CombatService.normalizeAbilityName(result.saveAbility || '');
+            const saveAbility = Utils.normalizeAbilityName(result.saveAbility || '');
             const attackPayload = Utils.encodeJsonPayload({
                 type: 'damage',
                 mode: result.isSaveAttack || saveAbility ? 'save' : 'attack',
@@ -4094,7 +4150,9 @@ const CombatAssistant = (() => {
                 isConcentration: !!result.isConcentration,
                 lightInfo: result.lightInfo && result.lightInfo.hasLight ? result.lightInfo : { hasLight: false },
                 areaInfo: result.areaInfo && result.areaInfo.isArea ? result.areaInfo : { isArea: false },
-                areaOptions: result.areaOptions || R20.getAreaInfoOptions(result.areaInfo)
+                areaOptions: result.areaOptions || R20.getAreaInfoOptions(result.areaInfo),
+                casterTokenId: String(result.casterTokenId || result.sourceTokenId || '').trim(),
+                nativeActionRowId: String(result.nativeActionRowId || '').trim(),
             });
             const hitPayload = Utils.encodeJsonPayload({
                 type: 'damage',
@@ -4104,7 +4162,10 @@ const CombatAssistant = (() => {
                 damageRolls,
                 sourceName: String(result.tokenName || result.characterName || ''),
                 sourceAction: String(result.attackName || ''),
-                sourceImgsrc: String(result.tokenImgsrc || '')
+                sourceImgsrc: String(result.tokenImgsrc || ''),
+                isConcentration: !!result.isConcentration,
+                casterTokenId: String(result.casterTokenId || result.sourceTokenId || '').trim(),
+                nativeActionRowId: String(result.nativeActionRowId || '').trim(),
             });
             const missPayload = Utils.encodeJsonPayload({
                 type: 'damage',
@@ -4117,7 +4178,7 @@ const CombatAssistant = (() => {
             });
             const attackButton = this.iconButtonHtml({
                 iconHtml: result.isSaveAttack || saveAbility ? '&#127922;' : '&#9876;&#65039;',
-                label: result.isSaveAttack || saveAbility ? (CombatService.abilityNameToShortLabel(saveAbility) || 'SAVE') : 'Atk',
+                label: result.isSaveAttack || saveAbility ? (Utils.abilityShortLabel(saveAbility) || 'SAVE') : 'Atk',
                 command: '!combatAssistant deal ' + attackPayload + ((result.isSaveAttack || saveAbility) && RuntimeConfig.get('SHEET_2014_CA_ROLLS')
                     ? ' &#63;{2014 Roll Mode|Normal,normal|Advantage,advantage|Disadvantage,disadvantage}'
                     : ''),
@@ -4228,13 +4289,15 @@ const CombatAssistant = (() => {
             const safeTokenId = String(tokenId || '').trim();
             const safeAction = String(action || '').trim().toLowerCase();
             const isNarrativeAction = safeAction === 'dash' || safeAction === 'disengage' || safeAction === 'dodge';
-            const command = safeAction === 'combat'
-                ? ('!combatAssistant combat ' + Utils.attrSafe(safeTokenId))
+            const command = safeAction === 'combat' || safeAction === 'combat-special'
+                ? ('!combatAssistant ' + safeAction + ' ' + Utils.attrSafe(safeTokenId))
                 : (safeAction === 'spells'
                     ? ('!combatAssistant spells ' + Utils.attrSafe(safeTokenId))
-                    : (isNarrativeAction && safeTokenId
-                        ? ('!combatAssistant turnaction ' + safeAction + ' ' + Utils.attrSafe(safeTokenId))
-                        : ('!combatAssistant ' + safeAction)));
+                    : (safeAction === 'sheet' && safeTokenId
+                        ? ('!combatAssistant sheet ' + Utils.attrSafe(safeTokenId))
+                        : (isNarrativeAction && safeTokenId
+                            ? ('!combatAssistant turnaction ' + safeAction + ' ' + Utils.attrSafe(safeTokenId))
+                            : ('!combatAssistant ' + safeAction))));
             return this.compactSettingButtonHtml({
                 label: String(label || ''),
                 command,
@@ -4248,10 +4311,16 @@ const CombatAssistant = (() => {
         buildTurnActionsHtml(info, options) {
             const opts = options || {};
             if ((!RuntimeConfig.get('HANDLE_ACTIONS') && !opts.forceActions) || !info || !info.tokenId) return '';
+            const secondaryButton = opts.compactSheet === true
+                ? this.turnActionButtonHtml(info.tokenId, 'Disen.', 'disengage', { tooltip: 'Take the Disengage action', backgroundColor: 'rgba(45,45,45,0.95)' })
+                : this.turnActionButtonHtml(info.tokenId, 'Special', 'combat-special', { tooltip: 'Open Special Actions', backgroundColor: 'rgba(45,105,175,0.95)' });
+            const centerButton = opts.compactSheet === true
+                ? this.turnActionButtonHtml(info.tokenId, 'Dodge', 'dodge', { tooltip: 'Take the Dodge action', backgroundColor: 'rgba(45,45,45,0.95)' })
+                : this.turnActionButtonHtml(info.tokenId, 'C. Sheet', 'sheet', { tooltip: 'Open Compact Sheet', backgroundColor: 'rgba(190,155,30,0.75)' });
             const buttons = [
                 this.turnActionButtonHtml(info.tokenId, 'Dash', 'dash', { tooltip: 'Take the Dash action', backgroundColor: 'rgba(45,45,45,0.95)' }),
-                this.turnActionButtonHtml(info.tokenId, 'Disen.', 'disengage', { tooltip: 'Take the Disengage action', backgroundColor: 'rgba(45,45,45,0.95)' }),
-                this.turnActionButtonHtml(info.tokenId, 'Dodge', 'dodge', { tooltip: 'Take the Dodge action', backgroundColor: 'rgba(45,45,45,0.95)' }),
+                secondaryButton,
+                centerButton,
                 this.turnActionButtonHtml(info.tokenId, 'Combat', 'combat', { tooltip: 'List attacks from this character sheet', backgroundColor: 'rgba(105,35,35,0.95)' }),
                 this.turnActionButtonHtml(info.tokenId, 'Spells', 'spells', { tooltip: 'Open combat spells', backgroundColor: 'rgba(65,55,120,0.95)' })
             ];
@@ -4388,7 +4457,7 @@ const CombatAssistant = (() => {
             const profiles = skillProfiles || {};
             const ordered = Object.keys(SKILL_DEFINITIONS).map((skill) => profiles[skill] || Object.assign({ skill }, SKILL_DEFINITIONS[skill]));
             const columns = [ordered.slice(0, 6), ordered.slice(6, 12), ordered.slice(12, 18)];
-            const box = (entries) => '<div style="height:140px;border:1px solid rgb(235,215,140);border-radius:8px;padding:2px;box-sizing:border-box;overflow:hidden;">' +
+            const box = (entries) => '<div style="height:140px;border:1px solid rgb(235,215,140);border-radius:8px;background:rgba(128,128,128,0.15);padding:2px;box-sizing:border-box;overflow:hidden;">' +
                 '<table style="width:100%;border-collapse:collapse;table-layout:fixed;"><tbody>' +
                     this.characterSheetSkillHeaderHtml() +
                     entries.map((entry) => this.characterSheetSkillRowHtml(entry)).join('') +
@@ -4403,7 +4472,7 @@ const CombatAssistant = (() => {
 
         buildCharacterSheet(info, abilityProfiles, skillProfiles) {
             const profiles = abilityProfiles || {};
-            const buildSide = (entries) => '<div style="border:1px solid rgb(235,215,140);border-radius:8px;padding:2px;box-sizing:border-box;overflow:hidden;">' +
+            const buildSide = (entries) => '<div style="border:1px solid rgb(235,215,140);border-radius:8px;background:rgba(128,128,128,0.15);padding:2px;box-sizing:border-box;overflow:hidden;">' +
                 '<table style="width:100%;border-collapse:collapse;table-layout:fixed;"><tbody>' +
                     this.characterSheetAbilityHeaderHtml() +
                     entries.map((entry) => this.characterSheetAbilityRowHtml(entry[0], entry[1])).join('') +
@@ -4419,10 +4488,10 @@ const CombatAssistant = (() => {
                 ['Wisdom', profiles.wisdom],
                 ['Charisma', profiles.charisma]
             ]);
-            const actions = this.buildTurnActionsHtml(info, { forceActions: true });
+            const actions = this.buildTurnActionsHtml(info, { forceActions: true, compactSheet: true });
             const quickBox = (label, value, command, labelColor, valueColor, tooltip, marker) => {
                 const valueHtml = this.characterSheetRollLinkHtml(value, command, valueColor, marker, tooltip || label);
-                return '<div style="height:16px;border:1px solid rgb(235,215,140);border-radius:8px;padding:0;box-sizing:border-box;overflow:hidden;">' +
+                return '<div style="height:16px;border:1px solid rgb(235,215,140);border-radius:8px;background:rgba(128,128,128,0.15);padding:0;box-sizing:border-box;overflow:hidden;">' +
                     '<table style="width:100%;height:16px;border-collapse:collapse;table-layout:fixed;"><tbody><tr>' +
                         '<td style="width:40%;height:16px;text-align:left;vertical-align:middle;padding:2px;color:' + labelColor + ';font-size:10px;line-height:12px;font-weight:700;white-space:nowrap;">' + Utils.escapeHtml(label) + '</td>' +
                         '<td style="width:20%;height:16px;padding:0;"></td>' +
@@ -4465,30 +4534,6 @@ const CombatAssistant = (() => {
             });
         },
 
-        attackDamageButtonHtml(attack) {
-            const damage = attack && Array.isArray(attack.damage) && attack.damage.length ? attack.damage[0] : null;
-            if (!damage) {
-                return '<span title="No damage formula found" style="display:inline-flex;align-items:center;justify-content:center;width:40px;height:40px;box-sizing:border-box;border:1px solid rgba(255,255,255,0.45);border-radius:4px;background:rgba(55,55,55,0.75);color:rgb(165,165,165);font-size:9px;line-height:10px;text-align:center;vertical-align:middle;">-</span>';
-            }
-            const formula = String(damage.formula || '-').trim() || '-';
-            const damageType = String(damage.damageType || 'Damage').trim() || 'Damage';
-            const allDamage = (attack.damage || []).map((entry) => String(entry.formula || '-') + (entry.damageType ? (' ' + entry.damageType) : '')).join(' + ');
-            return '<span title="' + Utils.attrSafe(allDamage) + '" style="display:inline-block;width:40px;height:40px;box-sizing:border-box;border:1px solid rgba(255,255,255,0.55);border-radius:4px;background:rgba(95,45,45,0.92);color:rgb(255,255,255);text-align:center;vertical-align:middle;overflow:hidden;font-family:Arial,Helvetica,sans-serif;">' +
-                '<strong><span style="display:block;height:21px;line-height:21px;font-size:10px;white-space:nowrap;overflow:hidden;">' + Utils.escapeHtml(formula) + '</span></strong>' +
-                '<span style="display:block;height:17px;line-height:14px;padding:0 1px;font-size:8px;white-space:nowrap;overflow:hidden;">' + Utils.escapeHtml(damageType) + '</span>' +
-            '</span>';
-        },
-
-        attackRollButtonHtml(attack) {
-            const bonus = String(attack && attack.attackBonusLabel || '+0');
-            const command = this.sanitizeCommand(attack && attack.rollCommand || '#');
-            const breakdown = String(attack && attack.attackBreakdown || bonus);
-            return '<a href="' + command + '" title="' + Utils.attrSafe(breakdown) + '" style="display:inline-block;width:40px;height:40px;box-sizing:border-box;text-align:center;text-decoration:none;border:1px solid rgba(255,255,255,0.75);border-radius:4px;background:rgba(0,105,160,0.95);color:rgb(255,255,255);font-family:Arial,Helvetica,sans-serif;overflow:hidden;vertical-align:middle;">' +
-                '<strong><span style="display:block;height:27px;line-height:27px;font-size:17px;text-align:center;">' + Utils.escapeHtml(bonus) + '</span></strong>' +
-                '<strong><span style="display:block;height:12px;line-height:10px;font-size:9px;text-align:center;">Roll</span></strong>' +
-            '</a>';
-        },
-
         combatAttackDamageEntries(attack) {
             return attack && Array.isArray(attack.damage)
                 ? attack.damage.filter((entry) => {
@@ -4503,12 +4548,22 @@ const CombatAssistant = (() => {
         },
 
         combatAttackHasDamage(attack) {
-            return !!(this.combatAttackDamageEntries(attack).length && String(attack && attack.damageCommand || '').trim());
+            return !!(this.combatAttackDamageEntries(attack).length && (String(attack && attack.damageCommand || '').trim() || (attack && attack.caHealingOnly === true)));
         },
 
-        combatAttackDamageButtonHtml(attack) {
+        combatAttackDamageButtonHtml(attack, options) {
             const damageEntries = this.combatAttackDamageEntries(attack);
-            const command = String(attack && attack.damageCommand || '').trim();
+            const opts = options && typeof options === 'object' ? options : {};
+            let command = String(attack && attack.damageCommand || '').trim();
+            if (attack && attack.caHealingOnly === true) {
+                const legacyTrait = String(attack.caHealingRoute || '') === 'legacy-trait';
+                command = '!combatAssistant ' + (legacyTrait ? 'legacyspecial' : 'combatheal') + ' ' + Utils.encodeJsonPayload({
+                    characterId: String(attack.characterId || '').trim(),
+                    actionId: String(attack.id || '').trim(),
+                    traitId: legacyTrait ? String(attack.legacyTraitId || attack.id || '').trim() : '',
+                    tokenId: String(opts.tokenId || '').trim()
+                });
+            }
             if (!damageEntries.length || !command) return '';
             const allDamage = damageEntries.map((entry) => {
                 const formula = String(entry.formula || '').trim();
@@ -4529,76 +4584,196 @@ const CombatAssistant = (() => {
             return '<a href="' + Utils.attrSafe(command) + '" title="' + Utils.attrSafe('Roll damage: ' + allDamage) + '" style="' + style + '">' + rows + '</a>';
         },
 
-        combatAttackRollButtonHtml(attack) {
-            const bonus = String(attack && attack.attackBonusLabel || '+0');
-            const numericBonus = Math.abs(Utils.toInt(attack && attack.attackBonus, Utils.toInt(bonus, 0)));
-            const bonusFontSize = numericBonus > 9 ? 14 : 16;
-            const saveDc = Math.max(0, Utils.toInt(attack && attack.saveDc, 0));
-            const saveAbility = CombatService.normalizeAbilityName(attack && attack.saveAbility || '');
-            const saveAbilityLabel = CombatService.abilityNameToShortLabel(saveAbility) || (saveAbility ? saveAbility.slice(0, 3).toUpperCase() : '');
-            const isSave = saveDc > 0 && !!saveAbilityLabel;
-            const command = String(attack && attack.rollCommand || '').trim();
-            const breakdown = isSave
-                ? ('DC ' + String(saveDc) + ' ' + saveAbilityLabel + ' Saving Throw')
-                : (String(attack && attack.attackBreakdown || bonus).trim() || bonus);
-            const tag = command ? 'a' : 'span';
-            const href = command ? (' href="' + Utils.attrSafe(command) + '"') : '';
-            const disabledTitle = command ? breakdown : (breakdown + ' - Roll unavailable');
-            const topText = isSave ? String(saveDc) : bonus;
-            const bottomText = isSave ? saveAbilityLabel : 'Roll';
-            const topFontSize = isSave ? 15 : bonusFontSize;
-            const bottomFontSize = isSave ? 10 : 10;
-            return '<' + tag + href + ' title="' + Utils.attrSafe(disabledTitle) + '" style="' +
+        combatSmallActionButtonHtml(topText, bottomText, command, title, options) {
+            const opts = options && typeof options === 'object' ? options : {};
+            const safeCommand = String(command || '').trim();
+            const tag = safeCommand ? 'a' : 'span';
+            const href = safeCommand ? (' href="' + Utils.attrSafe(safeCommand) + '"') : '';
+            const safeTitle = String(title || '').trim() || String(bottomText || 'Action');
+            const topFontSize = Math.max(8, Utils.toInt(opts.topFontSize, 15));
+            const bottomFontSize = Math.max(7, Utils.toInt(opts.bottomFontSize, 10));
+            return '<' + tag + href + ' title="' + Utils.attrSafe(safeCommand ? safeTitle : (safeTitle + ' - unavailable')) + '" style="' +
                 'display:inline-flex;flex-direction:column;align-items:center;justify-content:center;' +
                 'width:25px;height:25px;min-width:25px;min-height:25px;padding:0;margin:0;' +
                 'box-sizing:border-box;border:1px solid rgba(255,255,255,0.70);border-radius:4px;' +
                 'background:rgba(54,54,54,0.50);color:rgb(255,255,255);text-decoration:none;' +
                 'text-align:center;vertical-align:middle;overflow:hidden;font-family:Arial,Helvetica,sans-serif;">' +
-                    '<b><span style="display:block;height:15px;line-height:15px;font-size:' + String(topFontSize) + 'px;font-weight:900;white-space:nowrap;color:rgb(255,255,255);">' + Utils.escapeHtml(topText) + '</span></b>' +
-                    '<b><span style="display:block;height:9px;line-height:9px;font-size:' + String(bottomFontSize) + 'px;font-weight:900;white-space:nowrap;color:rgb(255,255,255);">' + Utils.escapeHtml(bottomText) + '</span></b>' +
+                    '<b><span style="display:block;height:15px;line-height:15px;font-size:' + String(topFontSize) + 'px;font-weight:900;white-space:nowrap;color:rgb(255,255,255);">' + Utils.escapeHtml(String(topText || '')) + '</span></b>' +
+                    '<b><span style="display:block;height:9px;line-height:9px;font-size:' + String(bottomFontSize) + 'px;font-weight:900;white-space:nowrap;color:rgb(255,255,255);">' + Utils.escapeHtml(String(bottomText || '')) + '</span></b>' +
             '</' + tag + '>';
         },
 
-        buildCombatAttacksCard(characterName, attacks) {
+        combatAttackRollButtonHtml(attack) {
+            const bonus = String(attack && attack.attackBonusLabel || '+0');
+            const numericBonus = Math.abs(Utils.toInt(attack && attack.attackBonus, Utils.toInt(bonus, 0)));
+            const bonusFontSize = numericBonus > 9 ? 14 : 16;
+            const saveDc = Math.max(0, Utils.toInt(attack && attack.saveDc, 0));
+            const saveAbility = Utils.normalizeAbilityName(attack && attack.saveAbility || '');
+            const saveAbilityLabel = Utils.abilityShortLabel(saveAbility) || (saveAbility ? saveAbility.slice(0, 3).toUpperCase() : '');
+            const isSave = saveDc > 0 && !!saveAbilityLabel;
+            const command = String(attack && attack.rollCommand || '').trim();
+            const breakdown = isSave
+                ? ('DC ' + String(saveDc) + ' ' + saveAbilityLabel + ' Saving Throw')
+                : (String(attack && attack.attackBreakdown || bonus).trim() || bonus);
+            return this.combatSmallActionButtonHtml(
+                isSave ? String(saveDc) : bonus,
+                isSave ? saveAbilityLabel : 'Roll',
+                command,
+                breakdown,
+                { topFontSize: isSave ? 15 : bonusFontSize, bottomFontSize: 10 }
+            );
+        },
+
+        combatActionSendButtonHtml(action, options) {
+            const opts = options && typeof options === 'object' ? options : {};
+            let command = String(action && action.sendCommand || '').trim();
+            if (action && action.legacyTraitId) {
+                command = '!combatAssistant legacyspecial ' + Utils.encodeJsonPayload({
+                    characterId: String(action.characterId || '').trim(),
+                    actionId: String(action.id || '').trim(),
+                    traitId: String(action.legacyTraitId || action.id || '').trim(),
+                    tokenId: String(opts.tokenId || '').trim()
+                });
+            }
+            return this.combatSmallActionButtonHtml(
+                '➤',
+                'Send',
+                command,
+                'Send ' + String(action && action.name || 'action') + ' to chat',
+                { topFontSize: 14, bottomFontSize: 9 }
+            );
+        },
+
+        descriptionTooltipText(value) {
+            return Utils.stripHtml(String(value || '')).replace(/\s+/g, ' ').trim();
+        },
+
+        combatMenuRowHtml(name, detailsHtml, middleControlHtml, rightControlHtml, hasSeparator, nameColor, description) {
+            const safeNameColor = String(nameColor || 'rgb(232,220,180)').trim() || 'rgb(232,220,180)';
+            const tooltip = this.descriptionTooltipText(description);
+            const nameTitle = tooltip ? (' title="' + Utils.attrSafe(tooltip) + '"') : '';
+            const nameCursor = tooltip ? 'cursor:help;' : '';
+            return '<table style="width:100%;border-collapse:collapse;table-layout:fixed;' + (hasSeparator ? 'border-bottom:1px solid rgba(255,255,255,0.12);' : '') + '"><tbody><tr>' +
+                '<td style="width:70%;text-align:left;vertical-align:middle;padding:4px 3px 4px 0;white-space:normal;overflow-wrap:normal;word-break:normal;">' +
+                    '<div' + nameTitle + ' style="color:' + Utils.attrSafe(safeNameColor) + ';font-size:11px;line-height:13px;font-weight:700;white-space:normal;overflow-wrap:normal;word-break:normal;' + nameCursor + '">' + Utils.escapeHtml(String(name || 'Action')) + '</div>' +
+                    (detailsHtml ? ('<div style="padding-top:1px;color:rgb(255,255,255);font-size:9px;line-height:11px;font-weight:400;white-space:normal;">' + detailsHtml + '</div>') : '') +
+                '</td>' +
+                '<td style="width:20%;text-align:center;vertical-align:middle;padding:0;">' + String(middleControlHtml || '') + '</td>' +
+                '<td style="width:10%;text-align:center;vertical-align:middle;padding:0;">' + String(rightControlHtml || '') + '</td>' +
+            '</tr></tbody></table>';
+        },
+
+        specialActionTitleHtml(result, fallbackTitle) {
+            const source = result && typeof result === 'object' ? result : {};
+            const revealSource = RuntimeConfig.get('REVEAL_DAMAGE_SOURCE');
+            const actionName = revealSource ? String(source.attackName || fallbackTitle || 'Special Action').trim() : String(fallbackTitle || 'Special Action').trim();
+            const image = this.chatTokenImageHtml(String(source.tokenImgsrc || '').trim(), 24, '', 3) || '<span style="display:block;width:24px;height:24px;"></span>';
+            return '<table style="width:100%;border-collapse:collapse;table-layout:fixed;"><tbody><tr>' +
+                '<td style="width:28px;text-align:left;vertical-align:middle;padding:0;">' + image + '</td>' +
+                '<td style="text-align:center;vertical-align:middle;font-size:17px;line-height:19px;font-weight:900;white-space:normal;">' + Utils.escapeHtml(actionName || 'Special Action') + '</td>' +
+                '<td style="width:28px;text-align:right;vertical-align:middle;padding:0;"></td>' +
+            '</tr></tbody></table>';
+        },
+
+        specialActionNarrativeHtml(result, description, options) {
+            const source = result && typeof result === 'object' ? result : {};
+            const opts = options && typeof options === 'object' ? options : {};
+            const revealNames = RuntimeConfig.get('REVEAL_TOKEN_NAMES_IN_LOG');
+            const revealSource = RuntimeConfig.get('REVEAL_DAMAGE_SOURCE');
+            const sourceLabel = revealNames ? String(source.tokenName || source.characterName || 'Source').trim() : 'Source';
+            const sourceHtml = Html.span(Utils.escapeHtml(sourceLabel || 'Source'), 'color:' + CONFIG.DEFAULT_TEXT_CHARACTER_COLOR + ';font-weight:900;');
+            const actionName = String(source.attackName || 'Special Action').trim() || 'Special Action';
+            const actionHtml = Html.span(Utils.escapeHtml(actionName), 'color:rgb(245,220,80);font-weight:900;');
+            const lead = revealSource
+                ? (sourceHtml + ' uses ' + actionHtml + (opts.healing ? ' and rolls healing.' : '.'))
+                : (sourceHtml + (opts.healing ? ' rolls healing.' : ' uses a special action.'));
+            const tooltip = this.descriptionTooltipText(description);
+            const desc = revealSource && tooltip
+                ? '<div style="padding-top:3px;color:rgb(205,205,205);font-size:10px;line-height:12px;">' + Utils.escapeHtml(tooltip) + '</div>'
+                : '';
+            return '<div style="font-size:12px;line-height:14px;">' + lead + '</div>' + desc;
+        },
+
+        sendSpecialActionUse(result, description) {
+            const source = result && typeof result === 'object' ? result : {};
+            this.sendCombatLogMessage('Special Action', this.specialActionNarrativeHtml(source, description, { healing: false }), 'normal', { titleHtml: this.specialActionTitleHtml(source, 'Special Action') });
+        },
+
+        combatSpecialSectionHtml(definition, entries, tokenId) {
+            const safeDefinition = definition && typeof definition === 'object' ? definition : {};
+            const safeEntries = (Array.isArray(entries) ? entries : []).filter((entry) => entry && String(entry.name || '').trim());
+            if (!safeEntries.length) return '';
+            const rows = safeEntries.map((action, index) => {
+                const hasAttackRoll = action.hasAttackRoll === true;
+                const hasEffect = !hasAttackRoll && this.combatAttackHasDamage(action);
+                let middleControl = '';
+                let rightControl = '';
+                let detailLabel = String(action.detailLabel || '').trim();
+                if (hasAttackRoll) {
+                    middleControl = this.combatAttackRollButtonHtml(action);
+                    detailLabel = String(action.attackTypeLabel || action.attackType || 'Attack').trim() || 'Attack';
+                } else if (hasEffect) {
+                    middleControl = this.combatAttackDamageButtonHtml(action, { tokenId });
+                    if (!detailLabel) detailLabel = String(action.effectLabel || 'Damage').trim() || 'Damage';
+                } else {
+                    rightControl = this.combatActionSendButtonHtml(action, { tokenId });
+                    if (!detailLabel) detailLabel = String(action.actionType || 'Action').trim() || 'Action';
+                }
+                const details = Utils.escapeHtml(detailLabel) +
+                    (action.abilityLabel ? (' <span style="color:rgb(155,155,155);font-weight:700;">[' + Utils.escapeHtml(String(action.abilityLabel)) + ']</span>') : '') +
+                    (hasAttackRoll && action.rangeLabel ? (' <span style="color:rgb(155,155,155);font-weight:700;">[' + Utils.escapeHtml(String(action.rangeLabel)) + ']</span>') : '');
+                return this.combatMenuRowHtml(action.name, details, middleControl, rightControl, index < safeEntries.length - 1, safeDefinition.nameColor, action.description);
+            }).join('');
+            return '<div style="padding-top:5px;">' +
+                '<div style="padding:0 0 2px 0;text-align:center;color:' + Utils.attrSafe(safeDefinition.nameColor) + ';font-size:11px;line-height:13px;font-weight:900;">' + Utils.escapeHtml(safeDefinition.title || 'Actions') + '</div>' +
+                '<div style="border-top:1px solid rgba(255,255,255,0.22);margin:0 0 1px 0;"></div>' +
+                rows +
+            '</div>';
+        },
+
+        buildCombatCard(characterName, combatData, options) {
             const safeName = String(characterName || 'Character').trim() || 'Character';
-            const safeAttacks = (Array.isArray(attacks) ? attacks : [])
-                .filter((attack) => attack && String(attack.name || '').trim());
-            const rows = safeAttacks.map((attack, index) => {
-                const name = String(attack.name || '').trim();
+            const data = Array.isArray(combatData) ? { attacks: combatData } : (combatData && typeof combatData === 'object' ? combatData : {});
+            const opts = options && typeof options === 'object' ? options : {};
+            const viewKey = normalizeCombatViewKey(opts.view);
+            const safeAttacks = (Array.isArray(data.attacks) ? data.attacks : []).filter((attack) => attack && String(attack.name || '').trim());
+
+            const attackRows = viewKey === 'combat' ? safeAttacks.map((attack, index) => {
                 const ability = String(attack.abilityLabel || '').trim();
                 const attackType = String(attack.attackTypeLabel || attack.attackType || 'Attack').trim() || 'Attack';
                 const rangeLabel = /^(?:Ranged Attack|Ranged Save)$/i.test(attackType) ? String(attack.rangeLabel || '').trim() : '';
-                const separator = index < safeAttacks.length - 1
-                    ? 'border-bottom:1px solid rgba(255,255,255,0.12);'
-                    : '';
+                const details = Utils.escapeHtml(attackType) +
+                    (ability ? (' <span style="color:rgb(155,155,155);font-weight:700;">[' + Utils.escapeHtml(ability) + ']</span>') : '') +
+                    (rangeLabel ? (' <span style="color:rgb(155,155,155);font-weight:700;">[' + Utils.escapeHtml(rangeLabel) + ']</span>') : '');
                 const hasDamage = this.combatAttackHasDamage(attack);
-                const controlsWidth = hasDamage ? 79 : 25;
-                const controlsCellWidth = hasDamage ? 83 : 29;
-                return '<table style="width:100%;border-collapse:collapse;table-layout:fixed;' + separator + '"><tbody><tr>' +
-                    '<td style="text-align:left;vertical-align:middle;padding:4px 3px 4px 0;white-space:normal;overflow-wrap:normal;word-break:normal;">' +
-                        '<div style="color:rgb(232,220,180);font-size:11px;line-height:13px;font-weight:700;white-space:normal;overflow-wrap:normal;word-break:normal;">' +
-                            Utils.escapeHtml(name) +
-                        '</div>' +
-                        '<div style="padding-top:1px;color:rgb(255,255,255);font-size:9px;line-height:11px;font-weight:400;white-space:normal;">' +
-                            Utils.escapeHtml(attackType) +
-                            (ability ? (' <span style="color:rgb(155,155,155);font-weight:700;">[' + Utils.escapeHtml(ability) + ']</span>') : '') +
-                            (rangeLabel ? (' <span style="color:rgb(155,155,155);font-weight:700;">[' + Utils.escapeHtml(rangeLabel) + ']</span>') : '') +
-                        '</div>' +
-                    '</td>' +
-                    '<td style="width:' + String(controlsCellWidth) + 'px;text-align:right;vertical-align:middle;padding:0 0 0 4px;">' +
-                        '<table style="width:' + String(controlsWidth) + 'px;border-collapse:collapse;table-layout:fixed;margin-left:auto;"><tbody><tr>' +
-                            (hasDamage ? ('<td style="width:50px;height:25px;padding:0;text-align:center;vertical-align:middle;">' + this.combatAttackDamageButtonHtml(attack) + '</td><td style="width:4px;height:25px;padding:0;"></td>') : '') +
-                            '<td style="width:25px;height:25px;padding:0;text-align:center;vertical-align:middle;">' + this.combatAttackRollButtonHtml(attack) + '</td>' +
-                        '</tr></tbody></table>' +
-                    '</td>' +
-                '</tr></tbody></table>';
-            }).join('');
-            const body = rows || '<div style="text-align:center;color:rgb(170,170,170);font-size:11px;line-height:14px;padding:5px 0;">No usable attacks were found on this character sheet.</div>';
+                return this.combatMenuRowHtml(
+                    attack.name,
+                    details,
+                    hasDamage ? this.combatAttackDamageButtonHtml(attack) : '',
+                    this.combatAttackRollButtonHtml(attack),
+                    index < safeAttacks.length - 1,
+                    '',
+                    attack.description
+                );
+            }).join('') : '';
+
+            const specialSections = viewKey === 'combat-special'
+                ? COMBAT_SPECIAL_SECTION_KEYS.map((sectionKey) => {
+                    const definition = COMBAT_SPECIAL_SECTIONS[sectionKey];
+                    return this.combatSpecialSectionHtml(definition, data[definition.dataKey], opts.tokenId);
+                }).filter(Boolean).join('')
+                : '';
+            const content = viewKey === 'combat' ? attackRows : specialSections;
+            const emptyText = viewKey === 'combat'
+                ? 'No usable attacks were found on this character sheet.'
+                : 'No usable special actions were found on this character sheet.';
+            const titleSuffix = viewKey === 'combat' ? ' Combat' : ' Special Actions';
+            const body = content || '<div style="text-align:center;color:rgb(170,170,170);font-size:11px;line-height:14px;padding:5px 0;">' + Utils.escapeHtml(emptyText) + '</div>';
             return Html.card({
-                title: safeName + ' Combat',
+                title: safeName + titleSuffix,
                 body,
                 buildOptions: {
-                    titleHtml: Html.span(Utils.escapeHtml(safeName), 'color:' + CONFIG.DEFAULT_TEXT_CHARACTER_COLOR + ';font-weight:900;') + Html.span(' Combat', 'color:rgb(235,235,235);font-weight:900;'),
+                    titleHtml: Html.span(Utils.escapeHtml(safeName), 'color:' + CONFIG.DEFAULT_TEXT_CHARACTER_COLOR + ';font-weight:900;') + Html.span(titleSuffix, 'color:rgb(235,235,235);font-weight:900;'),
                     titleColor: 'rgb(235,235,235)',
                     bodyAlign: 'left'
                 }
@@ -4797,7 +4972,11 @@ const CombatAssistant = (() => {
                     //   Range - Instant/Conc./Duration - School - Preparation
                     const dot = '<span style="color:rgb(95,95,95);padding:0 3px;">&middot;</span>';
                     const preparationStatus = this.spellPreparationStatusHtml(spell, data.sheetVersion);
-                    const row1 = Utils.escapeHtml(String(spell.name || 'Spell')) +
+                    const spellDescription = this.descriptionTooltipText(spell.description);
+                    const spellNameHtml = spellDescription
+                        ? ('<span title="' + Utils.attrSafe(spellDescription) + '" style="cursor:help;">' + Utils.escapeHtml(String(spell.name || 'Spell')) + '</span>')
+                        : Utils.escapeHtml(String(spell.name || 'Spell'));
+                    const row1 = spellNameHtml +
                         (components ? (dot + '<span style="font-size:9px;">' + components + '</span>') : '') +
                         (castingTime ? (dot + this.spellCastingTimeHtml(spell.castingTime)) : '') +
                         (ritual ? (dot + '<span style="color:rgb(75,160,235);font-size:9px;font-weight:900;">Ritual</span>') : '');
@@ -5059,14 +5238,7 @@ const CombatAssistant = (() => {
 
         showConfigMenu(target) {
             const settings = RuntimeConfig.getAll();
-            const fields = RuntimeConfig.fields();
-
-            const rows = fields.map((field) => {
-                if (field.type === 'section') {
-                    return '<tr><td colspan="2" style="padding:8px 0 3px 0;text-align:center;color:rgb(165,165,165);font-size:13px;line-height:15px;font-weight:700;">' +
-                        Utils.escapeHtml(field.label || '') +
-                    '</td></tr>';
-                }
+            const rows = RuntimeConfig.fields().map((field) => {
                 const value = settings[field.key];
                 let button = '';
                 if (field.type === 'action') {
@@ -5080,7 +5252,7 @@ const CombatAssistant = (() => {
                     button = this.compactSettingButtonHtml({
                         label: value ? 'ON' : 'OFF',
                         command: '!combatAssistant toggle ' + Utils.attrSafe(field.key),
-                        tooltip: 'Toggle ' + field.label,
+                        tooltip: field.tip || ('Toggle ' + field.label),
                         backgroundColor: value ? 'rgba(20,115,55,0.95)' : 'rgba(120,40,40,0.95)'
                     });
                 } else if (field.type === 'bar' || field.type === 'bar0') {
@@ -5088,27 +5260,28 @@ const CombatAssistant = (() => {
                     button = this.compactSettingButtonHtml({
                         label: value,
                         command: '!combatAssistant set ' + Utils.attrSafe(field.key) + ' &#63;{' + Utils.attrSafe(field.label) + '|' + opts + '}',
-                        tooltip: 'Edit ' + field.label
+                        tooltip: field.tip || ('Edit ' + field.label)
                     });
                 } else if (field.type === 'percent' || field.type === 'number') {
                     button = this.compactSettingButtonHtml({
                         label: String(value || 0),
                         command: '!combatAssistant set ' + Utils.attrSafe(field.key) + ' &#63;{' + Utils.attrSafe(field.label) + '|' + Utils.attrSafe(String(value || 0)) + '}',
-                        tooltip: 'Edit ' + field.label
+                        tooltip: field.tip || ('Edit ' + field.label)
                     });
                 } else {
                     button = this.compactSettingButtonHtml({
                         label: 'EDIT',
                         command: '!combatAssistant set ' + Utils.attrSafe(field.key) + ' &#63;{' + Utils.attrSafe(field.label) + '|' + Utils.attrSafe(String(value || '').replace(/\|/g, ' ')) + '}',
-                        tooltip: 'Edit ' + field.label
+                        tooltip: field.tip || ('Edit ' + field.label)
                     });
                 }
-                const displayValue = field.type === 'boolean'
-                    ? (value ? 'ON' : 'OFF')
-                    : String(value === undefined || value === null || value === '' ? '-' : value);
+                const sectionRow = field.section
+                    ? '<tr><td colspan="2" style="padding:7px 2px 3px 2px;border-bottom:1px solid rgba(125,125,125,0.55);color:rgb(245,220,80);font-size:12px;font-weight:700;">' + Utils.escapeHtml(field.section) + '</td></tr>'
+                    : '';
                 return (
+                    sectionRow +
                     '<tr>' +
-                        '<td title="' + Utils.attrSafe(field.tip || field.label) + '" style="text-align:left;vertical-align:middle;padding:2px 2px 2px 2px;color:rgb(225,225,225);font-size:12px;font-weight:700;white-space:nowrap;">' + Utils.escapeHtml(field.label) + '</td>' +
+                        '<td title="' + Utils.attrSafe(field.tip || field.label) + '" style="text-align:left;vertical-align:middle;padding:2px;color:rgb(225,225,225);font-size:12px;font-weight:700;white-space:normal;line-height:13px;cursor:help;">' + Utils.escapeHtml(field.label) + '</td>' +
                         '<td style="width:40px;text-align:right;vertical-align:middle;padding:2px 0;">' + button + '</td>' +
                     '</tr>'
                 );
@@ -5224,6 +5397,7 @@ const CombatAssistant = (() => {
                         helpLine('!ca player-init', 'Requests the native sheet initiative roll when CA initiative rolls are OFF; otherwise Combat Assistant rolls it. The result is tracked in Turn Order.', 'player-init') +
                         helpLine('!ca combat', 'Shows the attack list for the selected token.', 'combat') +
                         helpLine('!ca combat &lt;sheet name&gt;', 'Shows the attack list for a character sheet you can access.') +
+                        helpLine('!ca combat-special', 'Shows Bonus Actions, Reactions, Free Actions, Legendary Actions, and Mythic Actions by section when the sheet exposes them.') +
                         helpLine('!ca spells', 'Shows the spell list for the selected token.', 'spells') +
                         helpLine('!ca spells &lt;sheet name&gt;', 'Shows the spell list for a character sheet you can access.') +
                         helpLine('!ca dash', 'Declares Dash for the selected token. During its active turn, Dash also increases its Movement Tracker allowance.', 'dash') +
@@ -5275,6 +5449,7 @@ const CombatAssistant = (() => {
                     helpLine('!ca player-init', 'Requests the native sheet initiative roll when CA initiative rolls are OFF; otherwise Combat Assistant rolls it. The result is tracked in Turn Order.', 'player-init') +
                     helpLine('!ca combat', 'Shows the attack list for the selected token.', 'combat') +
                     helpLine('!ca combat &lt;sheet name&gt;', 'Shows the attack list for the named character sheet.') +
+                    helpLine('!ca combat-special', 'Shows Bonus Actions, Reactions, Free Actions, Legendary Actions, and Mythic Actions by section when the sheet exposes them.') +
                     helpLine('!ca spells', 'Shows the spell list for the selected token.', 'spells') +
                     helpLine('!ca spells &lt;sheet name&gt;', 'Shows the spell list for the named character sheet.') +
                     helpLine('!ca dash', 'Declares Dash for the selected token. During its active turn, Dash also increases its Movement Tracker allowance.', 'dash') +
@@ -5359,16 +5534,16 @@ const CombatAssistant = (() => {
             if (result.save && result.save.used) {
                 const roll = result.save;
                 const outcome = roll.success ? ' succeeds' : ' fails';
-                const ability = CombatService.abilityNameToShortLabel(roll.ability) || 'SAVE';
+                const ability = Utils.abilityShortLabel(roll.ability) || 'SAVE';
                 const badge = this.savingThrowBadgesHtml(roll, ability);
                 const damageParts = this.buildDamagePartsHtml(result);
                 const hasDamageAdjustment = damageParts && /\b(?:blocked by|reduced by|increased by)\b/i.test(damageParts);
                 const joinedSourcePhrase = hasDamageAdjustment && sourcePhrase ? (',' + sourcePhrase) : sourcePhrase;
                 const phrase = targetName + outcome + ' on the ' + ability + ' Save and takes ' + (damageParts || 'no damage') + joinedSourcePhrase + (result.fainted ? ' and falls unconscious' : '') + '.';
-                const tempLine = result.tempAbsorbed > 0
+                const tempLine = result.tempAbsorbed > 0 && !(RuntimeConfig.get('HIDE_DAMAGE_DETAILS') && !RuntimeConfig.get('HIDE_COMBAT_LOG'))
                     ? '<div style="padding-top:2px;color:rgb(52,203,116);font-size:10px;line-height:12px;text-align:center;">(Some damage was absorbed by Temporary HP)</div>'
                     : '';
-                return '<table style="width:100%;border-collapse:collapse;table-layout:fixed;"><tr><td style="text-align:center;vertical-align:middle;font-size:14px;line-height:16px;">' + phrase + '</td><td style="width:78px;text-align:right;vertical-align:top;white-space:nowrap;">' + badge + '</td></tr></table>' + tempLine;
+                return this.combatLogResultRowHtml(phrase, badge, { rollWidth: 78, rollVertical: 'top' }) + tempLine;
             }
             if (result.noDamage) {
                 const damageParts = this.buildDamagePartsHtml(result);
@@ -5380,7 +5555,7 @@ const CombatAssistant = (() => {
             const damageParts = this.buildDamagePartsHtml(result);
             const hasDamageAdjustment = damageParts && /\b(?:blocked by|reduced by|increased by)\b/i.test(damageParts);
             const joinedSourcePhrase = hasDamageAdjustment && sourcePhrase ? (',' + sourcePhrase) : sourcePhrase;
-            const tempLine = result.tempAbsorbed > 0
+            const tempLine = result.tempAbsorbed > 0 && !(RuntimeConfig.get('HIDE_DAMAGE_DETAILS') && !RuntimeConfig.get('HIDE_COMBAT_LOG'))
                 ? '<div style="padding-top:2px;color:rgb(52,203,116);font-size:10px;line-height:12px;text-align:center;">(Some damage was absorbed by Temporary HP)</div>'
                 : '';
             return targetName + ' takes ' + (damageParts || '0 damage') + joinedSourcePhrase + (result.fainted ? ' and falls unconscious' : '') + '.' + tempLine;
@@ -5487,7 +5662,7 @@ const CombatAssistant = (() => {
                     '</td>' +
                     '<td style="width:48px;text-align:right;vertical-align:middle;">' + this.numericRollBoxHtml(total, tooltip, { size: 34, fontSize: '18px' }) + '</td>' +
                 '</tr></tbody></table>';
-            this.sendPublicMessage('Concentration Spell', body, 'normal', {
+            this.sendCombatLogMessage('Concentration Spell', body, 'normal', {
                 titleHtml: this.concentrationTitleHtml(result.casterImgsrc || '', 'Concentration Spell')
             });
         },
@@ -5523,7 +5698,7 @@ const CombatAssistant = (() => {
                     '</td>' +
                     '<td style="width:54px;text-align:right;vertical-align:middle;">' + rollBox + '</td>' +
                 '</tr></tbody></table>';
-            this.sendPublicMessage('Concentration Lost', body, 'failure', {
+            this.sendCombatLogMessage('Concentration Lost', body, 'failure', {
                 titleHtml: this.concentrationTitleHtml(result.casterImgsrc || '', 'Concentration Lost')
             });
         },
@@ -5539,7 +5714,7 @@ const CombatAssistant = (() => {
                 ? Html.span(Utils.escapeHtml(spellName), 'color:rgb(245,220,80);font-weight:900;')
                 : 'the spell';
             const body = casterHtml + "'s concentration on " + spellHtml + ' ends naturally as the spell reaches the end of its duration.';
-            this.sendPublicMessage('Concentration Ended', body, 'normal', {
+            this.sendCombatLogMessage('Concentration Ended', body, 'normal', {
                 titleHtml: this.concentrationTitleHtml(result.casterImgsrc || '', 'Concentration Ended')
             });
         },
@@ -5549,6 +5724,15 @@ const CombatAssistant = (() => {
             const hadPendingDamage = (part) => Utils.toInt(part && part.adjustedBase, Utils.toInt(part && part.baseDamage, 0)) > 0;
             const visibleParts = rawParts.filter((part) => Utils.toInt(part && part.finalDamage, 0) > 0 || (!!(part && part.immune) && hadPendingDamage(part)));
             const allVisibleDamageBlockedByImmunity = visibleParts.length > 0 && visibleParts.every((part) => !!part.immune && Utils.toInt(part.finalDamage, 0) <= 0);
+            const publicLog = !RuntimeConfig.get('HIDE_COMBAT_LOG');
+            const hideDamageDetails = publicLog && RuntimeConfig.get('HIDE_DAMAGE_DETAILS');
+            const hideResistanceDetails = publicLog && RuntimeConfig.get('HIDE_RESISTANCE_DETAILS');
+
+            if (hideDamageDetails) {
+                const anyAppliedDamage = visibleParts.some((part) => Utils.toInt(part && part.finalDamage, 0) > 0);
+                return anyAppliedDamage ? 'damage' : 'no damage';
+            }
+
             const parts = visibleParts.map((part) => {
                 const type = CombatService.normalizeDamageType(part.damageType);
                 const typeLabel = type && type !== 'normal' ? type : '';
@@ -5556,11 +5740,13 @@ const CombatAssistant = (() => {
                 const typed = typeLabel ? Html.span(Utils.escapeHtml(typeLabel), 'color:' + color + ';font-weight:900;') : '';
                 const traitLabel = typed || 'damage';
                 if (part.immune && Utils.toInt(part.finalDamage, 0) <= 0 && hadPendingDamage(part)) {
+                    if (hideResistanceDetails) return typed ? ('no ' + typed + ' damage') : 'no damage';
                     return allVisibleDamageBlockedByImmunity && visibleParts.length === 1
                         ? 'no damage, blocked by ' + traitLabel + ' immunity'
                         : 'no ' + (typed ? (typed + ' ') : '') + 'damage, blocked by ' + traitLabel + ' immunity';
                 }
                 const amount = Html.span(Utils.escapeHtml(String(part.finalDamage)), 'color:' + color + ';font-weight:900;');
+                if (hideResistanceDetails) return amount + (typed ? (' ' + typed) : '') + ' damage';
                 const adjustments = [];
                 if (part.immune) adjustments.push('blocked by ' + traitLabel + ' immunity');
                 if (part.resistant) adjustments.push('reduced by ' + traitLabel + ' resistance');
@@ -5578,10 +5764,12 @@ const CombatAssistant = (() => {
             const amount = Html.span(Utils.escapeHtml(String(displayedAmount)), 'color:' + (result.mode === 'temp' ? 'rgb(255,105,180)' : CONFIG.DEFAULT_TEXT_HEAL_COLOR) + ';font-weight:900;');
             const sourceNameRaw = String(result.sourceName || '').trim();
             const sourceActionRaw = String(result.sourceAction || '').trim();
-            const sourceName = sourceNameRaw && !/^manual$/i.test(sourceNameRaw)
+            const isManualSource = /^manual$/i.test(sourceNameRaw) || /^manual(?:\s+healing)?$/i.test(sourceActionRaw);
+            const revealSource = RuntimeConfig.get('REVEAL_DAMAGE_SOURCE') && !isManualSource;
+            const sourceName = revealSource && sourceNameRaw
                 ? Html.span(Utils.escapeHtml(hideNames ? 'Healer' : sourceNameRaw), 'color:' + CONFIG.DEFAULT_TEXT_CHARACTER_COLOR + ';font-weight:900;')
                 : '';
-            const sourceAction = sourceActionRaw && !/^manual(?:\s+healing)?$/i.test(sourceActionRaw)
+            const sourceAction = revealSource && sourceActionRaw
                 ? Html.span(Utils.escapeHtml(sourceActionRaw), 'color:rgb(245,220,80);font-weight:900;')
                 : '';
             if (sourceName || sourceAction) {
@@ -5598,7 +5786,7 @@ const CombatAssistant = (() => {
 
         showNativeSaveRollRequest(request) {
             request = request || {};
-            const ability = CombatService.abilityNameToShortLabel(request.saveAbility || '') || 'SAVE';
+            const ability = Utils.abilityShortLabel(request.saveAbility || '') || 'SAVE';
             const challenge = Math.max(0, Utils.toInt(request.challenge, 0));
             const tokenName = Html.span(Utils.escapeHtml(String(request.tokenName || 'Target')), 'color:' + CONFIG.DEFAULT_TEXT_CHARACTER_COLOR + ';font-weight:900;');
             const damageType = CombatService.normalizeDamageType(request.damageType || 'normal');
@@ -6096,6 +6284,8 @@ const CombatAssistant = (() => {
                 return match ? htmlText(match[1]) : '';
             };
             const characterName = Utils.cleanRoll20Label(readDivByClass('meta__character-name'));
+            const metaSubtitle = Utils.cleanRoll20Label(readDivByClass('meta__header-subtitle'));
+            const headerSubtitle = Utils.cleanRoll20Label(readDivByClass('header__subtitle'));
             const titleMatch = source.match(/<div\s+class="[^"]*header__title[^"]*"[^>]*>([\s\S]*?)<\/div>/i);
             const rawTitle = titleMatch ? Utils.cleanRoll20Label(htmlText(titleMatch[1])) : '';
             if (!rawTitle) return null;
@@ -6132,7 +6322,8 @@ const CombatAssistant = (() => {
                 damageRolls.push({ total, damageType: type, formula: (formulas[index] && formulas[index].formula) || 'Roll20' });
             }
             if (!damageRolls.length && isDamage) {
-                const damageTypeMatch = textSource.match(/\b(acid|bludgeoning|cold|fire|force|lightning|necrotic|piercing|poison|psychic|radiant|slashing|thunder)\s+damage\b/i) ||
+                const damageTypeMatch = headerSubtitle.match(/\b(acid|bludgeoning|cold|fire|force|lightning|necrotic|piercing|poison|psychic|radiant|slashing|thunder)\b/i) ||
+                    textSource.match(/\b(acid|bludgeoning|cold|fire|force|lightning|necrotic|piercing|poison|psychic|radiant|slashing|thunder)\s+damage\b/i) ||
                     textSource.match(/\bDamage\s+Type\s*:?\s*(acid|bludgeoning|cold|fire|force|lightning|necrotic|piercing|poison|psychic|radiant|slashing|thunder)\b/i);
                 const damageType = damageTypeMatch ? CombatService.normalizeDamageType(damageTypeMatch[1]) : 'normal';
                 const damageFormula = formulas.length
@@ -6161,7 +6352,9 @@ const CombatAssistant = (() => {
                 const detail = textSource.match(pattern);
                 return detail ? Utils.cleanRoll20Label(detail[1]) : '';
             };
-            const spellLevelText = readInlineDetail('Cast\\s+Level') || readInlineDetail('Spell\\s+Level') || readInlineDetail('Level');
+            const metaSpellLevelMatch = metaSubtitle.match(/\b(?:Level\s+)?(Cantrip|[0-9]+)\b/i);
+            const spellLevelText = readInlineDetail('Cast\s+Level') || readInlineDetail('Spell\s+Level') || readInlineDetail('Level') ||
+                (metaSpellLevelMatch ? metaSpellLevelMatch[1] : '');
             const spellLevel = ActionService.normalizeSpellListLevel(spellLevelText, 0);
             return {
                 characterName,
@@ -6202,7 +6395,7 @@ const CombatAssistant = (() => {
                 /\bhalf\s+(?:as\s+much\s+)?damage\b/i.test(source);
             return {
                 saveDc: saveDcMatch ? Math.max(0, Utils.toInt(saveDcMatch[1], 0)) : 0,
-                saveAbility: saveAbilityMatch ? CombatService.normalizeAbilityName(saveAbilityMatch[1]) : '',
+                saveAbility: saveAbilityMatch ? Utils.normalizeAbilityName(saveAbilityMatch[1]) : '',
                 halfOnSuccess
             };
         },
@@ -6259,7 +6452,7 @@ const CombatAssistant = (() => {
         splitSecondarySaveDamageRolls(damageRolls, text, saveDc, saveAbility) {
             const rolls = Array.isArray(damageRolls) ? damageRolls : [];
             const source = Utils.stripHtml(String(text || '')).replace(/\s+/g, ' ').trim();
-            if (rolls.length < 2 || !source || !saveDc || !CombatService.normalizeAbilityName(saveAbility || '')) {
+            if (rolls.length < 2 || !source || !saveDc || !Utils.normalizeAbilityName(saveAbility || '')) {
                 return { hasSplit: false, attackDamageRolls: rolls, saveDamageRolls: rolls };
             }
             const mentionedIndexes = [];
@@ -6732,6 +6925,29 @@ const CombatAssistant = (() => {
             return Object.assign({}, selectedAreas[0], { options: selectedAreas });
         },
 
+        parseNativeActionDescriptor(value) {
+            let data = value;
+            if (typeof data === 'string') {
+                const raw = data.trim();
+                if (!raw) return { action: '', args: [], rowId: '', phase: '' };
+                try { data = JSON.parse(raw); } catch (ignored) { data = { action: raw }; }
+            }
+            if (!data || typeof data !== 'object' || Array.isArray(data)) data = {};
+            const action = String(data.action || '').trim();
+            const args = Array.isArray(data.args) ? data.args.map((entry) => String(entry || '').trim()) : [];
+            let rowId = '';
+            let phase = '';
+            const direct = action.match(/^repeating_attack_(.+?)_attack(?:_(dmg))?$/i);
+            if (direct) {
+                rowId = String(direct[1] || '').trim();
+                phase = direct[2] ? 'damage' : 'attack';
+            } else if (/^repeating_attack$/i.test(action) && args.length) {
+                rowId = String(args[0] || '').trim();
+                phase = args.some((entry) => String(entry || '').toLowerCase() === 'dmg') ? 'damage' : 'attack';
+            }
+            return { action, args, rowId, phase };
+        },
+
         parseMessage(msg) {
             if (!msg || msg.type === 'api') return null;
             const content = String(msg.content || '');
@@ -6739,6 +6955,7 @@ const CombatAssistant = (() => {
 
             const fields = this.getRollTemplateFields(content);
             const advanced = this.parseAdvancedHtml(content);
+            const nativeAction = this.parseNativeActionDescriptor(msg && msg.action);
             const explicitAttackNameSource = (advanced && advanced.attackName) || fields.rname || fields.attackname || fields.spellname || fields.rollname || this.getFirstField(content, ['rname', 'attackname', 'spellname', 'rollname']);
             const explicitCharacterNameSource = (advanced && advanced.characterName) || fields.charname || fields.character_name || fields.character || fields.source || this.getFirstField(content, ['charname', 'character_name', 'character', 'source']);
             const attackName = Utils.cleanRoll20Label(explicitAttackNameSource || fields.name || this.getFirstField(content, ['name']) || 'Attack');
@@ -6763,13 +6980,18 @@ const CombatAssistant = (() => {
                 fields.name
             ].join(' ');
             const normalizedRollLabel = Utils.normalizeName(rollLabelText);
-            const looksLikeInitiative = normalizedRollLabel.indexOf('initiative') >= 0 || normalizedRollLabel.indexOf('init') >= 0;
+            const looksLikeInitiative = Utils.isInitiativeLabel(normalizedRollLabel);
             const attackFieldValue = String(fields.attack || '').trim();
             const attackFieldIsRoll = !!attackFieldValue &&
                 !/^[01]$/.test(attackFieldValue) &&
                 (/\$\[\[\d+\]\]/.test(attackFieldValue) || /\bd20\b/i.test(attackFieldValue) || /^[+-]?\d+(?:\.\d+)?$/.test(attackFieldValue));
             const templateName = String(msg.rolltemplate || '').trim().toLowerCase();
+            const nativeActionDescriptor = String(msg && msg.action || '').trim();
             const isSpellAction = !!((advanced && advanced.isSpellDetailsCard) || String(fields.spelllevel || fields.spell_level || fields.spell || '').trim() || /\bspell\s+details\b/i.test(content) || /\bspell-item\b/i.test(content));
+            const isActionUsage = !isSpellAction && !!(
+                /^(?:npcaction|traits?|npcaction-l|npcaction-m)$/i.test(templateName) ||
+                /repeating_(?:npcbonusaction|npcreaction|npcaction-l|npcaction-m)/i.test(nativeActionDescriptor)
+            );
             const spellLevel = isSpellAction
                 ? Math.max(0, Math.min(9, ActionService.normalizeSpellListLevel(
                     fields.castlevel || fields.cast_level || fields.spelllevel || fields.spell_level || (advanced && advanced.spellLevel),
@@ -6792,7 +7014,7 @@ const CombatAssistant = (() => {
             );
             const looksLikeAttack = !looksLikeInitiative && ((advanced && advanced.isAttack) || hasAttackSignal);
             const looksLikeDamage = hasDamage || /dmg\d*=|\{\{dmg=|\{\{globaldamage=|\{\{hldmg=|\{\{healing=|\{\{heal=/.test(lower);
-            const saveAbility = CombatService.normalizeAbilityName((advanced && advanced.saveAbility) || attack.saveAbility || fields.saveability || fields.saveattr || '');
+            const saveAbility = Utils.normalizeAbilityName((advanced && advanced.saveAbility) || attack.saveAbility || fields.saveability || fields.saveattr || '');
             const saveDc = Math.max(0, Utils.toInt((advanced && advanced.saveDc) || attack.saveDc || 0, 0));
             const hasSpellContext = !!(isSpellAction && !hasDamage && !explicitHealing && (saveDc > 0 || saveAbility || (areaInfo && areaInfo.isArea)));
             const isSpellCastOnly = !!(isSpellAction && !hasDamage && !explicitHealing && !looksLikeAttack && !hasSpellContext && (advanced && advanced.isSpellDetailsCard));
@@ -6804,7 +7026,7 @@ const CombatAssistant = (() => {
                 content
             ].filter(Boolean).join(' '), saveDc, saveAbility);
 
-            if (!looksLikeAttack && !looksLikeDamage && !explicitHealing && !hasSpellContext && !isSpellCastOnly) return null;
+            if (!looksLikeAttack && !looksLikeDamage && !explicitHealing && !hasSpellContext && !isSpellCastOnly && !isActionUsage) return null;
 
             return {
                 characterName,
@@ -6837,6 +7059,7 @@ const CombatAssistant = (() => {
                 isConcentration,
                 hasSpellContext,
                 isSpellCastOnly,
+                isActionUsage,
                 lightInfo,
                 areaInfo,
                 damageType: damageRolls.length ? damageRolls[0].damageType : ((advanced && advanced.damageType) || 'normal'),
@@ -6846,7 +7069,11 @@ const CombatAssistant = (() => {
                 damageRolls,
                 hasSecondarySaveDamageSplit: !!splitSaveDamage.hasSplit,
                 attackDamageRolls: splitSaveDamage.attackDamageRolls,
-                saveDamageRolls: splitSaveDamage.saveDamageRolls
+                saveDamageRolls: splitSaveDamage.saveDamageRolls,
+                nativeAction: nativeAction.action,
+                nativeActionArgs: nativeAction.args,
+                nativeActionRowId: nativeAction.rowId,
+                nativeActionPhase: nativeAction.phase
             };
         },
 
@@ -6992,16 +7219,6 @@ const CombatAssistant = (() => {
             });
         },
 
-        getTurnOrderSnapshot() {
-            if (typeof Campaign !== 'function') return [];
-            try {
-                const parsed = JSON.parse(Campaign().get('turnorder') || '[]');
-                return Array.isArray(parsed) ? parsed.filter(Boolean).map((entry) => Object.assign({}, entry)) : [];
-            } catch (error) {
-                return [];
-            }
-        },
-
         createPendingNativeInitiativeBatch(tokens) {
             this.prunePendingNativeInitiatives();
             const root = State.get();
@@ -7016,7 +7233,7 @@ const CombatAssistant = (() => {
                 results: {},
                 autoQueue: [],
                 activeAutoRequestId: '',
-                turnorderSnapshot: this.getTurnOrderSnapshot(),
+                turnorderSnapshot: this.getCurrentTurnOrder(),
                 createdAt: Date.now()
             };
             return batchId;
@@ -7428,10 +7645,7 @@ const CombatAssistant = (() => {
             const content = String(msg && msg.content || '');
             const rolls = [];
             const blocks = this.getRollTemplateBlocks(content);
-            const isInitiativeLabel = (value) => {
-                const normalized = Utils.normalizeName(value || '');
-                return normalized.indexOf('initiative') >= 0 || normalized.indexOf('init') >= 0;
-            };
+            const isInitiativeLabel = (value) => Utils.isInitiativeLabel(value);
             const isInitiativeFields = (fields, block, advanced) => {
                 const label = [
                     msg && msg.rolltemplate,
@@ -7756,7 +7970,7 @@ const CombatAssistant = (() => {
                 magicResistanceFirstTotal: Utils.toNumber(firstTotal, 0),
                 captureNative: true
             }));
-            const saveAbility = CombatService.normalizeAbilityName(pending && (pending.rollName || pending.payload && pending.payload.saveAbility) || '');
+            const saveAbility = Utils.normalizeAbilityName(pending && (pending.rollName || pending.payload && pending.payload.saveAbility) || '');
             const challenge = Math.max(0, Utils.toInt(pending && pending.payload && pending.payload.challenge, 0));
             const damageRolls = Array.isArray(pending && pending.payload && pending.payload.damageRolls) ? pending.payload.damageRolls : [];
             const fallbackDamage = Math.max(0, Utils.toInt(pending && pending.payload && (pending.payload.damageTotal || pending.payload.amount || pending.payload.damage), 0));
@@ -7831,12 +8045,15 @@ const CombatAssistant = (() => {
             const casterTokenId = R20.getTokenId(token);
             const casterCharacterId = character ? String(character.id || token.get('represents') || '').trim() : '';
             const casterPageId = R20.getTokenPageId(token);
-            const saveAbility = CombatService.normalizeAbilityName(result.saveAbility || '');
+            const saveAbility = Utils.normalizeAbilityName(result.saveAbility || '');
             const areaInfo = result && result.areaInfo && result.areaInfo.isArea ? result.areaInfo : { isArea: false, options: [] };
             const areaOptions = R20.getAreaInfoOptions(areaInfo);
             const useAreaMarkerRequested = playerActionEnabled && !isHealing && areaInfo.isArea && RuntimeConfig.get('PLAYER_TOKEN_AREA_MARK');
             let areaTargets = [];
             let useCount = 1;
+            const healingRolls = isHealing && Array.isArray(result.damageRolls) ? result.damageRolls.filter(Boolean) : [];
+            const healingRollFormula = healingRolls.map((entry) => String(entry && entry.formula || '').trim()).filter(Boolean).join(' + ') || String(result.damageFormula || '').trim();
+            const healingRollDetail = healingRolls.map((entry) => String(entry && entry.detail || '').trim()).filter(Boolean).join('<br>') || healingRollFormula;
             const payloadObject = isHealing ? {
                 type: 'heal',
                 mode: result.isTempHealing ? 'temp' : 'hp',
@@ -7844,6 +8061,9 @@ const CombatAssistant = (() => {
                 sourceName: String(result.tokenName || result.characterName || 'Caster'),
                 sourceAction: String(result.attackName || 'Healing'),
                 sourceImgsrc: String((token && token.get('imgsrc')) || result.tokenImgsrc || ''),
+                sourceDescription: String(result.sourceDescription || ''),
+                rollFormula: healingRollFormula,
+                rollDetail: healingRollDetail,
                 rangeText: String(result.rangeText || result.range || ''),
                 durationText: String(result.durationText || result.duration || ''),
                 isSpellAction: !!result.isSpellAction,
@@ -7853,7 +8073,8 @@ const CombatAssistant = (() => {
                 areaOptions,
                 casterTokenId,
                 casterCharacterId,
-                casterPageId
+                casterPageId,
+                nativeActionRowId: String(result.nativeActionRowId || '').trim(),
             } : {
                 type: 'damage',
                 mode: result.isSaveAttack || saveAbility ? 'save' : 'attack',
@@ -7878,7 +8099,8 @@ const CombatAssistant = (() => {
                 areaOptions,
                 casterTokenId,
                 casterCharacterId,
-                casterPageId
+                casterPageId,
+                nativeActionRowId: String(result.nativeActionRowId || '').trim(),
             };
             const actionId = State.createPlayerActionRequest({
                 type: isHealing ? 'heal' : 'damage',
@@ -7932,7 +8154,7 @@ const CombatAssistant = (() => {
                 ? Render.areaRollControlButtons({ actionId, casterTokenId, isConcentration: payloadObject.isConcentration && RuntimeConfig.get('CONCENTRATION_TRACKING') })
                 : [isHealing
                     ? Render.iconButtonHtml({ iconHtml: result.isTempHealing ? '&#128151;' : '&#128154;', label: result.isTempHealing ? 'Temp' : 'Heal', command, backgroundColor: 'rgba(20,115,55,0.95)', tooltip: 'Choose a target token and apply this healing once' })
-                    : Render.iconButtonHtml({ iconHtml: '&#9876;&#65039;', label: result.isSaveAttack || saveAbility ? (CombatService.abilityNameToShortLabel(saveAbility) || 'SAVE') : 'ATK', command, backgroundColor: 'rgba(120,40,40,0.95)', tooltip: 'Choose a target token and apply this attack once' })];
+                    : Render.iconButtonHtml({ iconHtml: '&#9876;&#65039;', label: result.isSaveAttack || saveAbility ? (Utils.abilityShortLabel(saveAbility) || 'SAVE') : 'ATK', command, backgroundColor: 'rgba(120,40,40,0.95)', tooltip: 'Choose a target token and apply this attack once' })];
             const body = Render.iconButtonTableHtml(buttons, {
                 columns: buttons.length,
                 footerHtml: useAreaMarker
@@ -7956,7 +8178,7 @@ const CombatAssistant = (() => {
             if (!result || result.isHealing) return false;
             const attackTotal = Math.max(0, Utils.toInt(result.attackTotal, 0));
             const saveDc = Math.max(0, Utils.toInt(result.saveDc, 0));
-            const saveAbility = CombatService.normalizeAbilityName(result.saveAbility || '');
+            const saveAbility = Utils.normalizeAbilityName(result.saveAbility || '');
             const damageRolls = Array.isArray(result.damageRolls) ? result.damageRolls : [];
             const damageTotal = Math.max(0, Utils.toInt(result.damageTotal, 0));
             return !!result.hasAttackRoll && attackTotal > 0 && saveDc > 0 && !!saveAbility && (damageRolls.length > 0 || damageTotal > 0);
@@ -7990,7 +8212,7 @@ const CombatAssistant = (() => {
             const total = rolls.reduce((sum, entry) => sum + Math.max(0, Utils.toInt(entry && entry.total, 0)), 0);
             return Object.assign({}, source, {
                 isSaveAttack: true,
-                saveAbility: CombatService.normalizeAbilityName(result && result.saveAbility || ''),
+                saveAbility: Utils.normalizeAbilityName(result && result.saveAbility || ''),
                 saveDc: Math.max(0, Utils.toInt(result && result.saveDc, 0)),
                 damageRolls: rolls,
                 damageTotal: total,
@@ -8002,13 +8224,21 @@ const CombatAssistant = (() => {
         },
 
         sendAttackDamagePrompts(result) {
-            if (this.shouldOfferAttackAndSavePrompts(result)) {
-                R20.whisper('GM', Render.showAttackDamagePrompt(this.withNpcSetInfo(this.attackPromptVariant(result))));
-                R20.whisper('GM', Render.showAttackDamagePrompt(this.withNpcSetInfo(this.savePromptVariant(result))));
+            const sourceToken = R20.resolveRollSourceToken(result, result && result.playerId || '');
+            const enriched = sourceToken
+                ? Object.assign({}, result || {}, {
+                    sourceTokenId: R20.getTokenId(sourceToken),
+                    casterTokenId: R20.getTokenId(sourceToken),
+                    tokenImgsrc: String(sourceToken.get('imgsrc') || result && result.tokenImgsrc || '')
+                })
+                : (result || {});
+            if (this.shouldOfferAttackAndSavePrompts(enriched)) {
+                R20.whisper('GM', Render.showAttackDamagePrompt(this.withNpcSetInfo(this.attackPromptVariant(enriched))));
+                R20.whisper('GM', Render.showAttackDamagePrompt(this.withNpcSetInfo(this.savePromptVariant(enriched))));
                 return;
             }
-            R20.whisper('GM', Render.showAttackDamagePrompt(this.withNpcSetInfo(result)));
-            this.sendPlayerPrompt(result);
+            R20.whisper('GM', Render.showAttackDamagePrompt(this.withNpcSetInfo(enriched)));
+            this.sendPlayerPrompt(enriched);
         },
 
         async handleChatMessage(msg) {
@@ -8023,7 +8253,8 @@ const CombatAssistant = (() => {
             if (await this.handlePendingNativeInitiativeCapture(parsed, msg)) return;
             if (await this.handlePendingNativeSaveCapture(msg)) return;
             if (!parsed) return;
-            Logger.debug('[Roll capture]', JSON.stringify({ name: parsed.attackName, char: parsed.characterName, attack: parsed.isAttack, damage: parsed.isDamage, healing: parsed.isHealing, total: parsed.attackTotal, damage: parsed.damageTotal }));
+            Logger.debug('[Roll capture]', JSON.stringify({ name: parsed.attackName, char: parsed.characterName, attack: parsed.isAttack, damage: parsed.isDamage, healing: parsed.isHealing, action: parsed.isActionUsage, total: parsed.attackTotal, damage: parsed.damageTotal }));
+            await ResourceService.consumeMatchingActionResource(parsed, msg);
 
             // Utility/native Spell Details cards confirm a cast even when the spell
             // has no attack, save, damage, or healing payload (for example Shield or
@@ -8084,6 +8315,7 @@ const CombatAssistant = (() => {
                     isSpellAction: !!(parsed.isSpellAction || (prior && prior.isSpellAction)),
                     spellLevel: Math.max(0, Utils.toInt(parsed.spellLevel || (prior && prior.spellLevel), 0)),
                     isConcentration: !!(parsed.isConcentration || (prior && prior.isConcentration)),
+                    nativeActionRowId: String(parsed.nativeActionRowId || (prior && prior.nativeActionRowId) || '').trim(),
                     lightInfo: (parsed.lightInfo && parsed.lightInfo.hasLight ? parsed.lightInfo : null) || (prior && prior.lightInfo) || { hasLight: false },
                     areaInfo: clearSaveFromPriorAttack ? { isArea: false } : ((parsed.areaInfo && parsed.areaInfo.isArea ? parsed.areaInfo : null) || (prior && prior.areaInfo) || { isArea: false }),
                     hasSecondarySaveDamageSplit: !!parsed.hasSecondarySaveDamageSplit,
@@ -8452,6 +8684,7 @@ const CombatAssistant = (() => {
             state.roundProgressTokenIds = this.unique([state.currentTokenId]);
             if (this.isMovementEnabled()) this.resetMovementForEntry(this.tokenEntries(entries)[0] || null, { resolveAsync: true });
             else this.clearMovementState();
+            NPCResourceService.ensureForTurnEntry(this.tokenEntries(entries)[0] || null);
             this.updateCurrentTurnPresentation(this.tokenEntries(entries)[0] || null, { sendCard: false, focus: false });
             return true;
         },
@@ -8767,14 +9000,20 @@ const CombatAssistant = (() => {
                 (removeButton ? ('<div style="padding-top:3px;text-align:right;">' + removeButton + '</div>') : '');
             const markers = String(info && info.markers || '').trim() || '-';
             let turnResourceList = '';
+            let turnResourceNotice = '';
             const allowPlayerResources = RuntimeConfig.get('SHOW_PLAYER_RESOURCES') && info && info.playerControlled;
             const allowNpcResources = RuntimeConfig.get('SHOW_NPC_RESOURCES') && info && !info.playerControlled && opts.gmCard === true;
             if ((allowPlayerResources || allowNpcResources) && info && info.character && info.tokenId) {
                 try {
                     const characterId = String(info.character.id || (Utils.isFunction(info.character.get) ? info.character.get('_id') : '') || '').trim();
                     if (characterId) {
-                        const resourceEntries = ResourceService.getEntries(characterId);
-                        if (resourceEntries.length) turnResourceList = ResourceService.buildResourceListHtml(info.tokenId, resourceEntries);
+                        const resourceEntries = ResourceService.getEntriesForToken(info.token, characterId);
+                        if (resourceEntries.length) {
+                            turnResourceList = ResourceService.buildResourceListHtml(info.tokenId, resourceEntries);
+                            if (NPCResourceService.isManagedToken(info.token)) {
+                                turnResourceNotice = Render.smallGrayDescriptorHtml(Utils.escapeHtml(NPCResourceService.RESOURCE_POOL_NOTICE));
+                            }
+                        }
                     }
                 } catch (error) {
                     Logger.debug('[turn-card:resources]', error && error.message ? error.message : String(error));
@@ -8803,7 +9042,7 @@ const CombatAssistant = (() => {
                 ? '<div style="height:1px;background:rgb(105,105,105);margin:7px 0 5px 0;"></div>' + turnActions
                 : '';
             const resourceSection = turnResourceList
-                ? '<div style="height:1px;background:rgb(105,105,105);margin:7px 0 4px 0;"></div>' + turnResourceList
+                ? '<div style="height:1px;background:rgb(105,105,105);margin:7px 0 4px 0;"></div>' + turnResourceList + turnResourceNotice
                 : '';
             return Html.card({
                 title: 'Turn Card',
@@ -9443,6 +9682,7 @@ const CombatAssistant = (() => {
                 state.currentTokenId = safeTokenId;
                 state.roundProgressTokenIds = [safeTokenId];
                 if (this.isMovementEnabled()) this.resetMovementForEntry(current);
+                NPCResourceService.ensureForTurnEntry(current);
                 this.processConcentrationTurnStart(current);
                 this.sendRoundCounter({ order, includeStop: true, round: state.round });
                 this.updateCurrentTurnPresentation(current, { sendCard: true, focus: true });
@@ -9472,6 +9712,7 @@ const CombatAssistant = (() => {
 
             if (next) {
                 if (this.isMovementEnabled()) this.resetMovementForEntry(next);
+                NPCResourceService.ensureForTurnEntry(next);
                 this.processConcentrationTurnStart(next);
             }
             Campaign().set('turnorder', JSON.stringify(rotated));
@@ -9637,6 +9878,7 @@ const CombatAssistant = (() => {
             if ((firstChanged || showRound) && currentFirst) {
                 const currentEntry = this.tokenEntries(currentOrder)[0] || null;
                 if (this.isMovementEnabled()) this.resetMovementForEntry(currentEntry);
+                NPCResourceService.ensureForTurnEntry(currentEntry);
                 this.processConcentrationTurnStart(currentEntry);
             }
             if (showRound) this.sendRoundCounter({ order: currentOrder, includeStop: true, round: state.round });
@@ -9666,30 +9908,13 @@ const CombatAssistant = (() => {
             return raw.replace(/[^a-z\s-]+/g, '').replace(/\s+/g, ' ').trim() || 'normal';
         },
 
-        normalizeAbilityName(value) {
-            const key = String(value || '').trim().toLowerCase();
-            return ABILITY_ALIASES[key] || '';
-        },
-
-        abilityNameToShortLabel(value) {
-            const ability = this.normalizeAbilityName(value);
-            return ABILITIES[ability] || '';
-        },
-
 
         normalizeSkillTarget(value) {
             return String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
         },
 
-        getBeaconIntegrantsFromRoot(root) {
-            return root && root.integrants && root.integrants.integrants && typeof root.integrants.integrants === 'object'
-                ? root.integrants.integrants
-                : {};
-        },
-
         getBeaconIntegrants(characterId) {
-            const roots = R20.getCharacterStoreDumpRoots(characterId);
-            return roots.length ? this.getBeaconIntegrantsFromRoot(roots[0]) : {};
+            return Utils.getBeaconIntegrants(R20.getCharacterStoreRoot(characterId));
         },
 
         isBeaconIntegrantActive(record, integrants) {
@@ -9719,10 +9944,10 @@ const CombatAssistant = (() => {
         },
 
         getStoreAbilityRollModeInfo(characterId, ability, kind) {
-            const safeAbility = this.normalizeAbilityName(ability);
+            const safeAbility = Utils.normalizeAbilityName(ability);
             const safeKind = String(kind || '').trim().toLowerCase() === 'save' ? 'save' : 'check';
             if (!safeAbility) return { mode: 'normal', reason: '' };
-            const short = String(this.abilityNameToShortLabel(safeAbility) || '').trim().toLowerCase();
+            const short = String(Utils.abilityShortLabel(safeAbility) || '').trim().toLowerCase();
             let advantage = 0;
             let disadvantage = 0;
             const advantageReasons = [];
@@ -9773,10 +9998,10 @@ const CombatAssistant = (() => {
 
         getSavingThrowProficiencyInfo(characterId, ability) {
             const safeCharacterId = String(characterId || '').trim();
-            const safeAbility = this.normalizeAbilityName(ability);
+            const safeAbility = Utils.normalizeAbilityName(ability);
             if (!safeCharacterId || !safeAbility) return { proficient: false, proficiencyBonus: 0 };
             const proficiencyBonus = this.getProficiencyBonus(safeCharacterId);
-            const short = String(this.abilityNameToShortLabel(safeAbility) || '').trim().toLowerCase();
+            const short = String(Utils.abilityShortLabel(safeAbility) || '').trim().toLowerCase();
             if (R20.detectSheetVersion(safeCharacterId) === '2014') {
                 const profRaw = this.readAttributeRaw(safeCharacterId, [
                     safeAbility + '_save_prof',
@@ -9829,12 +10054,12 @@ const CombatAssistant = (() => {
 
         getAbilityProfile(characterId, ability) {
             const safeCharacterId = String(characterId || '').trim();
-            const safeAbility = this.normalizeAbilityName(ability);
+            const safeAbility = Utils.normalizeAbilityName(ability);
             if (!safeCharacterId || !safeAbility) {
                 return { ability: safeAbility, score: null, modifier: 0, save: 0, saveProficient: false, proficiencyBonus: 0, checkMode: 'normal', saveMode: 'normal', checkCommand: '', saveCommand: '' };
             }
             const sheetVersion = R20.detectSheetVersion(safeCharacterId);
-            const short = String(this.abilityNameToShortLabel(safeAbility) || '').toLowerCase();
+            const short = String(Utils.abilityShortLabel(safeAbility) || '').toLowerCase();
             let score = sheetVersion === '2024' ? this.getAbilityScoreFromStore(safeCharacterId, safeAbility) : null;
             if (score === null || score === undefined) score = this.readAttributeNumber(safeCharacterId, [safeAbility, safeAbility + '_score', short], null);
             const modifier = score === null || score === undefined
@@ -9879,7 +10104,7 @@ const CombatAssistant = (() => {
                     const score = this.getAbilityScoreFromStore(safeCharacterId, ability);
                     if (score !== null && score !== undefined) return this.abilityScoreToModifier(score);
                 }
-                return this.readAttributeNumber(safeCharacterId, [ability + '_mod', this.abilityNameToShortLabel(ability).toLowerCase() + '_mod'], 0);
+                return this.readAttributeNumber(safeCharacterId, [ability + '_mod', Utils.abilityShortLabel(ability).toLowerCase() + '_mod'], 0);
             };
             if (sheetVersion === '2014') {
                 const attrs = findObjs({ _type: 'attribute', _characterid: safeCharacterId }) || [];
@@ -10057,6 +10282,35 @@ const CombatAssistant = (() => {
             return range.ok && range.limited ? (String(range.rangeFeet) + ' ft') : '';
         },
 
+        resolvePlayerActionSourceOnTargetPage(request, targetToken) {
+            const payload = request && request.payload ? request.payload : {};
+            const characterId = String(payload.casterCharacterId || request.sourceCharacterId || request.characterId || '').trim();
+            const targetPageId = R20.getTokenPageId(targetToken);
+            const explicitSourceId = String(payload.casterTokenId || request.sourceTokenId || '').trim();
+            let sourceToken = null;
+            let sourceCharacterId = characterId;
+
+            if (explicitSourceId) {
+                sourceToken = R20.getTokenById(explicitSourceId);
+                if (!sourceToken || (targetPageId && R20.getTokenPageId(sourceToken) !== targetPageId)) return null;
+                const explicitCharacter = R20.getCharacterFromToken(sourceToken);
+                sourceCharacterId = String((explicitCharacter && explicitCharacter.id) || sourceToken.get('represents') || characterId || '').trim();
+            } else {
+                if (!characterId || !targetPageId) return null;
+                sourceToken = R20.findTokenByCharacterIdOnPage(characterId, targetPageId);
+                if (!sourceToken) return null;
+            }
+
+            payload.casterTokenId = R20.getTokenId(sourceToken);
+            payload.casterCharacterId = sourceCharacterId;
+            payload.casterPageId = R20.getTokenPageId(sourceToken);
+            payload.sourceImgsrc = String(sourceToken.get('imgsrc') || payload.sourceImgsrc || '');
+            request.sourceTokenId = payload.casterTokenId;
+            request.sourceCharacterId = sourceCharacterId;
+            request.sourcePageId = payload.casterPageId;
+            return sourceToken;
+        },
+
         validatePlayerActionRange(request, targetToken) {
             if (!RuntimeConfig.get('PLAYER_ACTION_RANGE_CHECK')) return { ok: true, skipped: true };
             const payload = request && request.payload ? request.payload : {};
@@ -10068,7 +10322,7 @@ const CombatAssistant = (() => {
                 ? { ok: true, limited: true, rangeFeet: Math.max(0, Utils.toNumber(areaInfo.sizeFeet, 0)), text: areaInfo.label || 'Area' }
                 : this.getActionRangeInfo(payload);
             if (!range.ok || !range.limited) return { ok: true, skipped: true };
-            const sourceToken = CommandHandlers.resolvePlayerActionSourceOnTargetPage(request, targetToken);
+            const sourceToken = this.resolvePlayerActionSourceOnTargetPage(request, targetToken);
             if (!sourceToken) {
                 return { ok: false, message: 'Caster token was not found on the target page.' };
             }
@@ -10091,7 +10345,7 @@ const CombatAssistant = (() => {
             if (payload.ignoreRangeCheck || payload.npcSet || request && request.npcSet) return { ok: true, skipped: true };
             const range = this.getAreaMarkerRangeInfo(payload);
             if (!range.ok || !range.limited) return { ok: true, skipped: true };
-            const sourceToken = CommandHandlers.resolvePlayerActionSourceOnTargetPage(request, markerToken);
+            const sourceToken = this.resolvePlayerActionSourceOnTargetPage(request, markerToken);
             if (!sourceToken) return { ok: false, message: 'Caster token was not found on the area marker page.' };
             const areaInfo = payload.areaInfo && payload.areaInfo.isArea ? payload.areaInfo : null;
             let measured = null;
@@ -10366,6 +10620,62 @@ const CombatAssistant = (() => {
                 .indexOf(safeMarker) >= 0;
         },
 
+        concentrationTrackingProfile(request, entry, followup) {
+            const safeRequest = request || {};
+            const payload = safeRequest.payload || {};
+            const safeEntry = entry || {};
+            const targets = Array.isArray(safeEntry.targetTokenIds) ? safeEntry.targetTokenIds.filter(Boolean) : [];
+            const areaInfo = payload.areaInfo && payload.areaInfo.isArea ? payload.areaInfo : null;
+            if (areaInfo) {
+                return {
+                    mode: 'area-marker',
+                    label: 'Area Marker',
+                    detail: String(areaInfo.label || areaInfo.shape || '').trim()
+                };
+            }
+            if (targets.length === 1) {
+                const target = R20.getTokenById(targets[0]);
+                return {
+                    mode: 'single-target',
+                    label: 'Single Target',
+                    detail: target ? this.getTokenName(target) : targets[0]
+                };
+            }
+            if (followup && followup.command) {
+                return {
+                    mode: 'persistent-action',
+                    label: 'Persistent Action',
+                    detail: String(followup.actionName || '').trim()
+                };
+            }
+            if (String(payload.nativeActionRowId || '').trim()) {
+                return {
+                    mode: 'persistent-action',
+                    label: 'Persistent Action',
+                    detail: ''
+                };
+            }
+            return { mode: 'passive', label: 'Passive Concentration', detail: '' };
+        },
+
+        recordConcentrationTarget(casterTokenId, targetTokenId) {
+            const safeCasterId = String(casterTokenId || '').trim();
+            const safeTargetId = String(targetTokenId || '').trim();
+            if (!safeCasterId || !safeTargetId) return false;
+            const entry = State.getConcentrationByTokenId(safeCasterId);
+            if (!entry) return false;
+            const targets = Array.isArray(entry.targetTokenIds) ? entry.targetTokenIds.slice() : [];
+            if (targets.indexOf(safeTargetId) < 0) targets.push(safeTargetId);
+            State.setConcentrationTargets(safeCasterId, targets);
+            const request = State.getPlayerActionRequest(entry.actionId);
+            const profile = this.concentrationTrackingProfile(request, entry, null);
+            entry.trackingMode = profile.mode;
+            entry.trackingLabel = profile.label;
+            const casterToken = R20.getTokenById(safeCasterId);
+            if (casterToken) this.syncConcentrationTooltip(entry, casterToken);
+            return true;
+        },
+
         concentrationDurationTurns(durationText) {
             const text = Utils.stripHtml(String(durationText || '')).replace(/\s+/g, ' ').trim().toLowerCase();
             if (!text) return null;
@@ -10408,6 +10718,7 @@ const CombatAssistant = (() => {
         buildConcentrationTooltip(entry) {
             const data = entry || {};
             return 'CA Concentration: ' + String(data.spellName || 'Concentration').trim() +
+                '\nTracking: ' + String(data.trackingLabel || 'Passive Concentration').trim() +
                 '\nToken: ' + String(data.casterTokenId || '').trim() +
                 '\nAction: ' + String(data.actionId || '').trim() +
                 '\n' + this.concentrationDurationLine(data);
@@ -10483,6 +10794,7 @@ const CombatAssistant = (() => {
             const priorShowTooltip = previous ? !!previous.priorShowTooltip : Utils.toBoolean(casterToken.get('show_tooltip'), false);
             const durationText = String(request.payload.durationText || '').trim();
             const durationTurns = this.concentrationDurationTurns(durationText);
+            const trackingProfile = this.concentrationTrackingProfile(request, null, null);
             this.setTokenStatusMarker(casterToken, 'stopwatch', true);
             request.payload.casterTokenId = casterTokenId;
             request.concentrationAreaActive = true;
@@ -10496,7 +10808,10 @@ const CombatAssistant = (() => {
                 turnsLeft: durationTurns,
                 priorTooltip,
                 priorShowTooltip,
-                markerTokenIds: State.getPlayerActionMarkerIds(request)
+                markerTokenIds: State.getPlayerActionMarkerIds(request),
+                targetTokenIds: [],
+                trackingMode: trackingProfile.mode,
+                trackingLabel: trackingProfile.label,
             });
             const concentrationEntry = State.getConcentrationByTokenId(casterTokenId);
             this.syncConcentrationTooltip(concentrationEntry, casterToken);
@@ -10571,7 +10886,7 @@ const CombatAssistant = (() => {
                 const tokenHtml = Html.span(Utils.escapeHtml(tokenName || 'Token'), 'color:' + CONFIG.DEFAULT_TEXT_CHARACTER_COLOR + ';font-weight:900;');
                 const spellHtml = Html.span(Utils.escapeHtml(spellName), 'color:rgb(245,220,80);font-weight:900;');
                 const body = tokenHtml + ' maintains ' + spellHtml + ' concentration with a CON save of ' + totalHtml + ' vs DC ' + Utils.escapeHtml(String(dc)) + '.';
-                Render.sendPublicMessage('Concentration Check', body, 'success');
+                Render.sendCombatLogMessage('Concentration Check', body, 'success');
             } else {
                 Render.sendConcentrationLost({
                     casterName: tokenName,
@@ -10844,9 +11159,9 @@ const CombatAssistant = (() => {
         },
 
         read2014SavingThrowModifier(characterId, ability) {
-            const safeAbility = this.normalizeAbilityName(ability);
+            const safeAbility = Utils.normalizeAbilityName(ability);
             if (!safeAbility) return 0;
-            const short = this.abilityNameToShortLabel(safeAbility).toLowerCase();
+            const short = Utils.abilityShortLabel(safeAbility).toLowerCase();
             const saveBonus = this.readAttributeNumber(characterId, [
                 safeAbility + '_save_bonus',
                 short + '_save_bonus',
@@ -10881,7 +11196,7 @@ const CombatAssistant = (() => {
         },
 
         getAbilityScoreFromStore(characterId, ability) {
-            const safeAbility = this.normalizeAbilityName(ability);
+            const safeAbility = Utils.normalizeAbilityName(ability);
             if (!safeAbility) return null;
             const integrants = this.getBeaconIntegrants(characterId);
             const entries = [];
@@ -10889,7 +11204,7 @@ const CombatAssistant = (() => {
                 const node = integrants[key];
                 if (!this.isBeaconIntegrantActive(node, integrants)) return;
                 const type = String(node.type || '').trim().toLowerCase();
-                const abilityName = this.normalizeAbilityName(node.ability || node.name || '');
+                const abilityName = Utils.normalizeAbilityName(node.ability || node.name || '');
                 if (type !== 'ability score' || abilityName !== safeAbility) return;
                 const flatValue = this.readFlatValue(node);
                 if (flatValue === null || flatValue === undefined) return;
@@ -10923,9 +11238,9 @@ const CombatAssistant = (() => {
         },
 
         getSavingThrowStoreBonus(characterId, ability) {
-            const safeAbility = this.normalizeAbilityName(ability);
+            const safeAbility = Utils.normalizeAbilityName(ability);
             if (!safeAbility) return 0;
-            const shortAbility = String(this.abilityNameToShortLabel(safeAbility) || '').trim().toLowerCase();
+            const shortAbility = String(Utils.abilityShortLabel(safeAbility) || '').trim().toLowerCase();
             const proficiency = this.getSavingThrowProficiencyInfo(characterId, safeAbility);
             const integrants = this.getBeaconIntegrants(characterId);
             let bonus = Math.max(0, Utils.toInt(proficiency.proficiencyBonus, 0));
@@ -10948,13 +11263,13 @@ const CombatAssistant = (() => {
         },
 
         readSavingThrowModifier(characterId, ability) {
-            const safeAbility = this.normalizeAbilityName(ability);
+            const safeAbility = Utils.normalizeAbilityName(ability);
             if (!safeAbility) return 0;
             const sheetVersion = R20.detectSheetVersion(characterId);
             if (sheetVersion === '2024') {
                 const score = this.getAbilityScoreFromStore(characterId, safeAbility);
                 const abilityMod = score === null || score === undefined
-                    ? this.readAttributeNumber(characterId, [safeAbility + '_mod', (this.abilityNameToShortLabel(safeAbility) || '').toLowerCase() + '_mod'], 0)
+                    ? this.readAttributeNumber(characterId, [safeAbility + '_mod', (Utils.abilityShortLabel(safeAbility) || '').toLowerCase() + '_mod'], 0)
                     : this.abilityScoreToModifier(score);
                 return abilityMod + this.getSavingThrowStoreBonus(characterId, safeAbility);
             }
@@ -11057,7 +11372,7 @@ const CombatAssistant = (() => {
             const character = R20.getCharacterFromToken(token);
             if (!character) return { ok: false, message: this.getTokenName(token) + ' must be linked to a character.' };
             const characterId = String(character.id || token.get('represents') || '').trim();
-            const safeAbility = this.normalizeAbilityName(ability);
+            const safeAbility = Utils.normalizeAbilityName(ability);
             if (!characterId || !safeAbility) return { ok: false, message: 'Saving throw could not be resolved.' };
             const modifier = this.readSavingThrowModifier(characterId, safeAbility);
             const rollMode = this.normalizeRollMode(mode);
@@ -11281,8 +11596,8 @@ const CombatAssistant = (() => {
 
         rollDamageFormula(formula) {
             const raw = Utils.cleanRoll20Label(formula || '').replace(/\s+/g, '');
-            if (!raw || !/^\d*d\d+(?:[+-]\d*d?\d+)*$/i.test(raw)) {
-                return { ok: false, message: 'Damage formula is not supported for reroll: ' + raw };
+            if (!raw || !/^(?:\d*d\d+|\d+)(?:[+-](?:\d*d\d+|\d+))*$/i.test(raw)) {
+                return { ok: false, message: 'Effect formula is not supported for CA roll: ' + raw };
             }
             const terms = raw.match(/[+-]?[^+-]+/g) || [];
             const detail = [];
@@ -11372,12 +11687,12 @@ const CombatAssistant = (() => {
         },
 
         getNativeSaveMacroName(ability) {
-            const safeAbility = this.normalizeAbilityName(ability);
+            const safeAbility = Utils.normalizeAbilityName(ability);
             return safeAbility ? (safeAbility + '_save') : '';
         },
 
         getNativeSaveCommandSet(characterId, ability) {
-            const safeAbility = this.normalizeAbilityName(ability);
+            const safeAbility = Utils.normalizeAbilityName(ability);
             if (!safeAbility) return { macroName: '', buttonCommand: '', nativeCommand: '', batchCommand: '', sheetVersion: 'unknown', requiresButton: false };
             const sheetVersion = R20.detectSheetVersion(characterId);
             const macroName = sheetVersion === '2014' ? (safeAbility + '_save_roll') : (safeAbility + '_save');
@@ -11402,7 +11717,7 @@ const CombatAssistant = (() => {
             const character = R20.getCharacterFromToken(token);
             if (!character) return { ok: false, message: 'Target token needs an assigned character to roll a saving throw.' };
             const characterId = String(character.id || token.get('represents') || '').trim();
-            const saveAbility = this.normalizeAbilityName(payload && payload.saveAbility || '');
+            const saveAbility = Utils.normalizeAbilityName(payload && payload.saveAbility || '');
             const commandSet = this.getNativeSaveCommandSet(characterId, saveAbility);
             if (!characterId || !commandSet.macroName || !commandSet.batchCommand || (!commandSet.requiresButton && !commandSet.nativeCommand)) return { ok: false, message: 'Native saving throw macro could not be resolved.' };
             const tokenName = this.getTokenName(token);
@@ -11615,7 +11930,7 @@ const CombatAssistant = (() => {
                 : [natural];
             const save = {
                 used: true,
-                ability: this.normalizeAbilityName(payload.saveAbility || ''),
+                ability: Utils.normalizeAbilityName(payload.saveAbility || ''),
                 dc: context.challenge,
                 raw: String(payload.nativeSaveRollName || 'Roll20'),
                 modifier,
@@ -11773,6 +12088,9 @@ const CombatAssistant = (() => {
                 noDamage: breakdown.totalDamage <= 0
             };
             CombatEffects.playDamageReceived(token, result);
+            if (safePayload.isConcentration && String(safePayload.casterTokenId || '').trim()) {
+                this.recordConcentrationTarget(safePayload.casterTokenId, R20.getTokenId(token));
+            }
             this.queueConcentrationSaveForDamage(token, result);
             return result;
         },
@@ -11793,6 +12111,9 @@ const CombatAssistant = (() => {
             const sourceName = payload.sourceName || '';
             const sourceAction = payload.sourceAction || '';
             const sourceImgsrc = payload.sourceImgsrc || '';
+            const sourceDescription = payload.sourceDescription || '';
+            const rollFormula = payload.rollFormula || '';
+            const rollDetail = payload.rollDetail || '';
             if (amount <= 0) return { ok: false, message: 'Healing amount must be greater than 0.' };
 
             if (mode === 'temp') {
@@ -11805,7 +12126,7 @@ const CombatAssistant = (() => {
                 const tempWrite = await this.setBarOrLinkedAttributeValue(token, tempBarNumber, 'hp_temp', currentTemp);
                 if (!tempWrite.ok) return tempWrite;
                 const effectiveAmount = Math.max(0, currentTemp - previousTemp);
-                const result = { ok: true, mode, tokenName, tokenImgsrc, amount, rolledAmount: amount, effectiveAmount, previousTemp, currentTemp, sourceName, sourceAction, sourceImgsrc };
+                const result = { ok: true, mode, tokenName, tokenImgsrc, amount, rolledAmount: amount, effectiveAmount, previousTemp, currentTemp, sourceName, sourceAction, sourceImgsrc, sourceDescription, rollFormula, rollDetail };
                 CombatEffects.playHealingReceived(token, mode, effectiveAmount);
                 return result;
             }
@@ -11831,7 +12152,7 @@ const CombatAssistant = (() => {
             const effectiveAmount = Math.max(0, currentHp - previousHp);
             const revived = previousHp <= 0 && currentHp > 0;
             if (revived || (!hpLinked && currentHp > 0)) this.setTokenStatusMarker(token, 'dead', false);
-            const result = { ok: true, mode, tokenName, tokenImgsrc, amount, rolledAmount: amount, effectiveAmount, overhealing: Math.max(0, amount - effectiveAmount), previousHp, currentHp, maxHp, sourceName, sourceAction, sourceImgsrc, revived, deathSavesWereOpen: !!deathSaves.open, sheetWrite: hpLinked ? { ok: true, source: 'setSheetItem' } : { ok: true, skipped: true } };
+            const result = { ok: true, mode, tokenName, tokenImgsrc, amount, rolledAmount: amount, effectiveAmount, overhealing: Math.max(0, amount - effectiveAmount), previousHp, currentHp, maxHp, sourceName, sourceAction, sourceImgsrc, sourceDescription, rollFormula, rollDetail, revived, deathSavesWereOpen: !!deathSaves.open, sheetWrite: hpLinked ? { ok: true, source: 'setSheetItem' } : { ok: true, skipped: true } };
             CombatEffects.playHealingReceived(token, mode, effectiveAmount);
             return result;
         }
@@ -11841,11 +12162,6 @@ const CombatAssistant = (() => {
      * Resources
      * --------------------------------------------------------------------- */
     const ActionService = {
-        normalizeSigned(value) {
-            const n = Utils.toInt(value, 0);
-            return (n >= 0 ? '+' : '') + String(n);
-        },
-
         parseSignedNumber(value, fallback) {
             const text = String(value === undefined || value === null ? '' : value).trim();
             const match = text.match(/[+-]?\d+/);
@@ -11864,24 +12180,6 @@ const CombatAssistant = (() => {
             }
         },
 
-        normalizeAbilityName(value) {
-            const text = String(value || '').trim().toLowerCase();
-            const aliases = {
-                str: 'strength', strength: 'strength',
-                dex: 'dexterity', dexterity: 'dexterity',
-                con: 'constitution', constitution: 'constitution',
-                int: 'intelligence', intelligence: 'intelligence',
-                wis: 'wisdom', wisdom: 'wisdom',
-                cha: 'charisma', charisma: 'charisma'
-            };
-            return aliases[text] || '';
-        },
-
-        abilityLabel(value) {
-            const normalized = this.normalizeAbilityName(value);
-            return normalized ? normalized.slice(0, 3).toUpperCase() : '';
-        },
-
         parseSaveInfoText(value) {
             const text = String(value === undefined || value === null ? '' : value).trim();
             if (!text) return { saveDc: 0, saveAbility: '' };
@@ -11889,7 +12187,7 @@ const CombatAssistant = (() => {
             const abilityMatch = text.match(/\b(strength|dexterity|constitution|intelligence|wisdom|charisma|str|dex|con|int|wis|cha)\b/i);
             return {
                 saveDc: dcMatch ? Math.max(0, Utils.toInt(dcMatch[1], 0)) : 0,
-                saveAbility: abilityMatch ? this.normalizeAbilityName(abilityMatch[1]) : ''
+                saveAbility: abilityMatch ? Utils.normalizeAbilityName(abilityMatch[1]) : ''
             };
         },
 
@@ -11903,10 +12201,10 @@ const CombatAssistant = (() => {
             const takeObject = (obj) => {
                 if (!obj || typeof obj !== 'object') return;
                 if (!saveDc) saveDc = Math.max(0, Utils.toInt(obj.dc !== undefined ? obj.dc : (obj.saveDc !== undefined ? obj.saveDc : obj.difficultyClass), 0));
-                if (!saveAbility) saveAbility = this.normalizeAbilityName(obj.ability || obj.saveAbility || obj.attribute || obj.stat || '');
+                if (!saveAbility) saveAbility = Utils.normalizeAbilityName(obj.ability || obj.saveAbility || obj.attribute || obj.stat || '');
             };
             if (!saveDc) saveDc = Math.max(0, Utils.toInt(source.saveDc !== undefined ? source.saveDc : (source.save_dc !== undefined ? source.save_dc : source.dc), 0));
-            saveAbility = this.normalizeAbilityName(source.saveAbility || source.save_ability || source.saveattr || source.saveAttribute || '');
+            saveAbility = Utils.normalizeAbilityName(source.saveAbility || source.save_ability || source.saveattr || source.saveAttribute || '');
             nested.forEach((entry) => {
                 if (typeof entry === 'object') takeObject(entry);
                 else {
@@ -11951,7 +12249,7 @@ const CombatAssistant = (() => {
             const source = row || {};
             const rawSaveAbility = String(source.saveattr || source.saveability || source.save_ability || source.savetype || source.spellsave || source.save || '').trim();
             const saveDc = Math.max(0, Utils.toInt(source.savedc || source.save_dc || source.spelldc || source.spell_dc || source.dc, 0));
-            let saveAbility = this.normalizeAbilityName(rawSaveAbility);
+            let saveAbility = Utils.normalizeAbilityName(rawSaveAbility);
             if (!saveAbility && rawSaveAbility) saveAbility = this.legacyAttrAbility(rawSaveAbility) || this.parseSaveInfoText(rawSaveAbility).saveAbility;
             if ((!saveDc || !saveAbility) && (source.description || source.atk_desc || source.spelldescription || source.spelldesc)) {
                 const parsed = this.parseSaveInfoText(source.description || source.atk_desc || source.spelldescription || source.spelldesc);
@@ -11990,7 +12288,7 @@ const CombatAssistant = (() => {
         },
 
         async readAbilityState(characterId, ability, fallbackState) {
-            const normalized = this.normalizeAbilityName(ability);
+            const normalized = Utils.normalizeAbilityName(ability);
             const fallback = fallbackState && typeof fallbackState === 'object' ? fallbackState : {};
             if (!normalized) {
                 return {
@@ -12037,15 +12335,10 @@ const CombatAssistant = (() => {
             };
         },
 
-        async readAbilityMod(characterId, ability) {
-            const state = await this.readAbilityState(characterId, ability);
-            return state ? Utils.toInt(state.modifier, 0) : 0;
-        },
-
         diagnosticCandidateNamesForAbility(ability) {
-            const normalized = this.normalizeAbilityName(ability);
+            const normalized = Utils.normalizeAbilityName(ability);
             if (!normalized) return { score: [], modifier: [], all: [] };
-            const short = this.abilityLabel(normalized).toLowerCase();
+            const short = Utils.abilityShortLabel(normalized).toLowerCase();
             const score = [normalized, short];
             const modifier = [normalized + '_mod', normalized + '_modifier', short + '_mod', short + '_modifier'];
             return { score, modifier, all: score.concat(modifier) };
@@ -12132,7 +12425,7 @@ const CombatAssistant = (() => {
             const context = this.beaconCombatContext(root || {});
             const abilities = [];
             (Array.isArray(attacks) ? attacks : []).forEach((attack) => {
-                const ability = this.normalizeAbilityName(attack && attack.ability);
+                const ability = Utils.normalizeAbilityName(attack && attack.ability);
                 if (ability && abilities.indexOf(ability) < 0) abilities.push(ability);
             });
             const requests = abilities.map(async (ability) => {
@@ -12263,7 +12556,7 @@ const CombatAssistant = (() => {
             const revealNames = RuntimeConfig.get('REVEAL_TOKEN_NAMES_IN_LOG');
             const displayName = revealNames ? info.characterName : 'Character';
             const nameHtml = '<strong style="color:' + CONFIG.DEFAULT_TEXT_CHARACTER_COLOR + ';">' + Utils.escapeHtml(displayName) + '</strong>';
-            Render.sendPublicMessage(
+            Render.sendCombatLogMessage(
                 'Turn Action',
                 nameHtml + ' takes the <strong>' + labels[normalized] + '</strong> action.',
                 'normal',
@@ -12283,16 +12576,20 @@ const CombatAssistant = (() => {
             return true;
         },
 
-        getLegacyAttackRows(characterId, sourceAttrs) {
+        getLegacyRepeatingRows(characterId, sectionName, sourceAttrs) {
             const safeCharacterId = String(characterId || '').trim();
+            const safeSection = String(sectionName || '').trim();
+            if (!safeCharacterId || !safeSection) return [];
             const attrs = Array.isArray(sourceAttrs)
                 ? sourceAttrs
                 : (findObjs({ _type: 'attribute', _characterid: safeCharacterId }) || []);
+            const escapedSection = safeSection.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const pattern = new RegExp('^repeating_' + escapedSection + '_([^_]+)_(.+)$', 'i');
             const rows = Object.create(null);
             attrs.forEach((attr) => {
                 if (!attr || !Utils.isFunction(attr.get)) return;
                 const name = String(attr.get('name') || '');
-                const match = name.match(/^repeating_attack_([^_]+)_(.+)$/i);
+                const match = name.match(pattern);
                 if (!match) return;
                 const rowId = match[1];
                 const key = String(match[2] || '').toLowerCase();
@@ -12302,23 +12599,12 @@ const CombatAssistant = (() => {
             return Object.keys(rows).map((id) => rows[id]);
         },
 
+        getLegacyAttackRows(characterId, sourceAttrs) {
+            return this.getLegacyRepeatingRows(characterId, 'attack', sourceAttrs);
+        },
+
         getLegacyNpcActionRows(characterId, sourceAttrs) {
-            const safeCharacterId = String(characterId || '').trim();
-            const attrs = Array.isArray(sourceAttrs)
-                ? sourceAttrs
-                : (findObjs({ _type: 'attribute', _characterid: safeCharacterId }) || []);
-            const rows = Object.create(null);
-            attrs.forEach((attr) => {
-                if (!attr || !Utils.isFunction(attr.get)) return;
-                const name = String(attr.get('name') || '');
-                const match = name.match(/^repeating_npcaction_([^_]+)_(.+)$/i);
-                if (!match) return;
-                const rowId = match[1];
-                const key = String(match[2] || '').toLowerCase();
-                rows[rowId] = rows[rowId] || { rowId };
-                rows[rowId][key] = attr.get('current');
-            });
-            return Object.keys(rows).map((id) => rows[id]);
+            return this.getLegacyRepeatingRows(characterId, 'npcaction', sourceAttrs);
         },
 
         legacyNpcActionIsAttack(row) {
@@ -12380,8 +12666,8 @@ const CombatAssistant = (() => {
                         saveDc: this.legacyRowSaveInfo(row).saveDc,
                         saveAbility: this.legacyRowSaveInfo(row).saveAbility,
                         attackBonus,
-                        attackBonusLabel: this.normalizeSigned(attackBonus),
-                        attackBreakdown: this.normalizeSigned(attackBonus) + ' (NPC sheet)',
+                        attackBonusLabel: Utils.formatSigned(attackBonus),
+                        attackBreakdown: Utils.formatSigned(attackBonus) + ' (NPC sheet)',
                         damage: this.legacyNpcDamageSummaries(row),
                         rollCommand: rowId ? R20.buttonAbilityCommand(characterId, 'repeating_npcaction_' + rowId + '_npc_action') : '',
                         damageCommand: rowId ? R20.buttonAbilityCommand(characterId, 'repeating_npcaction_' + rowId + '_npc_dmg') : ''
@@ -12393,70 +12679,6 @@ const CombatAssistant = (() => {
             const raw = String(value || '').toLowerCase();
             const match = raw.match(/@\{(strength|dexterity|constitution|intelligence|wisdom|charisma)_mod\}/i);
             return match ? String(match[1]).toLowerCase() : '';
-        },
-
-        async buildLegacyAttack(characterId, row) {
-            const name = String(row && row.atkname || '').trim();
-            const rowId = String(row && row.rowId || '').trim();
-            if (!name || !rowId) return null;
-            const spellLevel = String(row.spelllevel || '').trim();
-            const spellInnate = String(row.spell_innate || '').trim();
-            if (spellLevel || spellInnate) return null;
-            if (String(row.atkflag || '').trim() && String(row.atkflag).indexOf('attack=1') < 0) return null;
-
-            const ability = this.legacyAttrAbility(row.atkattr_base);
-            const abilityMod = ability ? await this.readAbilityMod(characterId, ability) : 0;
-            const profEnabled = /pb/i.test(String(row.atkprofflag || ''));
-            const pb = profEnabled ? await this.readSheetNumber(characterId, 'pb', 0) : 0;
-            const extra = this.parseSignedNumber(row.atkmod, 0) + this.parseSignedNumber(row.atkmagic, 0);
-            const finalFromSheet = this.parseSignedNumber(row.atkbonus, null);
-            const computed = abilityMod + pb + extra;
-            const attackBonus = finalFromSheet !== null ? finalFromSheet : computed;
-            const breakdownParts = [];
-            if (ability) breakdownParts.push(this.normalizeSigned(abilityMod) + ' ' + this.abilityLabel(ability));
-            if (profEnabled) breakdownParts.push(this.normalizeSigned(pb) + ' PB');
-            if (extra) breakdownParts.push(this.normalizeSigned(extra) + ' Bonus');
-
-            const damageAbility = this.legacyAttrAbility(row.dmgattr);
-            const damageAbilityMod = damageAbility ? await this.readAbilityMod(characterId, damageAbility) : 0;
-            const damageMod = this.parseSignedNumber(row.dmgmod, 0);
-            const damageBase = String(row.dmgbase || '').trim();
-            const damageFormula = damageBase ? (damageBase + (damageAbilityMod || damageMod ? this.normalizeSigned(damageAbilityMod + damageMod) : '')) : '';
-            const damage = damageFormula ? [{ formula: damageFormula, damageType: String(row.dmgtype || 'Damage').trim() || 'Damage' }] : [];
-            return {
-                id: rowId,
-                name,
-                sheetVersion: '2014',
-                attackType: 'Attack',
-                range: String(row.atkrange || '').trim(),
-                attackBonus,
-                attackBonusLabel: this.normalizeSigned(attackBonus),
-                attackBreakdown: this.normalizeSigned(attackBonus) + (breakdownParts.length ? (' (' + breakdownParts.join(' ') + ')') : ''),
-                damage,
-                rollCommand: '%{' + characterId + '|repeating_attack_' + rowId + '_attack}',
-                damageCommand: R20.buttonAbilityCommand(characterId, 'repeating_attack_' + rowId + '_attack_dmg')
-            };
-        },
-
-        async getLegacyAttacks(characterId) {
-            const attacks = [];
-            const rows = this.getLegacyAttackRows(characterId);
-            for (let i = 0; i < rows.length; i += 1) {
-                const attack = await this.buildLegacyAttack(characterId, rows[i]);
-                if (attack) attacks.push(attack);
-            }
-            return attacks.concat(this.getLegacyNpcAttackSummaries(characterId));
-        },
-
-        getBeaconStore(characterId) {
-            const roots = R20.getCharacterStoreDumpRoots(characterId);
-            return roots.length ? roots[0] : null;
-        },
-
-        beaconIntegrants(root) {
-            return root && root.integrants && root.integrants.integrants && typeof root.integrants.integrants === 'object'
-                ? root.integrants.integrants
-                : {};
         },
 
         beaconFlatFormulaValue(record) {
@@ -12480,7 +12702,7 @@ const CombatAssistant = (() => {
                 const parent = parentId ? integrants[parentId] : null;
                 if (parent && (parent._enabled === false || parent.parentDisabled === true)) return;
                 if (parent && parent.equipData && parent.equipData.equippable === true && parent.equipData.equipped !== true) return;
-                const ability = this.normalizeAbilityName(record.ability);
+                const ability = Utils.normalizeAbilityName(record.ability);
                 if (!ability) return;
                 groups[ability] = groups[ability] || [];
                 groups[ability].push({
@@ -12608,25 +12830,27 @@ const CombatAssistant = (() => {
         },
 
         beaconCombatContext(root) {
-            const integrants = this.beaconIntegrants(root);
+            const integrants = Utils.getBeaconIntegrants(root);
             const abilities = this.beaconAbilityContext(integrants);
             const proficiency = this.beaconProficiencyBonus(root, integrants);
             return { integrants, abilities, proficiency };
         },
 
-        beaconDamageSummaries(record, context, attackAbility) {
+        beaconEffectSummaries(record, context, attackAbility, includeHealing) {
             const integrants = context && context.integrants || {};
             const abilities = context && context.abilities || {};
             const childIds = this.parseJsonList(record && record.childIDs);
-            return childIds.map((id) => integrants[id]).filter((entry) => entry && entry.type === 'Damage' && entry._enabled !== false)
-                .map((damage) => {
+            return childIds.map((id) => integrants[id]).filter((entry) => {
+                if (!entry || entry._enabled === false) return false;
+                return entry.type === 'Damage' || (includeHealing === true && entry.type === 'Healing');
+            }).map((damage) => {
                     const diceSize = String(damage.diceSize || '').trim();
                     const diceCountRaw = damage._diceCount !== undefined ? damage._diceCount : damage.diceCount;
                     const diceCount = diceSize ? Math.max(1, Utils.toInt(diceCountRaw, 1)) : 0;
                     const abilitySetting = String(damage.ability || '').trim().toLowerCase();
                     const damageAbility = abilitySetting === 'auto'
                         ? attackAbility
-                        : (abilitySetting === 'none' ? '' : this.normalizeAbilityName(abilitySetting));
+                        : (abilitySetting === 'none' ? '' : Utils.normalizeAbilityName(abilitySetting));
                     const abilityMod = damageAbility && abilities[damageAbility] ? Utils.toInt(abilities[damageAbility].modifier, 0) : 0;
                     const rawFlatBonus = damage._bonus !== undefined ? damage._bonus : damage.bonus;
                     const flatBonus = this.parseSignedNumber(rawFlatBonus, 0);
@@ -12634,13 +12858,16 @@ const CombatAssistant = (() => {
                     const hasAbilityComponent = !!damageAbility;
                     const totalFlat = abilityMod + flatBonus;
                     let formula = diceSize && diceCount ? (String(diceCount) + diceSize) : '';
-                    if (formula && totalFlat) formula += this.normalizeSigned(totalFlat);
+                    if (formula && totalFlat) formula += Utils.formatSigned(totalFlat);
                     else if (!formula && (hasFlatComponent || hasAbilityComponent)) formula = String(totalFlat);
+                    const isHealing = damage.type === 'Healing';
                     return {
                         formula: formula || '-',
-                        damageType: String(damage.damageType || 'Damage').trim() || 'Damage',
+                        damageType: String(damage.damageType || (isHealing ? 'Healing' : 'Damage')).trim() || (isHealing ? 'Healing' : 'Damage'),
+                        effectType: isHealing ? 'healing' : 'damage',
+                        isHealing,
                         ability: damageAbility,
-                        abilityLabel: this.abilityLabel(damageAbility),
+                        abilityLabel: Utils.abilityShortLabel(damageAbility),
                         abilityModifier: abilityMod,
                         flatBonus
                     };
@@ -12672,7 +12899,7 @@ const CombatAssistant = (() => {
             if (!formula) return direct;
             let dc = this.parseSignedNumber(formula.flatValue, 0);
             const abilitySpec = formula.ability && typeof formula.ability === 'object' ? formula.ability : null;
-            const ability = this.normalizeAbilityName(
+            const ability = Utils.normalizeAbilityName(
                 abilitySpec && abilitySpec.ability || saveInfo && saveInfo.saveAbility || ''
             );
             if (abilitySpec && Utils.toBoolean(abilitySpec.add, false) && ability) {
@@ -12701,7 +12928,7 @@ const CombatAssistant = (() => {
             });
             if (!linkedId) return null;
             const linked = integrants[linkedId];
-            const ability = this.normalizeAbilityName(linked.ability || linked.spellcastingAbility || '');
+            const ability = Utils.normalizeAbilityName(linked.ability || linked.spellcastingAbility || '');
             if (!ability) return null;
             const abilityData = abilities[ability] || null;
             const abilityModifier = abilityData ? Utils.toInt(abilityData.modifier, 0) : 0;
@@ -12709,7 +12936,7 @@ const CombatAssistant = (() => {
             return {
                 integrantKey: linkedId,
                 ability,
-                abilityLabel: this.abilityLabel(ability),
+                abilityLabel: Utils.abilityShortLabel(ability),
                 abilityModifier,
                 proficiencyBonus,
                 spellAttackBonus: abilityModifier + proficiencyBonus,
@@ -12737,9 +12964,9 @@ const CombatAssistant = (() => {
             const extraBonus = this.parseSignedNumber(record && record.attack && record.attack.bonus, 0);
             const attackBonus = abilityMod + proficiencyBonus + extraBonus;
             const parts = [];
-            if (ability) parts.push(this.normalizeSigned(abilityMod) + ' ' + this.abilityLabel(ability));
-            if (proficiencyBonus) parts.push(this.normalizeSigned(proficiencyBonus) + ' PB');
-            if (extraBonus) parts.push(this.normalizeSigned(extraBonus) + ' Bonus');
+            if (ability) parts.push(Utils.formatSigned(abilityMod) + ' ' + Utils.abilityShortLabel(ability));
+            if (proficiencyBonus) parts.push(Utils.formatSigned(proficiencyBonus) + ' PB');
+            if (extraBonus) parts.push(Utils.formatSigned(extraBonus) + ' Bonus');
             const shortID = String(record && record.shortID || '').trim();
             const range = this.beaconAttackRangeRaw(record, parent);
             let saveDc = this.beaconCalculatedSaveDc(record, context, saveInfo);
@@ -12749,7 +12976,7 @@ const CombatAssistant = (() => {
                 name: String(record && (record.name || record.recordName) || 'Attack').trim() || 'Attack',
                 sheetVersion: '2024',
                 ability,
-                abilityLabel: this.abilityLabel(ability),
+                abilityLabel: Utils.abilityShortLabel(ability),
                 abilityModifier: abilityMod,
                 proficiencyBonus,
                 proficiencyMultiplier,
@@ -12762,44 +12989,141 @@ const CombatAssistant = (() => {
                 saveDc,
                 saveAbility: saveInfo.saveAbility,
                 attackBonus,
-                attackBonusLabel: this.normalizeSigned(attackBonus),
-                attackBreakdown: this.normalizeSigned(attackBonus) + (parts.length ? (' (' + parts.join(' ') + ')') : ''),
-                damage: this.beaconDamageSummaries(record, context, ability),
+                attackBonusLabel: Utils.formatSigned(attackBonus),
+                attackBreakdown: Utils.formatSigned(attackBonus) + (parts.length ? (' (' + parts.join(' ') + ')') : ''),
+                damage: this.beaconEffectSummaries(record, context, ability),
                 rollCommand: shortID ? R20.buttonAbilityCommand(characterId, 'repeating_attack_' + shortID + '_attack') : '',
                 damageCommand: shortID ? R20.buttonAbilityCommand(characterId, 'repeating_attack_' + shortID + '_attack_dmg') : ''
             };
         },
 
-        getBeaconAttackSummariesFromRoot(characterId, root) {
-            const context = this.beaconCombatContext(root);
-            const records = Object.keys(context.integrants)
-                .map((key) => context.integrants[key])
-                .filter((record) => this.beaconAttackIsUsable(record, context.integrants));
-            const seen = Object.create(null);
-            return records.map((record) => this.buildBeaconAttackSummary(characterId, record, context)).filter((attack) => {
-                const key = String(attack.name || '').toLowerCase() + '|' + String(attack.id || '');
-                if (seen[key]) return false;
-                seen[key] = true;
-                return true;
+        buildBeaconCombatActionSummary(characterId, record, context) {
+            const actionType = String(record && record.actionType || '').trim();
+            const sectionKey = COMBAT_SPECIAL_SECTION_BY_TYPE[actionType.toLowerCase()] || '';
+            const sectionDefinition = sectionKey ? COMBAT_SPECIAL_SECTIONS[sectionKey] : null;
+            const abilityPrefix = sectionDefinition ? sectionDefinition.abilityPrefix : '';
+            const shortID = String(record && record.shortID || '').trim().replace(/["\\]/g, '');
+            const actionCommand = abilityPrefix && shortID
+                ? R20.buttonAbilityCommand(characterId, abilityPrefix + '("' + shortID + '", "action")')
+                : '';
+            const attackType = String(record && record.attack && record.attack.type || '').trim();
+            const hasAttackRoll = record && record.type === 'Attack' && record.autoHit !== true && !!attackType && !/save/i.test(attackType);
+            const baseAttack = record && record.type === 'Attack'
+                ? this.buildBeaconAttackSummary(characterId, record, context)
+                : null;
+            const attackAbility = baseAttack ? baseAttack.ability : '';
+            const effects = this.beaconEffectSummaries(record, context, attackAbility, true);
+            const healingEffects = effects.filter((entry) => entry && entry.isHealing === true);
+            const damageEffects = effects.filter((entry) => entry && entry.isHealing !== true);
+            const caHealingOnly = !hasAttackRoll && healingEffects.length > 0 && damageEffects.length === 0;
+            const effectTypes = [];
+            effects.forEach((entry) => {
+                const label = String(entry && entry.damageType || '').trim();
+                if (label && effectTypes.indexOf(label) < 0) effectTypes.push(label);
             });
+            const summary = Object.assign({}, baseAttack || {}, {
+                id: shortID,
+                characterId: String(characterId || '').trim(),
+                name: String(record && (record.name || record.recordName) || actionType || 'Action').trim() || 'Action',
+                description: String(record && record.description || baseAttack && baseAttack.description || '').trim(),
+                sheetVersion: '2024',
+                actionType,
+                hasAttackRoll,
+                damage: effects,
+                effectLabel: effectTypes.join(' + ') || '',
+                detailLabel: hasAttackRoll ? '' : (effectTypes.join(' + ') || actionType),
+                rollCommand: hasAttackRoll ? actionCommand : '',
+                damageCommand: !hasAttackRoll && effects.length
+                    ? (caHealingOnly
+                        ? ('!combatAssistant combatheal ' + Utils.encodeJsonPayload({ characterId, actionId: shortID }))
+                        : actionCommand)
+                    : '',
+                sendCommand: actionCommand,
+                caHealingOnly
+            });
+            return summary;
         },
 
-        async getBeaconAttackSummariesFromRootLive(characterId, root) {
+        getBeaconConcentrationFollowup(characterId, sourceActionRowId) {
+            const safeCharacterId = String(characterId || '').trim();
+            const safeRowId = String(sourceActionRowId || '').trim();
+            if (!safeCharacterId || !safeRowId) return null;
+            const root = R20.getCharacterStoreRoot(safeCharacterId);
+            if (!root || typeof root !== 'object') return null;
+            const integrants = Utils.getBeaconIntegrants(root);
+            const records = Object.keys(integrants).map((key) => integrants[key]).filter(Boolean);
+            const sourceAction = records.find((record) => String(record && record.shortID || '').trim() === safeRowId);
+            if (!sourceAction) return null;
+
+            const candidateSpellIds = Utils.uniqueNames([
+                String(sourceAction.sourceID || '').trim(),
+                String(sourceAction.parentID || '').trim()
+            ]).filter(Boolean);
+            let spell = candidateSpellIds.map((id) => integrants[id]).find((record) => record && String(record.type || '').trim().toLowerCase() === 'spell') || null;
+            if (!spell) {
+                const sourceRecordId = String(sourceAction._id || '').trim();
+                const parents = records.filter((record) => {
+                    if (!record || String(record.type || '').trim().toLowerCase() !== 'spell') return false;
+                    return this.parseJsonList(record.childIDs).indexOf(sourceRecordId) >= 0;
+                });
+                if (parents.length === 1) spell = parents[0];
+            }
+            if (!spell) return null;
+
+            const sourceRecordId = String(sourceAction._id || '').trim();
+            const candidates = this.parseJsonList(spell.childIDs)
+                .map((id) => integrants[id])
+                .filter((record) => {
+                    if (!record || record === sourceAction || String(record._id || '').trim() === sourceRecordId) return false;
+                    if (record._enabled === false || record.parentDisabled === true || !record.shortID) return false;
+                    if (record.type !== 'Action' && record.type !== 'Attack') return false;
+                    return !!COMBAT_SPECIAL_SECTION_BY_TYPE[String(record.actionType || '').trim().toLowerCase()];
+                });
+            const spellName = String(spell.name || spell.recordName || 'Concentration').trim() || 'Concentration';
+            if (candidates.length !== 1) {
+                return { spellName, actionName: '', actionType: '', command: '', candidateCount: candidates.length };
+            }
+            const action = candidates[0];
+            const sectionKey = COMBAT_SPECIAL_SECTION_BY_TYPE[String(action.actionType || '').trim().toLowerCase()] || '';
+            const definition = sectionKey ? COMBAT_SPECIAL_SECTIONS[sectionKey] : null;
+            const shortID = String(action.shortID || '').trim().replace(/["\\]/g, '');
+            const command = definition && definition.abilityPrefix && shortID
+                ? R20.buttonAbilityCommand(safeCharacterId, definition.abilityPrefix + '("' + shortID + '", "action")')
+                : '';
+            return {
+                spellName,
+                actionName: String(action.name || action.recordName || action.actionType || 'Use').trim() || 'Use',
+                actionType: String(action.actionType || '').trim(),
+                command,
+                candidateCount: 1
+            };
+        },
+
+        async getBeaconCombatMenuDataFromRootLive(characterId, root) {
             const context = this.beaconCombatContext(root);
-            const records = Object.keys(context.integrants)
-                .map((key) => context.integrants[key])
-                .filter((record) => this.beaconAttackIsUsable(record, context.integrants));
+            const allRecords = Object.keys(context.integrants).map((key) => context.integrants[key]).filter(Boolean);
+            const attackRecords = allRecords.filter((record) => this.beaconAttackIsUsable(record, context.integrants));
+            const specialRecords = allRecords.filter((record) => {
+                if (!record || record._enabled === false || record.parentDisabled === true || !record.shortID) return false;
+                if (record.type !== 'Action' && record.type !== 'Attack') return false;
+                if (!COMBAT_SPECIAL_SECTION_BY_TYPE[String(record.actionType || '').trim().toLowerCase()]) return false;
+                const parentKey = String(record.parentID || record.sourceID || '').trim();
+                const parent = parentKey ? context.integrants[parentKey] : null;
+                if (parent && (parent._enabled === false || parent.parentDisabled === true)) return false;
+                if (String(record.source || '').toLowerCase() === 'item' && parent && parent.equipData && parent.equipData.equippable === true && parent.equipData.equipped !== true) return false;
+                return true;
+            });
+            const liveRecords = attackRecords.concat(specialRecords.filter((record) => attackRecords.indexOf(record) < 0));
             const abilityNames = [];
             const rememberAbility = (value) => {
-                const ability = this.normalizeAbilityName(value);
+                const ability = Utils.normalizeAbilityName(value);
                 if (ability && abilityNames.indexOf(ability) < 0) abilityNames.push(ability);
                 return ability;
             };
 
-            // Keep the Store as the structural source for attacks, but refresh only the
-            // ability modifiers actually used by those attacks/damage formulas. This
-            // avoids stale Beacon item effects without turning Combat into a full-sheet scan.
-            records.forEach((record) => {
+            // Store remains the structural source. Refresh only ability modifiers used
+            // by attacks, saves, Damage, or Healing entries that appear in Combat.
+            liveRecords.forEach((record) => {
                 const children = this.parseJsonList(record && record.childIDs)
                     .map((id) => context.integrants[id])
                     .filter(Boolean);
@@ -12815,7 +13139,7 @@ const CombatAssistant = (() => {
                 }
 
                 children.forEach((child) => {
-                    if (!child || child.type !== 'Damage' || child._enabled === false) return;
+                    if (!child || (child.type !== 'Damage' && child.type !== 'Healing') || child._enabled === false) return;
                     const setting = String(child.ability || '').trim().toLowerCase();
                     if (setting && setting !== 'auto' && setting !== 'none') rememberAbility(setting);
                 });
@@ -12844,17 +13168,33 @@ const CombatAssistant = (() => {
                 );
             });
 
-            const seen = Object.create(null);
-            return records.map((record) => this.buildBeaconAttackSummary(characterId, record, context)).filter((attack) => {
-                const key = String(attack.name || '').toLowerCase() + '|' + String(attack.id || '');
-                if (seen[key]) return false;
-                seen[key] = true;
-                return true;
+            const dedupe = (entries) => {
+                const seen = Object.create(null);
+                return entries.filter((entry) => {
+                    const key = String(entry && entry.name || '').toLowerCase() + '|' + String(entry && entry.id || '');
+                    if (seen[key]) return false;
+                    seen[key] = true;
+                    return true;
+                });
+            };
+            const menu = { attacks: [], bonusActions: [], reactions: [], freeActions: [], legendaryActions: [], mythicActions: [] };
+            menu.attacks = dedupe(attackRecords.map((record) => this.buildBeaconAttackSummary(characterId, record, context)));
+            specialRecords.forEach((record) => {
+                const sectionKey = COMBAT_SPECIAL_SECTION_BY_TYPE[String(record.actionType || '').trim().toLowerCase()] || '';
+                const definition = sectionKey ? COMBAT_SPECIAL_SECTIONS[sectionKey] : null;
+                if (!definition) return;
+                menu[definition.dataKey].push(this.buildBeaconCombatActionSummary(characterId, record, context));
             });
+            COMBAT_SPECIAL_SECTION_KEYS.forEach((sectionKey) => {
+                const definition = COMBAT_SPECIAL_SECTIONS[sectionKey];
+                menu[definition.dataKey] = dedupe(menu[definition.dataKey]);
+            });
+            return menu;
         },
 
         beaconAttackIsUsable(record, integrants) {
             if (!record || record.type !== 'Attack' || record._enabled === false || !record.shortID) return false;
+            if (COMBAT_SPECIAL_SECTION_BY_TYPE[String(record.actionType || '').trim().toLowerCase()]) return false;
             const attackType = String(record.attack && record.attack.type || '').trim();
             const hasStructuredSave = !!(record.save || record.savingThrow || record.saving_throw || record.saveData || record.savingThrowData);
             if (!attackType && !hasStructuredSave) return false;
@@ -12867,101 +13207,6 @@ const CombatAssistant = (() => {
                 if (parent.equipData && parent.equipData.equippable === true && parent.equipData.equipped !== true) return false;
             }
             return true;
-        },
-
-        async readBeaconAttackBonus(characterId, record, abilityMod, pb, extraBonus) {
-            const shortID = String(record && record.shortID || '').trim();
-            if (shortID && typeof getSheetItem === 'function') {
-                const candidates = [
-                    'repeating_attack_' + shortID + '_atkbonus',
-                    'repeating_attack("' + shortID + '", "atkbonus")'
-                ];
-                for (let i = 0; i < candidates.length; i += 1) {
-                    try {
-                        const value = await getSheetItem(characterId, candidates[i], 'current');
-                        const parsed = this.parseSignedNumber(value, null);
-                        if (parsed !== null) return parsed;
-                    } catch (ignored) {}
-                }
-            }
-            return abilityMod + pb + extraBonus;
-        },
-
-        async beaconDamageEntries(characterId, record, integrants, attackAbility, parent) {
-            const childIds = this.parseJsonList(record && record.childIDs);
-            const damageRecords = childIds.map((id) => integrants && integrants[id]).filter((entry) => entry && entry.type === 'Damage' && entry._enabled !== false);
-            const out = [];
-            for (let i = 0; i < damageRecords.length; i += 1) {
-                const damage = damageRecords[i];
-                const diceSize = String(damage.diceSize || '').trim();
-                const diceCountRaw = damage._diceCount !== undefined ? damage._diceCount : damage.diceCount;
-                const diceCount = diceSize ? Math.max(1, Utils.toInt(diceCountRaw, 1)) : 0;
-                const abilitySetting = String(damage.ability || '').trim().toLowerCase();
-                const damageAbility = abilitySetting === 'auto'
-                    ? attackAbility
-                    : (abilitySetting === 'none' ? '' : this.normalizeAbilityName(abilitySetting));
-                const abilityMod = damageAbility ? await this.readAbilityMod(characterId, damageAbility) : 0;
-                let flatBonus = this.parseSignedNumber(damage.bonus, 0);
-                const attackMagicBonus = this.parseSignedNumber(record && record.attack && record.attack.bonus, 0);
-                const parentDescription = String(parent && parent.description || '');
-                if (attackMagicBonus && /bonus\s+to\s+attack\s+rolls?\s+and\s+damage\s+rolls?/i.test(parentDescription)) flatBonus += attackMagicBonus;
-                const totalFlat = abilityMod + flatBonus;
-                let formula = diceSize && diceCount ? (String(diceCount) + diceSize) : '';
-                if (totalFlat) formula += this.normalizeSigned(totalFlat);
-                if (!formula && totalFlat) formula = String(totalFlat);
-                out.push({
-                    formula: formula || '-',
-                    damageType: String(damage.damageType || 'Damage').trim() || 'Damage'
-                });
-            }
-            return out;
-        },
-
-        async buildBeaconAttack(characterId, record, integrants) {
-            const attackAbility = this.normalizeAbilityName(record && record.attack && record.attack.abilityBonus) || (/ranged/i.test(String(record && record.attack && record.attack.type || '')) ? 'dexterity' : 'strength');
-            const abilityMod = await this.readAbilityMod(characterId, attackAbility);
-            const proficiencyLevel = String(record && record.attack && record.attack.proficiencyLevel || '').trim().toLowerCase();
-            const explicitlyNotProficient = /not\s*proficient|untrained|none/.test(proficiencyLevel);
-            const pb = explicitlyNotProficient ? 0 : await this.readSheetNumber(characterId, 'pb', 0);
-            const extraBonus = this.parseSignedNumber(record && record.attack && record.attack.bonus, 0);
-            const attackBonus = await this.readBeaconAttackBonus(characterId, record, abilityMod, pb, extraBonus);
-            const parts = [this.normalizeSigned(abilityMod) + ' ' + this.abilityLabel(attackAbility)];
-            if (!explicitlyNotProficient && pb) parts.push(this.normalizeSigned(pb) + ' PB');
-            if (extraBonus) parts.push(this.normalizeSigned(extraBonus) + ' Bonus');
-            const parent = integrants && integrants[String(record.parentID || record.sourceID || '')] || null;
-            const damage = await this.beaconDamageEntries(characterId, record, integrants, attackAbility, parent);
-            const shortID = String(record.shortID || '').trim();
-            return {
-                id: shortID,
-                name: String(record.name || record.recordName || 'Attack').trim() || 'Attack',
-                sheetVersion: '2024',
-                attackType: String(record.attack && record.attack.type || 'Attack').trim(),
-                range: String(record.range || '').trim(),
-                attackBonus,
-                attackBonusLabel: this.normalizeSigned(attackBonus),
-                attackBreakdown: this.normalizeSigned(attackBonus) + ' (' + parts.join(' ') + ')',
-                damage,
-                rollCommand: '%{' + characterId + '|repeating_attack_' + shortID + '_attack}'
-            };
-        },
-
-        async getBeaconAttacks(characterId) {
-            const root = this.getBeaconStore(characterId);
-            const integrants = root && root.integrants && root.integrants.integrants && typeof root.integrants.integrants === 'object'
-                ? root.integrants.integrants
-                : {};
-            const records = Object.keys(integrants).map((key) => integrants[key]).filter((record) => this.beaconAttackIsUsable(record, integrants));
-            const attacks = [];
-            for (let i = 0; i < records.length; i += 1) {
-                attacks.push(await this.buildBeaconAttack(characterId, records[i], integrants));
-            }
-            const seen = Object.create(null);
-            return attacks.filter((attack) => {
-                const key = String(attack.name || '').toLowerCase() + '|' + String(attack.id || '');
-                if (seen[key]) return false;
-                seen[key] = true;
-                return true;
-            });
         },
 
         legacyAttackTypeLabel(row) {
@@ -12980,11 +13225,11 @@ const CombatAssistant = (() => {
         },
 
         beaconAttackAbility(record) {
-            const explicit = this.normalizeAbilityName(record && record.attack && record.attack.abilityBonus);
+            const explicit = Utils.normalizeAbilityName(record && record.attack && record.attack.abilityBonus);
             if (explicit) return explicit;
             const recordName = String(record && record.recordName || '');
             const named = recordName.match(/\b(STR|DEX|CON|INT|WIS|CHA)\b/i);
-            if (named) return this.normalizeAbilityName(named[1]);
+            if (named) return Utils.normalizeAbilityName(named[1]);
             const type = String(record && record.attack && record.attack.type || '');
             if (/ranged/i.test(type)) return 'dexterity';
             if (/melee/i.test(type)) return 'strength';
@@ -13119,7 +13364,7 @@ const CombatAssistant = (() => {
                     rowId: String(row.rowId || ''),
                     source: 'repeating_attack',
                     abilityFromAtkattrBase: this.legacyAttrAbility(row.atkattr_base),
-                    abilityLabel: this.abilityLabel(this.legacyAttrAbility(row.atkattr_base)),
+                    abilityLabel: Utils.abilityShortLabel(this.legacyAttrAbility(row.atkattr_base)),
                     attackTypeInferred: this.legacyAttackTypeLabel(row),
                     rangeRaw: String(row.atkrange || ''),
                     rangeLabel: this.combatRangeLabel(row.atkrange),
@@ -13186,7 +13431,7 @@ const CombatAssistant = (() => {
                         shortID: String(record.shortID || ''),
                         abilityRaw: record && record.attack ? record.attack.abilityBonus : undefined,
                         abilityNormalized: attackAbility,
-                        abilityLabel: this.abilityLabel(attackAbility),
+                        abilityLabel: Utils.abilityShortLabel(attackAbility),
                         effectiveAbilityReadComparison: liveAbility || '(not collected)',
                         proficiencyReadComparison: liveDiagnostics && liveDiagnostics.proficiency ? liveDiagnostics.proficiency : '(not collected)',
                         attackTypeRaw: record && record.attack ? record.attack.type : undefined,
@@ -13220,15 +13465,6 @@ const CombatAssistant = (() => {
         },
 
 
-        getAttackDiagnostics(characterId) {
-            const snapshot = this.getStoreDiagnosticSnapshot(characterId);
-            const root = snapshot.root;
-            const isBeacon = !!(root && typeof root === 'object' && (root.integrants || root.settings || root.hitpoints));
-            return isBeacon
-                ? this.getBeaconAttackDiagnostics(characterId, root, snapshot.storeChars, snapshot.readMs)
-                : this.getLegacyAttackDiagnostics(characterId, snapshot.attrs, snapshot.readMs);
-        },
-
         legacyAttributeMap(attrs) {
             const map = Object.create(null);
             (Array.isArray(attrs) ? attrs : []).forEach((attr) => {
@@ -13250,13 +13486,13 @@ const CombatAssistant = (() => {
                 const flatBonus = this.parseSignedNumber(row && row[prefix + 'mod'], 0);
                 const totalFlat = abilityMod + flatBonus;
                 let formula = base;
-                if (formula && totalFlat) formula += this.normalizeSigned(totalFlat);
+                if (formula && totalFlat) formula += Utils.formatSigned(totalFlat);
                 else if (!formula && totalFlat) formula = String(totalFlat);
                 out.push({
                     formula: formula || '-',
                     damageType: damageType || 'Damage',
                     ability,
-                    abilityLabel: this.abilityLabel(ability),
+                    abilityLabel: Utils.abilityShortLabel(ability),
                     abilityModifier: abilityMod,
                     flatBonus
                 });
@@ -13264,6 +13500,169 @@ const CombatAssistant = (() => {
             build('dmg');
             build('dmg2');
             return out;
+        },
+
+        legacyTraitSpecialSection(row) {
+            const description = String(row && row.description || '').replace(/\s+/g, ' ').trim();
+            if (!description) return '';
+            const explicitBonus = /\bas\s+a\s+bonus\s+action\b/i.test(description) ||
+                /\b(?:use|uses|used|using|spend|spends|spending)\s+(?:a|your)\s+bonus\s+action\b/i.test(description);
+            if (explicitBonus) return 'bonus';
+            const explicitReaction = /\bas\s+a\s+reaction\b/i.test(description) ||
+                /\b(?:use|uses|used|using|spend|spends|spending)\s+your\s+reaction\b/i.test(description);
+            return explicitReaction ? 'reactions' : '';
+        },
+
+        legacyTraitHealingEffect(characterId, row, sourceAttrs) {
+            const description = String(row && row.description || '').replace(/\s+/g, ' ').trim();
+            if (!description || !/\b(?:regain|restore|heal|heals|healing|temporary\s+hit\s+points?)\b/i.test(description)) return null;
+            const attrs = Array.isArray(sourceAttrs)
+                ? sourceAttrs
+                : (findObjs({ _type: 'attribute', _characterid: String(characterId || '').trim() }) || []);
+            const attrMap = this.legacyAttributeMap(attrs);
+            const isTempHealing = /\btemporary\s+hit\s+points?\b/i.test(description);
+            const diceMatch = description.match(/\b(\d+d\d+)\b/i);
+            const resolveNamedBonus = () => {
+                const abilityMatch = description.match(/\byour\s+(strength|dexterity|constitution|intelligence|wisdom|charisma)\s+modifier\b/i);
+                if (abilityMatch) return this.parseSignedNumber(attrMap[String(abilityMatch[1]).toLowerCase() + '_mod'], null);
+                if (/\b(?:your\s+)?proficiency\s+bonus\b/i.test(description)) return this.parseSignedNumber(attrMap.pb, null);
+                const classMatch = description.match(/\byour\s+([a-z][a-z -]{1,30})\s+level\b/i);
+                if (classMatch) {
+                    const requestedClass = Utils.normalizeName(classMatch[1]);
+                    const primaryClass = Utils.normalizeName(attrMap.class || '');
+                    if (requestedClass && primaryClass && (primaryClass === requestedClass || primaryClass.indexOf(requestedClass) >= 0 || requestedClass.indexOf(primaryClass) >= 0)) {
+                        const level = this.parseSignedNumber(attrMap.base_level !== undefined ? attrMap.base_level : attrMap.level, null);
+                        if (level !== null) return level;
+                    }
+                    for (let index = 1; index <= 4; index += 1) {
+                        const className = Utils.normalizeName(attrMap['multiclass' + String(index)] || attrMap['multiclass' + String(index) + '_class'] || '');
+                        if (!className || !(className === requestedClass || className.indexOf(requestedClass) >= 0 || requestedClass.indexOf(className) >= 0)) continue;
+                        const level = this.parseSignedNumber(attrMap['multiclass' + String(index) + '_lvl'] !== undefined ? attrMap['multiclass' + String(index) + '_lvl'] : attrMap['multiclass' + String(index) + '_level'], null);
+                        if (level !== null) return level;
+                    }
+                }
+                return null;
+            };
+
+            if (diceMatch) {
+                let formula = String(diceMatch[1]).toLowerCase();
+                const afterDice = description.slice((diceMatch.index || 0) + diceMatch[0].length);
+                const numericBonus = afterDice.match(/^\s*\+\s*(\d+)\b/);
+                if (numericBonus) formula += '+' + String(Utils.toInt(numericBonus[1], 0));
+                else if (/^\s*\+/.test(afterDice)) {
+                    const bonus = resolveNamedBonus();
+                    if (bonus === null) return null;
+                    formula += Utils.formatSigned(bonus);
+                }
+                return { formula, isTempHealing, description };
+            }
+
+            if (/\b(?:equal\s+to|gain|regain|restore)\b/i.test(description)) {
+                const bonus = resolveNamedBonus();
+                if (bonus !== null && bonus >= 0) return { formula: String(bonus), isTempHealing, description };
+            }
+            return null;
+        },
+
+        buildLegacyNpcSpecialSummary(characterId, row, sectionKey) {
+            const definition = COMBAT_SPECIAL_SECTIONS[sectionKey];
+            const legacySection = definition && definition.legacySection;
+            const rowId = String(row && row.rowId || '').trim();
+            const name = String(row && row.name || '').trim();
+            if (!definition || !legacySection || !rowId || !name) return null;
+            const actionCommand = R20.buttonAbilityCommand(characterId, 'repeating_' + legacySection + '_' + rowId + '_npc_action');
+            const hasAttackRoll = this.legacyNpcActionIsAttack(row);
+            const damage = this.legacyNpcDamageSummaries(row);
+            const attackBonus = this.parseSignedNumber(row && row.attack_tohit, 0);
+            const attackType = String(row && row.attack_type || '').trim();
+            const range = String(row && row.attack_range || '').trim();
+            return {
+                id: rowId,
+                characterId: String(characterId || '').trim(),
+                name,
+                description: String(row && (row.description || row.show_desc || row.attack_onhit) || '').trim(),
+                sheetVersion: '2014 NPC',
+                actionType: definition.actionType,
+                hasAttackRoll,
+                ability: '',
+                abilityLabel: '',
+                attackType: attackType || (hasAttackRoll ? 'Attack' : ''),
+                attackTypeLabel: hasAttackRoll ? this.attackTypeLabel(attackType, range) : '',
+                range,
+                rangeLabel: this.combatRangeLabel(range),
+                attackBonus,
+                attackBonusLabel: Utils.formatSigned(attackBonus),
+                attackBreakdown: Utils.formatSigned(attackBonus) + ' (NPC sheet)',
+                damage,
+                effectLabel: damage.map((entry) => String(entry && entry.damageType || '')).filter(Boolean).join(' + '),
+                detailLabel: hasAttackRoll ? '' : (damage.length ? 'Damage' : definition.actionType),
+                rollCommand: hasAttackRoll ? actionCommand : '',
+                damageCommand: !hasAttackRoll && damage.length ? actionCommand : '',
+                sendCommand: actionCommand
+            };
+        },
+
+        buildLegacyTraitSpecialSummary(characterId, row, sectionKey, sourceAttrs) {
+            const definition = COMBAT_SPECIAL_SECTIONS[sectionKey];
+            const rowId = String(row && row.rowId || '').trim();
+            const name = String(row && row.name || '').trim();
+            if (!definition || !rowId || !name) return null;
+            const healing = this.legacyTraitHealingEffect(characterId, row, sourceAttrs);
+            const damage = healing ? [{
+                formula: healing.formula,
+                damageType: healing.isTempHealing ? 'Temporary HP' : 'Healing',
+                isHealing: true,
+                isTempHealing: !!healing.isTempHealing,
+                ability: '', abilityLabel: '', abilityModifier: 0, flatBonus: 0
+            }] : [];
+            return {
+                id: rowId,
+                legacyTraitId: rowId,
+                characterId: String(characterId || '').trim(),
+                name,
+                description: String(row && row.description || '').trim(),
+                sheetVersion: '2014 Trait',
+                actionType: definition.actionType,
+                hasAttackRoll: false,
+                damage,
+                effectLabel: healing ? (healing.isTempHealing ? 'Temporary HP' : 'Healing') : '',
+                detailLabel: healing ? (healing.isTempHealing ? 'Temporary HP' : 'Healing') : 'Trait',
+                rollCommand: '',
+                damageCommand: '',
+                sendCommand: '',
+                caHealingOnly: !!healing,
+                caHealingRoute: 'legacy-trait',
+                isTempHealing: !!(healing && healing.isTempHealing)
+            };
+        },
+
+        getLegacyCombatMenuData(characterId, sourceAttrs) {
+            const attrs = Array.isArray(sourceAttrs)
+                ? sourceAttrs
+                : (findObjs({ _type: 'attribute', _characterid: String(characterId || '').trim() }) || []);
+            const menu = { attacks: this.getLegacyAttackSummaries(characterId, attrs), bonusActions: [], reactions: [], freeActions: [], legendaryActions: [], mythicActions: [] };
+            const dedupe = Object.create(null);
+            const add = (sectionKey, entry) => {
+                if (!entry) return;
+                const definition = COMBAT_SPECIAL_SECTIONS[sectionKey];
+                if (!definition) return;
+                const key = sectionKey + '|' + Utils.normalizeName(entry.name || '');
+                if (!entry.name || dedupe[key]) return;
+                dedupe[key] = true;
+                menu[definition.dataKey].push(entry);
+            };
+            COMBAT_SPECIAL_SECTION_KEYS.forEach((sectionKey) => {
+                const definition = COMBAT_SPECIAL_SECTIONS[sectionKey];
+                if (!definition || !definition.legacySection) return;
+                this.getLegacyRepeatingRows(characterId, definition.legacySection, attrs).forEach((row) => add(sectionKey, this.buildLegacyNpcSpecialSummary(characterId, row, sectionKey)));
+            });
+            this.getLegacyRepeatingRows(characterId, 'traits', attrs).forEach((row) => {
+                if (String(row && row.display_flag || '').trim().toLowerCase() === '0') return;
+                const sectionKey = this.legacyTraitSpecialSection(row);
+                if (!sectionKey) return;
+                add(sectionKey, this.buildLegacyTraitSpecialSummary(characterId, row, sectionKey, attrs));
+            });
+            return menu;
         },
 
         getLegacyAttackSummaries(characterId, sourceAttrs) {
@@ -13288,16 +13687,16 @@ const CombatAssistant = (() => {
                 const fromSheet = this.parseSignedNumber(row.atkbonus, null);
                 const attackBonus = fromSheet !== null ? fromSheet : computed;
                 const parts = [];
-                if (ability) parts.push(this.normalizeSigned(abilityMod) + ' ' + this.abilityLabel(ability));
-                if (pb) parts.push(this.normalizeSigned(pb) + ' PB');
-                if (extraBonus) parts.push(this.normalizeSigned(extraBonus) + ' Bonus');
+                if (ability) parts.push(Utils.formatSigned(abilityMod) + ' ' + Utils.abilityShortLabel(ability));
+                if (pb) parts.push(Utils.formatSigned(pb) + ' PB');
+                if (extraBonus) parts.push(Utils.formatSigned(extraBonus) + ' Bonus');
                 const rowId = String(row.rowId || '').trim();
                 return {
                     id: rowId,
                     name: String(row.atkname || '').trim(),
                     sheetVersion: '2014',
                     ability,
-                    abilityLabel: this.abilityLabel(ability),
+                    abilityLabel: Utils.abilityShortLabel(ability),
                     abilityModifier: abilityMod,
                     proficiencyBonus: pb,
                     extraBonus,
@@ -13308,63 +13707,14 @@ const CombatAssistant = (() => {
                     saveDc: this.legacyRowSaveInfo(row).saveDc,
                     saveAbility: this.legacyRowSaveInfo(row).saveAbility,
                     attackBonus,
-                    attackBonusLabel: this.normalizeSigned(attackBonus),
-                    attackBreakdown: this.normalizeSigned(attackBonus) + (parts.length ? (' (' + parts.join(' ') + ')') : ''),
+                    attackBonusLabel: Utils.formatSigned(attackBonus),
+                    attackBreakdown: Utils.formatSigned(attackBonus) + (parts.length ? (' (' + parts.join(' ') + ')') : ''),
                     damage: this.legacyDamageSummaries(row, attrMap, ability),
                     rollCommand: rowId ? R20.buttonAbilityCommand(characterId, 'repeating_attack_' + rowId + '_attack') : '',
                     damageCommand: rowId ? R20.buttonAbilityCommand(characterId, 'repeating_attack_' + rowId + '_attack_dmg') : ''
                 };
             });
             return pcAttacks.concat(this.getLegacyNpcAttackSummaries(characterId, attrs));
-        },
-
-        getBeaconAttackSummaries(characterId) {
-            const root = this.getBeaconStore(characterId);
-            return root ? this.getBeaconAttackSummariesFromRoot(characterId, root) : [];
-        },
-
-        async getAttackSummaries(characterId) {
-            const version = R20.detectSheetVersion(characterId);
-            return version === '2024'
-                ? this.getBeaconAttackSummaries(characterId)
-                : this.getLegacyAttackSummaries(characterId);
-        },
-
-        getLegacyAttackNames(characterId) {
-            const pcNames = this.getLegacyAttackRows(characterId)
-                .filter((row) => {
-                    const name = String(row && row.atkname || '').trim();
-                    if (!name) return false;
-                    if (String(row.spelllevel || '').trim() || String(row.spell_innate || '').trim()) return false;
-                    if (String(row.atkflag || '').trim() && String(row.atkflag).indexOf('attack=1') < 0) return false;
-                    return true;
-                })
-                .map((row) => ({ name: String(row.atkname || '').trim() }));
-            const npcNames = this.getLegacyNpcActionRows(characterId)
-                .filter((row) => this.legacyNpcActionIsAttack(row))
-                .map((row) => ({ name: String(row.name || '').trim() }));
-            return pcNames.concat(npcNames);
-        },
-
-        getBeaconAttackNames(characterId) {
-            const root = this.getBeaconStore(characterId);
-            const integrants = root && root.integrants && root.integrants.integrants && typeof root.integrants.integrants === 'object'
-                ? root.integrants.integrants
-                : {};
-            return Object.keys(integrants)
-                .map((key) => integrants[key])
-                .filter((record) => this.beaconAttackIsUsable(record, integrants))
-                .map((record) => ({ name: String(record.name || record.recordName || 'Attack').trim() || 'Attack' }));
-        },
-
-        getAttackNames(characterId) {
-            const version = R20.detectSheetVersion(characterId);
-            return version === '2024' ? this.getBeaconAttackNames(characterId) : this.getLegacyAttackNames(characterId);
-        },
-
-        async getAttacks(characterId) {
-            const version = R20.detectSheetVersion(characterId);
-            return version === '2024' ? this.getBeaconAttacks(characterId) : this.getLegacyAttacks(characterId);
         },
 
         getLegacySpellRows(characterId, sourceAttrs) {
@@ -13629,7 +13979,7 @@ const CombatAssistant = (() => {
         },
 
         beaconSpellcastingProfiles(root) {
-            const integrants = this.beaconIntegrants(root || {});
+            const integrants = Utils.getBeaconIntegrants(root || {});
             const combatContext = this.beaconCombatContext(root || {});
             const abilities = combatContext.abilities || {};
             const proficiencyBonus = Math.max(0, Utils.toInt(combatContext.proficiency && combatContext.proficiency.value, 0));
@@ -13641,7 +13991,7 @@ const CombatAssistant = (() => {
                 .filter((entry) => entry.record && String(entry.record.type || '').toLowerCase() === 'spellcasting' && entry.record._enabled !== false && entry.record.parentDisabled !== true)
                 .map((entry) => {
                     const record = entry.record;
-                    const ability = this.normalizeAbilityName(record.ability || record.spellcastingAbility || '');
+                    const ability = Utils.normalizeAbilityName(record.ability || record.spellcastingAbility || '');
                     const abilityData = ability && abilities[ability] ? abilities[ability] : null;
                     const modifier = abilityData ? Utils.toInt(abilityData.modifier, 0) : 0;
                     const casterType = String(record.casterType || '').trim().toLowerCase();
@@ -13674,7 +14024,7 @@ const CombatAssistant = (() => {
                         sourceID: String(record.sourceID || '').trim(),
                         casterType: casterType || 'other',
                         ability,
-                        abilityLabel: this.abilityLabel(ability),
+                        abilityLabel: Utils.abilityShortLabel(ability),
                         abilityScore: abilityData ? Utils.toInt(abilityData.score, 10) : null,
                         abilityModifier: modifier,
                         proficiencyBonus,
@@ -13702,7 +14052,7 @@ const CombatAssistant = (() => {
                 .map((profile) => Object.assign({}, profile || {}));
             const abilities = [];
             liveProfiles.forEach((profile) => {
-                const ability = this.normalizeAbilityName(profile && profile.ability);
+                const ability = Utils.normalizeAbilityName(profile && profile.ability);
                 if (ability && abilities.indexOf(ability) < 0) abilities.push(ability);
             });
 
@@ -13712,7 +14062,7 @@ const CombatAssistant = (() => {
             // Re-use the same score-first reconciliation as the 2024 Combat list.
             const liveStates = await Promise.all(abilities.map(async (ability) => {
                 const contextAbility = context.abilities[ability] || {};
-                const profileFallback = liveProfiles.find((profile) => this.normalizeAbilityName(profile && profile.ability) === ability) || {};
+                const profileFallback = liveProfiles.find((profile) => Utils.normalizeAbilityName(profile && profile.ability) === ability) || {};
                 const fallback = {
                     score: contextAbility.score !== undefined && contextAbility.score !== null
                         ? contextAbility.score
@@ -13737,15 +14087,15 @@ const CombatAssistant = (() => {
                 );
             });
 
-            const spellRollBonuses = this.beaconSpellRollBonusContext(this.beaconIntegrants(storeRoot));
+            const spellRollBonuses = this.beaconSpellRollBonusContext(Utils.getBeaconIntegrants(storeRoot));
             liveProfiles.forEach((profile) => {
-                const ability = this.normalizeAbilityName(profile && profile.ability);
+                const ability = Utils.normalizeAbilityName(profile && profile.ability);
                 if (!ability) return;
                 const abilityData = context.abilities[ability] || {};
                 const modifier = Utils.toInt(abilityData.modifier, Utils.toInt(profile.abilityModifier, 0));
                 const proficiencyBonus = Math.max(0, Utils.toInt(profile.proficiencyBonus, 0));
                 profile.ability = ability;
-                profile.abilityLabel = this.abilityLabel(ability);
+                profile.abilityLabel = Utils.abilityShortLabel(ability);
                 profile.abilityScore = abilityData.score === undefined || abilityData.score === null
                     ? profile.abilityScore
                     : Utils.toNumber(abilityData.score, 10);
@@ -13795,33 +14145,9 @@ const CombatAssistant = (() => {
             return fields;
         },
 
-        async collectSpellLiveSheetDiagnostics(characterId) {
-            const started = Date.now();
-            const candidates = [
-                'spell_save_dc', 'spellSaveDC', 'spell_dc', 'spellDC',
-                'spell_attack_bonus', 'spellAttackBonus', 'spell_attack_mod',
-                'spellcasting_ability', 'spellcastingAbility',
-                'pb', 'proficiency_bonus', 'proficiencyBonus',
-                'intelligence', 'intelligence_mod',
-                'wisdom', 'wisdom_mod',
-                'charisma', 'charisma_mod'
-            ];
-            const sheetItems = await this.diagnosticGetSheetItemCandidates(characterId, candidates);
-            const fields = [];
-            this.flattenDiagnosticValue(sheetItems.values, 'getSheetItem', fields, 0);
-            return {
-                name: 'Spellcasting Live Sheet API',
-                sheetVersion: '2024',
-                isContext: true,
-                fields,
-                readMs: Date.now() - started,
-                sheetApiReads: sheetItems.reads
-            };
-        },
-
         getBeaconSpellDiagnostics(characterId, root, storeChars, readMs) {
             const started = Date.now();
-            const integrants = this.beaconIntegrants(root || {});
+            const integrants = Utils.getBeaconIntegrants(root || {});
             const spellcastingProfiles = this.beaconSpellcastingProfiles(root || {});
             const spells = Object.keys(integrants)
                 .map((key) => ({ key, record: integrants[key] }))
@@ -13885,15 +14211,6 @@ const CombatAssistant = (() => {
                 readMs: Math.max(0, Utils.toInt(readMs, 0)),
                 collectMs: Date.now() - started
             };
-        },
-
-        getSpellDiagnostics(characterId) {
-            const snapshot = this.getStoreDiagnosticSnapshot(characterId);
-            const root = snapshot.root;
-            const isBeacon = !!(root && typeof root === 'object' && (root.integrants || root.settings || root.hitpoints));
-            return isBeacon
-                ? this.getBeaconSpellDiagnostics(characterId, root, snapshot.storeChars, snapshot.readMs)
-                : this.getLegacySpellDiagnostics(characterId, snapshot.attrs, snapshot.readMs);
         },
 
         normalizeSpellListLevel(value, fallback) {
@@ -14021,13 +14338,13 @@ const CombatAssistant = (() => {
             const attackBonus = profile ? Utils.toInt(profile.spellAttackBonus, 0) : 0;
             const ability = profile ? String(profile.ability || '').trim() : '';
             const shortID = String(attack.shortID || '').trim();
-            const abilityLabel = profile ? String(profile.abilityLabel || this.abilityLabel(ability)).trim() : this.abilityLabel(ability);
+            const abilityLabel = profile ? String(profile.abilityLabel || Utils.abilityShortLabel(ability)).trim() : Utils.abilityShortLabel(ability);
             const casterType = String(profile && profile.casterType || '').trim().toLowerCase();
             const spellLevel = this.normalizeSpellListLevel(spell && (spell.level !== undefined ? spell.level : spell.spellLevel), 0);
             const castLevel = casterType === 'pact'
                 ? Math.max(spellLevel, Math.max(0, Utils.toInt(profile && profile.pactSlotLevel, 0)))
                 : spellLevel;
-            const baseDamage = this.beaconDamageSummaries(attack, context, ability);
+            const baseDamage = this.beaconEffectSummaries(attack, context, ability);
             const damage = castLevel > spellLevel
                 ? this.applySpellSlotDamageUpcast(baseDamage, spell && spell.upcastText, castLevel)
                 : baseDamage;
@@ -14042,8 +14359,8 @@ const CombatAssistant = (() => {
                 saveDc,
                 saveAbility: saveInfo.saveAbility,
                 attackBonus,
-                attackBonusLabel: this.normalizeSigned(attackBonus),
-                attackBreakdown: this.normalizeSigned(attackBonus) + (abilityLabel ? (' (' + abilityLabel + ' spellcasting)') : ' (spellcasting)'),
+                attackBonusLabel: Utils.formatSigned(attackBonus),
+                attackBreakdown: Utils.formatSigned(attackBonus) + (abilityLabel ? (' (' + abilityLabel + ' spellcasting)') : ' (spellcasting)'),
                 damage,
                 castLevel,
                 rollCommand: shortID ? R20.buttonAbilityCommand(characterId, 'repeating_attack_' + shortID + '_attack') : '',
@@ -14076,7 +14393,7 @@ const CombatAssistant = (() => {
             const source = row || {};
             const attackMode = String(source.spellattack || '').trim();
             const hasAttack = !!attackMode && !/^(?:none|0|off|false)$/i.test(attackMode);
-            const saveAbility = this.normalizeAbilityName(source.spellsave || source.save || '');
+            const saveAbility = Utils.normalizeAbilityName(source.spellsave || source.save || '');
             const hasSave = !!saveAbility;
             const damage = this.legacySpellDamageSummaries(source);
             const attackBonus = Utils.toInt(profile && profile.spellAttackBonus, 0);
@@ -14099,8 +14416,8 @@ const CombatAssistant = (() => {
                 saveDc: hasSave ? Math.max(0, Utils.toInt(profile && profile.spellSaveDc, 0)) : 0,
                 saveAbility,
                 attackBonus,
-                attackBonusLabel: hasAttack ? this.normalizeSigned(attackBonus) : '-',
-                attackBreakdown: hasAttack ? (this.normalizeSigned(attackBonus) + ' (spellcasting)') : (hasSave ? ('DC ' + String(Math.max(0, Utils.toInt(profile && profile.spellSaveDc, 0))) + ' ' + this.abilityLabel(saveAbility)) : 'Spell roll'),
+                attackBonusLabel: hasAttack ? Utils.formatSigned(attackBonus) : '-',
+                attackBreakdown: hasAttack ? (Utils.formatSigned(attackBonus) + ' (spellcasting)') : (hasSave ? ('DC ' + String(Math.max(0, Utils.toInt(profile && profile.spellSaveDc, 0))) + ' ' + Utils.abilityShortLabel(saveAbility)) : 'Spell roll'),
                 damage,
                 rollCommand: command,
                 damageCommand
@@ -14120,12 +14437,12 @@ const CombatAssistant = (() => {
                 name: String(row.atkname || 'Spell').trim() || 'Spell',
                 sheetVersion: '2014',
                 ability,
-                abilityLabel: this.abilityLabel(ability),
+                abilityLabel: Utils.abilityShortLabel(ability),
                 saveDc: saveInfo.saveDc || Math.max(0, Utils.toInt(profile && profile.spellSaveDc, 0)),
                 saveAbility: saveInfo.saveAbility,
                 attackBonus,
-                attackBonusLabel: this.normalizeSigned(attackBonus),
-                attackBreakdown: this.normalizeSigned(attackBonus) + ' (spellcasting)',
+                attackBonusLabel: Utils.formatSigned(attackBonus),
+                attackBreakdown: Utils.formatSigned(attackBonus) + ' (spellcasting)',
                 // Render only the clean damage values stored on repeating_spell.
                 // The repeating_attack dmgbase may contain inline-roll/attribute syntax
                 // (especially scaling cantrips) that can invalidate a large chat card.
@@ -14136,9 +14453,9 @@ const CombatAssistant = (() => {
         },
 
         async getBeaconSpellListData(characterId, root) {
-            const storeRoot = root && typeof root === 'object' ? root : this.getBeaconStore(characterId);
+            const storeRoot = root && typeof root === 'object' ? root : R20.getCharacterStoreRoot(characterId);
             if (!storeRoot) return { sheetVersion: '2024', spells: [], slots: [], isPact: false, profile: null };
-            const integrants = this.beaconIntegrants(storeRoot);
+            const integrants = Utils.getBeaconIntegrants(storeRoot);
             const combatContext = this.beaconCombatContext(storeRoot);
             const storeProfiles = this.beaconSpellcastingProfiles(storeRoot);
             const profiles = await this.refreshBeaconSpellcastingProfilesLive(characterId, storeRoot, storeProfiles, combatContext);
@@ -14234,7 +14551,7 @@ const CombatAssistant = (() => {
                 source: 'Class',
                 casterType: 'other',
                 ability,
-                abilityLabel: this.abilityLabel(ability),
+                abilityLabel: Utils.abilityShortLabel(ability),
                 abilityModifier,
                 proficiencyBonus,
                 spellAttackBonus,
@@ -14319,7 +14636,7 @@ const CombatAssistant = (() => {
             const isBeacon = root
                 ? !!(root.integrants || root.settings || root.hitpoints)
                 : R20.detectSheetVersion(characterId) === '2024';
-            if (isBeacon) return this.getBeaconSpellListData(characterId, root || this.getBeaconStore(characterId));
+            if (isBeacon) return this.getBeaconSpellListData(characterId, root || R20.getCharacterStoreRoot(characterId));
             return this.getLegacySpellListData(characterId, sourceAttrs);
         },
 
@@ -14333,16 +14650,6 @@ const CombatAssistant = (() => {
                 return normalized;
             });
             return data;
-        },
-
-        findRepresentativeToken(characterId, ctx) {
-            const safeCharacterId = String(characterId || '').trim();
-            if (!safeCharacterId) return null;
-            const pageId = R20.getPlayerPageId(ctx && ctx.playerId || '');
-            const pageToken = pageId ? R20.findTokenByCharacterIdOnPage(safeCharacterId, pageId) : null;
-            if (pageToken) return pageToken;
-            const tokens = R20.getTokensByCharacterId(safeCharacterId);
-            return tokens[0] || null;
         },
 
         resolveSheetCommandContext(ctx, commandArgs, label) {
@@ -14365,7 +14672,7 @@ const CombatAssistant = (() => {
             const character = R20.getCharacterByName(characterName);
             if (!character) return { ok: false, message: 'No character sheet named <strong>' + Utils.escapeHtml(characterName) + '</strong> was found.' };
             const characterId = String(character.id || (Utils.isFunction(character.get) ? character.get('_id') : '') || '').trim();
-            const token = this.findRepresentativeToken(characterId, ctx);
+            const token = R20.findTokenByCharacterIdOnPlayerPage(characterId, ctx && ctx.playerId || '');
             if (!ctx.isGM) {
                 const controlled = token
                     ? R20.tokenIsControlledByPlayer(token, character, ctx.playerId)
@@ -14382,12 +14689,189 @@ const CombatAssistant = (() => {
             };
         },
 
-        async showCombatForInfo(ctx, info) {
-            if (!info || !info.ok) {
-                Render.sendWhisperMessage(ctx && ctx.who || 'GM', 'Combat', info && info.message || 'No accessible character sheet was found.', 'warning');
+        deliverCombatHealingResult(ctx, healResult, description) {
+            const recipient = ctx && ctx.who || 'GM';
+            healResult.sourceDescription = String(description || '');
+            R20.whisper('GM', Render.showAttackDamagePrompt(healResult));
+            const playerPromptSent = RollParser.sendPlayerPrompt(healResult);
+            if (!ctx.isGM && !playerPromptSent) {
+                R20.whisper(recipient, Render.showAttackDamagePrompt(healResult, {
+                    readOnly: true,
+                    note: 'Healing roll completed. The GM can apply it.'
+                }));
+            }
+            return true;
+        },
+
+        async runLegacySpecialTrait(ctx, args) {
+            const payload = Utils.decodeJsonPayload(Array.isArray(args) ? (args[0] || '') : '', null);
+            const characterId = String(payload && payload.characterId || '').trim();
+            const traitId = String(payload && (payload.traitId || payload.actionId) || '').trim();
+            const tokenId = String(payload && payload.tokenId || '').trim();
+            const recipient = ctx && ctx.who || 'GM';
+            const character = characterId ? getObj('character', characterId) : null;
+            if (!character || !traitId || R20.detectSheetVersion(characterId) !== '2014') {
+                Render.sendWhisperMessage(recipient, 'Special Action', 'Combat Assistant could not resolve that 2014 trait action.', 'warning');
                 return false;
             }
-            let attacks = [];
+            if (!ctx.isGM && !R20.getCharacterAccessFlags(character, ctx.playerId, false).controlAccess) {
+                Render.sendWhisperMessage(recipient, 'Special Action', 'You do not control that character.', 'failure');
+                return false;
+            }
+            const attrs = findObjs({ _type: 'attribute', _characterid: characterId }) || [];
+            const row = this.getLegacyRepeatingRows(characterId, 'traits', attrs).find((entry) => String(entry && entry.rowId || '') === traitId) || null;
+            const sectionKey = this.legacyTraitSpecialSection(row);
+            if (!row || !sectionKey) {
+                Render.sendWhisperMessage(recipient, 'Special Action', 'That trait no longer qualifies as a Bonus Action or Reaction.', 'warning');
+                return false;
+            }
+            const boundToken = tokenId ? R20.getTokenById(tokenId) : null;
+            const token = boundToken && String(boundToken.get('represents') || '').trim() === characterId
+                ? boundToken
+                : R20.findTokenByCharacterIdOnPlayerPage(characterId, ctx && ctx.playerId || '');
+            if (token && !ctx.isGM && !R20.tokenIsControlledByPlayer(token, character, ctx.playerId)) {
+                Render.sendWhisperMessage(recipient, 'Special Action', 'You do not control that token.', 'failure');
+                return false;
+            }
+            const characterName = String(character.get('name') || 'Character').trim() || 'Character';
+            const actionName = String(row.name || 'Special Action').trim() || 'Special Action';
+            const description = String(row.description || '').trim();
+            const baseResult = {
+                attackName: actionName,
+                characterName,
+                tokenName: token ? String(token.get('name') || characterName).trim() : characterName,
+                tokenImgsrc: token ? String(token.get('imgsrc') || '').trim() : '',
+                sourceTokenId: token ? R20.getTokenId(token) : '',
+                casterTokenId: token ? R20.getTokenId(token) : '',
+                playerId: String(ctx && ctx.playerId || '').trim(),
+                rolledByCharacterId: characterId,
+                characterId
+            };
+            const healing = this.legacyTraitHealingEffect(characterId, row, attrs);
+            if (healing) {
+                const rolled = CombatService.rollDamageFormula(healing.formula);
+                if (!rolled.ok) {
+                    Render.sendWhisperMessage(recipient, 'Healing', Utils.escapeHtml(rolled.message || 'Healing formula could not be rolled.'), 'failure');
+                    return false;
+                }
+                const healResult = Object.assign({}, baseResult, {
+                    isHealing: true,
+                    isTempHealing: !!healing.isTempHealing,
+                    healMode: healing.isTempHealing ? 'temp' : 'hp',
+                    effectType: 'healing',
+                    healTotal: rolled.total,
+                    damageTotal: rolled.total,
+                    damageType: healing.isTempHealing ? 'temp healing' : 'healing',
+                    damageRolls: [{
+                        total: rolled.total,
+                        formula: rolled.formula,
+                        detail: rolled.detail,
+                        damageType: healing.isTempHealing ? 'temp healing' : 'healing'
+                    }]
+                });
+                this.deliverCombatHealingResult(ctx, healResult, description);
+            } else {
+                Render.sendSpecialActionUse(baseResult, description);
+            }
+            if (token) await ResourceService.consumeActionResourceForToken(ctx, token, characterId, actionName);
+            Logger.debug('[actions:legacy-special] character=' + characterId + ' trait=' + traitId + ' action=' + actionName);
+            return true;
+        },
+
+        async rollBeaconCombatHealing(ctx, args) {
+            const payload = Utils.decodeJsonPayload(Array.isArray(args) ? (args[0] || '') : '', null);
+            const characterId = String(payload && payload.characterId || '').trim();
+            const actionId = String(payload && payload.actionId || '').trim();
+            const tokenId = String(payload && payload.tokenId || '').trim();
+            const recipient = ctx && ctx.who || 'GM';
+            const character = characterId ? getObj('character', characterId) : null;
+            if (!character || !actionId) {
+                Render.sendWhisperMessage(recipient, 'Healing', 'Combat Assistant could not resolve that healing action.', 'warning');
+                return false;
+            }
+            if (!ctx.isGM && !R20.getCharacterAccessFlags(character, ctx.playerId, false).controlAccess) {
+                Render.sendWhisperMessage(recipient, 'Healing', 'You do not control that character.', 'failure');
+                return false;
+            }
+            const root = R20.getCharacterStoreRoot(characterId);
+            if (!root || typeof root !== 'object' || !(root.integrants || root.settings || root.hitpoints)) {
+                Render.sendWhisperMessage(recipient, 'Healing', 'This healing action is only available for a Roll20 2024 character sheet.', 'warning');
+                return false;
+            }
+
+            let combatData = null;
+            try {
+                combatData = await this.getBeaconCombatMenuDataFromRootLive(characterId, root);
+            } catch (error) {
+                Logger.error('[actions:combat-heal]', error && error.stack ? error.stack : String(error));
+                Render.sendWhisperMessage(recipient, 'Healing', 'Combat Assistant could not read this healing action.', 'failure');
+                return false;
+            }
+            const specialActions = COMBAT_SPECIAL_SECTION_KEYS.reduce((entries, sectionKey) => {
+                const definition = COMBAT_SPECIAL_SECTIONS[sectionKey];
+                return entries.concat(combatData && combatData[definition.dataKey] || []);
+            }, []);
+            const action = specialActions.find((entry) => entry && String(entry.id || '') === actionId);
+            const effects = action && Array.isArray(action.damage) ? action.damage : [];
+            const healingEffects = effects.filter((entry) => entry && entry.isHealing === true);
+            const damageEffects = effects.filter((entry) => entry && entry.isHealing !== true);
+            if (!action || action.hasAttackRoll || !healingEffects.length || damageEffects.length) {
+                Render.sendWhisperMessage(recipient, 'Healing', 'That special action is not a CA-managed healing-only action.', 'warning');
+                return false;
+            }
+
+            const rolledEffects = [];
+            for (let i = 0; i < healingEffects.length; i += 1) {
+                const effect = healingEffects[i];
+                const rolled = CombatService.rollDamageFormula(effect.formula);
+                if (!rolled.ok) {
+                    Render.sendWhisperMessage(recipient, 'Healing', Utils.escapeHtml(rolled.message || 'Healing formula could not be rolled.'), 'failure');
+                    return false;
+                }
+                rolledEffects.push({
+                    total: rolled.total,
+                    formula: rolled.formula,
+                    detail: rolled.detail,
+                    damageType: 'healing'
+                });
+            }
+            const healTotal = rolledEffects.reduce((sum, entry) => sum + Math.max(0, Utils.toInt(entry.total, 0)), 0);
+            const boundToken = tokenId ? R20.getTokenById(tokenId) : null;
+            const token = boundToken && String(boundToken.get('represents') || '').trim() === characterId
+                ? boundToken
+                : R20.findTokenByCharacterIdOnPlayerPage(characterId, ctx && ctx.playerId || '');
+            const characterName = String(character.get('name') || 'Character').trim() || 'Character';
+            const healResult = {
+                isHealing: true,
+                effectType: 'healing',
+                healTotal,
+                damageTotal: healTotal,
+                damageType: 'healing',
+                damageRolls: rolledEffects,
+                attackName: String(action.name || 'Healing').trim() || 'Healing',
+                characterName,
+                tokenName: token ? String(token.get('name') || characterName).trim() : characterName,
+                tokenImgsrc: token ? String(token.get('imgsrc') || '').trim() : '',
+                sourceTokenId: token ? R20.getTokenId(token) : '',
+                casterTokenId: token ? R20.getTokenId(token) : '',
+                playerId: String(ctx && ctx.playerId || '').trim(),
+                rolledByCharacterId: characterId,
+                characterId
+            };
+            this.deliverCombatHealingResult(ctx, healResult, action.description || '');
+            if (token) await ResourceService.consumeActionResourceForToken(ctx, token, characterId, action.name || '');
+            Logger.debug('[actions:combat-heal] character=' + characterId + ' action=' + actionId + ' total=' + String(healTotal));
+            return true;
+        },
+
+        async showCombatForInfo(ctx, info, requestedView) {
+            const viewKey = normalizeCombatViewKey(requestedView);
+            const viewDefinition = COMBAT_VIEW_DEFINITIONS[viewKey];
+            if (!info || !info.ok) {
+                Render.sendWhisperMessage(ctx && ctx.who || 'GM', viewDefinition.title, info && info.message || 'No accessible character sheet was found.', 'warning');
+                return false;
+            }
+            let combatData = { attacks: [], bonusActions: [], reactions: [], freeActions: [], legendaryActions: [], mythicActions: [] };
             let snapshot = null;
             let root = null;
             let isBeacon = false;
@@ -14396,25 +14880,34 @@ const CombatAssistant = (() => {
                 snapshot = this.getStoreDiagnosticSnapshot(info.characterId);
                 root = snapshot.root;
                 isBeacon = !!(root && typeof root === 'object' && (root.integrants || root.settings || root.hitpoints));
-                attacks = isBeacon
-                    ? await this.getBeaconAttackSummariesFromRootLive(info.characterId, root)
-                    : this.getLegacyAttackSummaries(info.characterId, snapshot.attrs);
-                Logger.debug('[actions:combat] sheet=' + (isBeacon ? '2024' : '2014') + ' attacks=' + String(attacks.length) + ' ms=' + String(Date.now() - started));
+                combatData = isBeacon
+                    ? await this.getBeaconCombatMenuDataFromRootLive(info.characterId, root)
+                    : this.getLegacyCombatMenuData(info.characterId, snapshot.attrs);
+                Logger.debug('[actions:combat] view=' + viewKey + ' sheet=' + (isBeacon ? '2024' : '2014') +
+                    ' attacks=' + String(combatData.attacks.length) +
+                    ' bonus=' + String(combatData.bonusActions.length) +
+                    ' reactions=' + String(combatData.reactions.length) +
+                    ' free=' + String(combatData.freeActions.length) +
+                    ' legendary=' + String(combatData.legendaryActions.length) +
+                    ' mythic=' + String(combatData.mythicActions.length) +
+                    ' ms=' + String(Date.now() - started));
             } catch (error) {
                 Logger.error('[actions:combat]', error && error.stack ? error.stack : String(error));
-                Render.sendWhisperMessage(ctx && ctx.who || 'GM', 'Combat', 'Combat Assistant could not read this character\'s attack data.', 'failure');
+                Render.sendWhisperMessage(ctx && ctx.who || 'GM', viewDefinition.title, 'Combat Assistant could not read this character\'s combat data.', 'failure');
                 return false;
             }
             const recipient = ctx && ctx.who || 'GM';
-            // The Combat list uses Store data for structure plus a small live ability
-            // refresh above. Diagnostic-only Sheet API reads still run after the card.
-            R20.whisper(recipient, Render.buildCombatAttacksCard(info.characterName, attacks));
+            // One canonical reader feeds either the primary attack list or the consolidated special-action view.
+            R20.whisper(recipient, Render.buildCombatCard(info.characterName, combatData, {
+                view: viewKey,
+                tokenId: info.tokenId
+            }));
 
-            if (RuntimeConfig.get('CHAT_DEBUG_ATTACKS')) {
+            if (viewKey === 'combat' && RuntimeConfig.get('CHAT_DEBUG_ATTACKS')) {
                 let diagnosticSet = null;
                 try {
                     if (isBeacon) {
-                        const liveDiagnostics = await this.collectBeaconLiveAbilityDiagnostics(info.characterId, snapshot.attrs, attacks, root);
+                        const liveDiagnostics = await this.collectBeaconLiveAbilityDiagnostics(info.characterId, snapshot.attrs, combatData.attacks, root);
                         diagnosticSet = this.getBeaconAttackDiagnostics(info.characterId, root, snapshot.storeChars, snapshot.readMs, liveDiagnostics);
                     } else {
                         diagnosticSet = this.getLegacyAttackDiagnostics(info.characterId, snapshot.attrs, snapshot.readMs);
@@ -14432,8 +14925,9 @@ const CombatAssistant = (() => {
             return true;
         },
 
-        async showCombatForContext(ctx, commandArgs) {
-            return this.showCombatForInfo(ctx, this.resolveSheetCommandContext(ctx, commandArgs, 'combat'));
+        async showCombatForContext(ctx, commandArgs, requestedView) {
+            const viewKey = normalizeCombatViewKey(requestedView);
+            return this.showCombatForInfo(ctx, this.resolveSheetCommandContext(ctx, commandArgs, viewKey), viewKey);
         },
 
 
@@ -14478,54 +14972,6 @@ const CombatAssistant = (() => {
                 }
             });
             return result;
-        },
-
-        buildLegacySpellCardChunks(characterName, spellList, maxChars) {
-            const data = spellList || {};
-            const spells = (Array.isArray(data.spells) ? data.spells : [])
-                .filter((spell) => spell && String(spell.name || '').trim());
-            const limit = Math.max(6500, Utils.toInt(maxChars, 8000));
-            if (!spells.length) {
-                const html = Render.buildSpellsCard(characterName, data);
-                return [{ html, level: null, count: 0, chars: html.length }];
-            }
-
-            const fullHtml = Render.buildSpellsCard(characterName, data);
-            if (fullHtml.length <= limit) {
-                return [{ html: fullHtml, level: null, count: spells.length, chars: fullHtml.length }];
-            }
-
-            const grouped = Object.create(null);
-            spells.forEach((spell) => {
-                const level = Math.max(0, Math.min(9, Utils.toInt(spell && spell.level, 0)));
-                grouped[level] = grouped[level] || [];
-                grouped[level].push(spell);
-            });
-
-            const cards = [];
-            const levels = Object.keys(grouped).map((value) => Utils.toInt(value, 0)).sort((a, b) => a - b);
-            levels.forEach((level) => {
-                let chunk = [];
-                const flush = () => {
-                    if (!chunk.length) return;
-                    const html = Render.buildSpellsCard(characterName, Object.assign({}, data, { spells: chunk.slice() }));
-                    cards.push({ html, level, count: chunk.length, chars: html.length });
-                    chunk = [];
-                };
-
-                grouped[level].forEach((spell) => {
-                    const candidate = chunk.concat([spell]);
-                    const candidateHtml = Render.buildSpellsCard(characterName, Object.assign({}, data, { spells: candidate }));
-                    if (chunk.length && candidateHtml.length > limit) {
-                        flush();
-                        chunk = [spell];
-                    } else {
-                        chunk = candidate;
-                    }
-                });
-                flush();
-            });
-            return cards;
         },
 
         async showSpellsForContext(ctx, commandArgs) {
@@ -14661,6 +15107,28 @@ const CombatAssistant = (() => {
             });
         },
 
+        beaconSpellResourceRef(spell, integrants, resourceEntriesById) {
+            const source = spell && typeof spell === 'object' ? spell : {};
+            const records = integrants && typeof integrants === 'object' ? integrants : {};
+            const byId = resourceEntriesById && typeof resourceEntriesById === 'object' ? resourceEntriesById : {};
+            const spellId = String(source.id || source._id || '').trim();
+            let record = spellId ? (records[spellId] || null) : null;
+            if (!record && spellId) {
+                const key = Object.keys(records).find((candidate) => String(records[candidate] && records[candidate]._id || '').trim() === spellId);
+                if (key) record = records[key];
+            }
+            let relations = record && record.relations;
+            if (typeof relations === 'string') {
+                try { relations = JSON.parse(relations); } catch (ignored) { relations = null; }
+            }
+            if (!relations || typeof relations !== 'object' || Array.isArray(relations)) return null;
+            const resourceId = Object.keys(relations).find((id) => String(relations[id] || '').trim().toLowerCase() === 'uses');
+            const entry = resourceId ? byId[resourceId] : null;
+            return entry && entry.ref && String(entry.ref.kind || '') === 'beacon-resource'
+                ? Utils.sanitizeJsonValue(entry.ref, 0)
+                : null;
+        },
+
         armSpellSlotConsumption(ctx, info, spellList) {
             if (!RuntimeConfig.get('CONSUME_SPELL_SLOTS')) return false;
             const playerId = String(ctx && ctx.playerId || '').trim();
@@ -14669,14 +15137,33 @@ const CombatAssistant = (() => {
             if (!key) return false;
             this.cleanupSpellSlotTracking(Date.now());
             const spellLevelsByName = Object.create(null);
+            const spellCastsByActionId = Object.create(null);
+            const storeRoot = R20.getCharacterStoreRoot(characterId);
+            const integrants = Utils.getBeaconIntegrants(storeRoot || {});
+            const resourceEntriesById = Object.create(null);
+            if (storeRoot) {
+                this.buildBeaconResourceEntries(characterId, storeRoot).forEach((entry) => {
+                    const id = String(entry && entry.ref && entry.ref.id || '').trim();
+                    if (id && String(entry && entry.ref && entry.ref.kind || '') === 'beacon-resource') resourceEntriesById[id] = entry;
+                });
+            }
             (spellList && Array.isArray(spellList.spells) ? spellList.spells : []).forEach((spell) => {
                 const combat = spell && spell.combat && typeof spell.combat === 'object' ? spell.combat : null;
                 const baseLevel = Math.max(0, Math.min(9, this.toResourceInt(spell && spell.level, 0)));
                 const castLevel = Math.max(baseLevel, Math.min(9, this.toResourceInt(combat && combat.castLevel, 0)));
+                const resourceRef = this.beaconSpellResourceRef(spell, integrants, resourceEntriesById);
                 [spell && spell.name, combat && combat.name].forEach((name) => {
                     const normalized = Utils.normalizeName(name || '');
                     if (normalized) spellLevelsByName[normalized] = castLevel;
                 });
+                const actionId = String(combat && combat.id || '').trim();
+                if (actionId) {
+                    spellCastsByActionId[actionId] = {
+                        name: String(spell && spell.name || combat && combat.name || '').trim(),
+                        level: castLevel,
+                        resourceRef
+                    };
+                }
             });
             PENDING_SPELL_SLOT_CASTS[key] = {
                 playerId,
@@ -14687,6 +15174,7 @@ const CombatAssistant = (() => {
                 isPact: !!(spellList && spellList.isPact),
                 pactSlotLevel: Math.max(0, this.toResourceInt(spellList && spellList.pactSlotLevel, 0)),
                 spellLevelsByName,
+                spellCastsByActionId,
                 expiresAt: Date.now() + this.SPELL_SLOT_TRACKING_TTL_MS
             };
             return true;
@@ -14709,12 +15197,12 @@ const CombatAssistant = (() => {
             return null;
         },
 
-        findSpellSlotEntry(characterId, level, preferPact, pactSlotLevel) {
+        findSpellSlotEntry(characterId, level, preferPact, pactSlotLevel, token) {
             const requestedLevel = Math.max(1, Math.min(9, this.toResourceInt(level, 0)));
             const pactLevelRaw = this.toResourceInt(pactSlotLevel, 0);
             const pactLevel = pactLevelRaw > 0 ? Math.max(1, Math.min(9, pactLevelRaw)) : 0;
             const effectiveLevel = preferPact && pactLevel > 0 ? pactLevel : requestedLevel;
-            const entries = this.getEntries(characterId).filter((entry) => {
+            const entries = this.getEntriesForToken(token, characterId).filter((entry) => {
                 const ref = entry && entry.ref || {};
                 const kind = String(ref.kind || '').trim();
                 if (['legacy-spell', 'beacon-spell', 'beacon-pact'].indexOf(kind) < 0) return false;
@@ -14735,15 +15223,18 @@ const CombatAssistant = (() => {
             const spellLevelsByName = pending.spellLevelsByName && typeof pending.spellLevelsByName === 'object'
                 ? pending.spellLevelsByName
                 : Object.create(null);
+            const spellCastsByActionId = pending.spellCastsByActionId && typeof pending.spellCastsByActionId === 'object'
+                ? pending.spellCastsByActionId
+                : Object.create(null);
+            const nativeActionRowId = String(parsed.nativeActionRowId || '').trim();
+            const exactCast = nativeActionRowId && spellCastsByActionId[nativeActionRowId]
+                ? spellCastsByActionId[nativeActionRowId]
+                : null;
             const hasTrackedSpellName = !!(normalizedActionName && Object.prototype.hasOwnProperty.call(spellLevelsByName, normalizedActionName));
-            if (!parsed.isSpellAction && !hasTrackedSpellName) return false;
+            if (!parsed.isSpellAction && !hasTrackedSpellName && !exactCast) return false;
             let spellLevel = Math.max(0, Math.min(9, this.toResourceInt(parsed.spellLevel, 0)));
+            if (spellLevel <= 0 && exactCast) spellLevel = Math.max(0, Math.min(9, this.toResourceInt(exactCast.level, 0)));
             if (spellLevel <= 0 && hasTrackedSpellName) spellLevel = Math.max(0, Math.min(9, this.toResourceInt(spellLevelsByName[normalizedActionName], 0)));
-            // A confirmed cantrip consumes the armed session but never a slot.
-            if (spellLevel <= 0) {
-                delete PENDING_SPELL_SLOT_CASTS[tracked.key];
-                return false;
-            }
 
             delete PENDING_SPELL_SLOT_CASTS[tracked.key];
             const characterId = String(pending.characterId || '').trim();
@@ -14751,11 +15242,33 @@ const CombatAssistant = (() => {
             if (token && String(token.get('represents') || '').trim() !== characterId) token = null;
             if (!token) token = R20.resolveRollSourceToken(parsed, pending.playerId) || null;
             if (!token) {
-                Render.sendWhisperMessage(pending.who || 'GM', 'Spell Slots', 'The spell was detected, but Combat Assistant could not locate the caster token on the caster page, so no slot was consumed.', 'warning');
+                Render.sendWhisperMessage(pending.who || 'GM', 'Spell Slots', 'The spell was detected, but Combat Assistant could not locate the caster token on the caster page, so no spell resource was consumed.', 'warning');
                 return false;
             }
 
-            const entry = this.findSpellSlotEntry(characterId, spellLevel, !!pending.isPact, pending.pactSlotLevel);
+            const exactResourceRef = exactCast && exactCast.resourceRef && typeof exactCast.resourceRef === 'object'
+                ? exactCast.resourceRef
+                : null;
+            if (exactResourceRef && String(exactResourceRef.kind || '') === 'beacon-resource') {
+                const syntheticCtx = {
+                    who: pending.who || String(msg && msg.who || 'GM').replace(/\s+\(GM\)$/i, '').trim() || 'GM',
+                    playerId: pending.playerId,
+                    isGM: typeof playerIsGM === 'function' ? playerIsGM(pending.playerId) : false,
+                    notifySpellSlotFailureToGM: true,
+                    msg
+                };
+                return this.adjust(syntheticCtx, [
+                    'use',
+                    R20.getTokenId(token),
+                    Utils.encodeJsonPayload(exactResourceRef),
+                    '1'
+                ]);
+            }
+
+            // A confirmed cantrip consumes the armed session but never a slot.
+            if (spellLevel <= 0) return false;
+
+            const entry = this.findSpellSlotEntry(characterId, spellLevel, !!pending.isPact, pending.pactSlotLevel, token);
             if (!entry || !entry.ref) {
                 Render.sendWhisperMessage(pending.who || 'GM', 'Spell Slots', 'No matching spell-slot resource was found for level ' + String(spellLevel) + '.', 'warning');
                 return false;
@@ -14773,6 +15286,75 @@ const CombatAssistant = (() => {
                 Utils.encodeJsonPayload(entry.ref),
                 '1'
             ]);
+        },
+
+        actionResourceUseKey(tokenId, actionName) {
+            const safeTokenId = String(tokenId || '').trim();
+            const normalized = Utils.normalizeName(actionName || '');
+            return safeTokenId && normalized ? (safeTokenId + '::' + normalized) : '';
+        },
+
+        cleanupActionResourceUses(now) {
+            const stamp = Math.max(0, Utils.toInt(now, Date.now()));
+            Object.keys(RECENT_ACTION_RESOURCE_USES).forEach((key) => {
+                if (stamp - Utils.toInt(RECENT_ACTION_RESOURCE_USES[key], 0) > 2500) delete RECENT_ACTION_RESOURCE_USES[key];
+            });
+        },
+
+        findMatchingActionResource(token, characterId, actionName) {
+            const normalized = Utils.normalizeName(actionName || '');
+            if (!normalized) return null;
+            const matches = this.getEntriesForToken(token, characterId).filter((entry) => {
+                const kind = String(entry && entry.ref && entry.ref.kind || '').trim();
+                if (['legacy-spell', 'beacon-spell', 'beacon-pact'].indexOf(kind) >= 0) return false;
+                return Utils.normalizeName(entry && entry.label || '') === normalized;
+            });
+            return matches.length === 1 ? matches[0] : null;
+        },
+
+        async consumeActionResourceForToken(ctx, token, characterId, actionName) {
+            if (!RuntimeConfig.get('CONSUME_ACTION_RESOURCES') || !token) return false;
+            const safeCharacterId = String(characterId || token.get('represents') || '').trim();
+            const safeActionName = String(actionName || '').trim();
+            if (!safeCharacterId || !safeActionName) return false;
+            const entry = this.findMatchingActionResource(token, safeCharacterId, safeActionName);
+            if (!entry || !entry.ref) return false;
+            this.cleanupActionResourceUses(Date.now());
+            const key = this.actionResourceUseKey(R20.getTokenId(token), safeActionName);
+            if (!key) return false;
+            const recent = Utils.toInt(RECENT_ACTION_RESOURCE_USES[key], 0);
+            if (recent && Date.now() - recent <= 2500) return false;
+            RECENT_ACTION_RESOURCE_USES[key] = Date.now();
+            const syntheticCtx = Object.assign({}, ctx || {}, {
+                who: String(ctx && ctx.who || 'GM').trim() || 'GM',
+                playerId: String(ctx && ctx.playerId || '').trim(),
+                isGM: !!(ctx && ctx.isGM)
+            });
+            return this.adjust(syntheticCtx, [
+                'use',
+                R20.getTokenId(token),
+                Utils.encodeJsonPayload(entry.ref),
+                '1'
+            ]);
+        },
+
+        async consumeMatchingActionResource(parsed, msg) {
+            if (!RuntimeConfig.get('CONSUME_ACTION_RESOURCES') || !parsed || parsed.isSpellAction) return false;
+            const actionName = String(parsed.attackName || '').trim();
+            if (!actionName || !parsed.hasExplicitAttackName) return false;
+            const playerId = String(msg && msg.playerid || parsed.playerId || '').trim();
+            const characterId = String(parsed.characterId || parsed.rolledByCharacterId || '').trim();
+            let token = R20.resolveRollSourceToken(parsed, playerId) || null;
+            if (!token && characterId) token = R20.findTokenByCharacterIdOnPlayerPage(characterId, playerId);
+            if (!token) return false;
+            const resolvedCharacterId = String(token.get('represents') || characterId || '').trim();
+            const syntheticCtx = {
+                who: String(msg && msg.who || parsed.characterName || 'GM').replace(/\s+\(GM\)$/i, '').trim() || 'GM',
+                playerId,
+                isGM: typeof playerIsGM === 'function' ? playerIsGM(playerId) : false,
+                msg
+            };
+            return this.consumeActionResourceForToken(syntheticCtx, token, resolvedCharacterId, actionName);
         },
 
         toResourceInt(value, fallback) {
@@ -14895,18 +15477,6 @@ const CombatAssistant = (() => {
             return spellSlots.concat(resources);
         },
 
-        getStoreRoot(characterId) {
-            const roots = R20.getCharacterStoreDumpRoots(characterId);
-            return roots.length ? roots[0] : null;
-        },
-
-        getStoreIntegrants(root) {
-            if (!root || typeof root !== 'object') return {};
-            const wrapped = root.integrants;
-            if (wrapped && typeof wrapped === 'object' && wrapped.integrants && typeof wrapped.integrants === 'object') return wrapped.integrants;
-            return wrapped && typeof wrapped === 'object' ? wrapped : {};
-        },
-
         parseObject(value) {
             if (value && typeof value === 'object' && !Array.isArray(value)) return value;
             const raw = String(value || '').trim();
@@ -14948,9 +15518,9 @@ const CombatAssistant = (() => {
         },
 
         buildBeaconResourceEntries(characterId, suppliedRoot) {
-            const root = suppliedRoot && typeof suppliedRoot === 'object' ? suppliedRoot : this.getStoreRoot(characterId);
+            const root = suppliedRoot && typeof suppliedRoot === 'object' ? suppliedRoot : R20.getCharacterStoreRoot(characterId);
             if (!root) return [];
-            const integrants = this.getStoreIntegrants(root);
+            const integrants = Utils.getBeaconIntegrants(root);
             const resources = [];
             Object.keys(integrants).forEach((id) => {
                 const resource = integrants[id];
@@ -15061,6 +15631,13 @@ const CombatAssistant = (() => {
                 : this.buildLegacyResourceEntries(characterId);
         },
 
+        getEntriesForToken(token, characterId) {
+            const safeCharacterId = String(characterId || (token && Utils.isFunction(token.get) ? token.get('represents') : '') || '').trim();
+            if (!safeCharacterId) return [];
+            if (token && NPCResourceService.isManagedToken(token)) return NPCResourceService.getEntries(token, safeCharacterId);
+            return this.getEntries(safeCharacterId);
+        },
+
         resourceAdjustButtonHtml(tokenId, entry, direction) {
             if (!String(tokenId || '').trim()) return '';
             const isUse = direction === 'use';
@@ -15104,22 +15681,15 @@ const CombatAssistant = (() => {
             const characterName = character && Utils.isFunction(character.get) ? String(character.get('name') || 'Character').trim() : 'Character';
             const titleHtml = Render.namedCharacterTitleHtml(characterName, 'Resources', token, character, 30);
             const resourceList = this.buildResourceListHtml(tokenId, entries);
-            const body = resourceList || '<div style="text-align:center;color:rgb(170,170,170);font-size:11px;line-height:14px;padding:4px 0;">No limited resources or spell slots were found.</div>';
+            const managedNotice = NPCResourceService.isManagedToken(token)
+                ? Render.smallGrayDescriptorHtml(Utils.escapeHtml(NPCResourceService.RESOURCE_POOL_NOTICE))
+                : '';
+            const body = (resourceList || '<div style="text-align:center;color:rgb(170,170,170);font-size:11px;line-height:14px;padding:4px 0;">No limited resources or spell slots were found.</div>') + managedNotice;
             return Html.card({
                 title: characterName + ' Resources',
                 body,
                 buildOptions: { titleHtml, titleColor: 'rgb(235,235,235)', bodyAlign: 'left' }
             });
-        },
-
-        findRepresentativeToken(characterId, ctx) {
-            const safeCharacterId = String(characterId || '').trim();
-            if (!safeCharacterId) return null;
-            const pageId = R20.getPlayerPageId(ctx && ctx.playerId || '');
-            const pageToken = pageId ? R20.findTokenByCharacterIdOnPage(safeCharacterId, pageId) : null;
-            if (pageToken) return pageToken;
-            const tokens = R20.getTokensByCharacterId(safeCharacterId);
-            return tokens[0] || null;
         },
 
         showForContext(ctx, args) {
@@ -15133,7 +15703,7 @@ const CombatAssistant = (() => {
                     if (!ctx.isGM && !R20.tokenIsControlledByPlayer(token, R20.getCharacterFromToken(token), ctx.playerId)) return;
                     const info = this.getCharacterContext(token);
                     if (!info.characterId || !info.character) return;
-                    R20.whisper(ctx.who || 'GM', this.buildResourcesCard(token, info.character, this.getEntries(info.characterId)));
+                    R20.whisper(ctx.who || 'GM', this.buildResourcesCard(token, info.character, this.getEntriesForToken(token, info.characterId)));
                     sent += 1;
                 });
                 if (!sent) {
@@ -15159,7 +15729,7 @@ const CombatAssistant = (() => {
                 return false;
             }
             const characterId = String(character.id || (Utils.isFunction(character.get) ? character.get('_id') : '') || '').trim();
-            const token = this.findRepresentativeToken(characterId, ctx);
+            const token = R20.findTokenByCharacterIdOnPlayerPage(characterId, ctx && ctx.playerId || '');
             if (!ctx.isGM) {
                 const controlled = token
                     ? R20.tokenIsControlledByPlayer(token, character, ctx.playerId)
@@ -15169,7 +15739,7 @@ const CombatAssistant = (() => {
                     return false;
                 }
             }
-            R20.whisper(ctx.who || 'GM', this.buildResourcesCard(token, character, this.getEntries(characterId)));
+            R20.whisper(ctx.who || 'GM', this.buildResourcesCard(token, character, this.getEntriesForToken(token, characterId)));
             return true;
         },
 
@@ -15368,7 +15938,7 @@ const CombatAssistant = (() => {
             const kind = String(ref && ref.kind || '').trim();
             const safeValue = this.toResourceInt(value, 0);
             if (kind === 'beacon-resource') {
-                const integrants = this.getStoreIntegrants(root);
+                const integrants = Utils.getBeaconIntegrants(root);
                 const id = String(ref && ref.id || '').trim();
                 const node = id ? integrants[id] : null;
                 if (!node || String(node.type || '').trim().toLowerCase() !== 'resource') {
@@ -15397,7 +15967,7 @@ const CombatAssistant = (() => {
         readBeaconStoreValue(root, ref) {
             const kind = String(ref && ref.kind || '').trim();
             if (kind === 'beacon-resource') {
-                const integrants = this.getStoreIntegrants(root);
+                const integrants = Utils.getBeaconIntegrants(root);
                 const id = String(ref && ref.id || '').trim();
                 const node = id ? integrants[id] : null;
                 if (!node || String(node.type || '').trim().toLowerCase() !== 'resource') return null;
@@ -15552,6 +16122,9 @@ const CombatAssistant = (() => {
                 Render.sendWhisperMessage(ctx.who, 'Resources', 'This token is not linked to a character sheet.', 'failure');
                 return false;
             }
+            if (NPCResourceService.isManagedToken(token)) {
+                return NPCResourceService.adjust(ctx, token, info.character, ref, direction, quantity);
+            }
             const kind = String(ref && ref.kind || '');
             if (/^legacy-/.test(kind)) {
                 const trustedEntry = this.buildLegacyResourceEntries(info.characterId).find((entry) => {
@@ -15604,6 +16177,217 @@ const CombatAssistant = (() => {
 
             Render.sendWhisperMessage(ctx.who, 'Resources', 'Invalid resource reference. Re-open !ca resources.', 'failure');
             return false;
+        }
+    };
+
+    const NPCResourceService = {
+        RESOURCE_POOL_NOTICE: 'This token uses its own resource pool, separate from the character sheet.',
+        BLOCK_START_PREFIX: '[CA:RESOURCES:START v=2 character=',
+        BLOCK_END: '[CA:RESOURCES:END]',
+        REF_PREFIX: '<!--CA:REF:',
+        REF_SUFFIX: '-->',
+        LEGACY_PREFIX: '<!-- CombatAssistant NPC Resources v1:',
+        LEGACY_SUFFIX: '-->',
+
+        isManagedToken(token) {
+            if (!RuntimeConfig.get('NPC_RESOURCE_MANAGEMENT') || !token || TurnTracker.tokenHasHpLink(token)) return false;
+            const character = R20.getCharacterFromToken(token);
+            return !!(character && !R20.isPlayerControlledCharacter(character));
+        },
+
+        refKey(ref) {
+            const data = ref && typeof ref === 'object' ? ref : {};
+            const kind = String(data.kind || '').trim().toLowerCase();
+            if (!kind) return '';
+            if (/^legacy-/.test(kind)) return kind + ':' + String(data.valueAttr || '').trim().toLowerCase();
+            if (kind === 'beacon-resource') return kind + ':' + String(data.id || data.shortID || data.recordName || data.name || '').trim().toLowerCase();
+            if (kind === 'beacon-spell' || kind === 'beacon-pact') return kind + ':' + String(ResourceService.toResourceInt(data.level, 0));
+            return '';
+        },
+
+        normalizeEntry(entry) {
+            const data = entry && typeof entry === 'object' ? entry : {};
+            const ref = data.ref && typeof data.ref === 'object' ? Utils.sanitizeJsonValue(data.ref, 0) : {};
+            return {
+                label: String(data.label || 'Resource').trim() || 'Resource',
+                current: ResourceService.toResourceInt(data.current, 0),
+                max: ResourceService.toResourceInt(data.max, 0),
+                ref
+            };
+        },
+
+        readNotes(token) {
+            if (!token || !Utils.isFunction(token.get)) return '';
+            const raw = String(token.get('gmnotes') || '');
+            if (!/^%3Cp%3E/i.test(raw)) return raw;
+            try {
+                return decodeURIComponent(raw.replace(/\+/g, ' '));
+            } catch (error) {
+                Logger.debug('[npc-resources:gmnotes-decode]', error && error.message ? error.message : String(error));
+                return raw;
+            }
+        },
+
+        readLegacyMetadata(token) {
+            const notes = this.readNotes(token);
+            const start = notes.indexOf(this.LEGACY_PREFIX);
+            if (start < 0) return null;
+            const payloadStart = start + this.LEGACY_PREFIX.length;
+            const end = notes.indexOf(this.LEGACY_SUFFIX, payloadStart);
+            if (end < 0) return null;
+            const payload = Utils.decodeJsonPayload(notes.slice(payloadStart, end), null);
+            if (!payload || ResourceService.toResourceInt(payload.version, 0) !== 1 || !Array.isArray(payload.resources)) return null;
+            return {
+                version: 1,
+                characterId: String(payload.characterId || '').trim(),
+                resources: payload.resources.map((entry) => this.normalizeEntry(entry)).filter((entry) => this.refKey(entry.ref))
+            };
+        },
+
+        readMetadata(token, characterId) {
+            const notes = this.readNotes(token);
+            const start = notes.indexOf(this.BLOCK_START_PREFIX);
+            if (start < 0) return null;
+            const headerEnd = notes.indexOf(']', start + this.BLOCK_START_PREFIX.length);
+            if (headerEnd < 0) return null;
+            const end = notes.indexOf(this.BLOCK_END, headerEnd + 1);
+            if (end < 0) return null;
+            const headerCharacterId = notes.slice(start + this.BLOCK_START_PREFIX.length, headerEnd).trim();
+            const safeCharacterId = String(characterId || headerCharacterId || '').trim();
+            if (!safeCharacterId || (headerCharacterId && headerCharacterId !== safeCharacterId)) return null;
+
+            const body = notes.slice(headerEnd + 1, end)
+                .replace(/<br\s*\/?>/gi, '\n')
+                .replace(/<\/(?:p|div|li)>/gi, '\n')
+                .replace(/<(?:p|div|li)\b[^>]*>/gi, '');
+            const resources = [];
+            body.split(/\r?\n/).forEach((rawLine) => {
+                let line = String(rawLine || '').trim();
+                if (!line) return;
+                const refMatch = line.match(/<!--CA:REF:([\s\S]*?)-->/i);
+                const ref = refMatch ? Utils.decodeJsonPayload(refMatch[1], {}) : {};
+                if (refMatch) line = line.replace(refMatch[0], '');
+                const visible = Utils.stripHtml(line).trim();
+                const match = visible.match(/^(.+?)\s*=\s*(\d+)\s*\/\s*(\d+)\s*$/);
+                if (!match) return;
+                resources.push(this.normalizeEntry({ label: match[1], current: match[2], max: match[3], ref }));
+            });
+
+            if (resources.some((entry) => !this.refKey(entry.ref))) {
+                const templatesByLabel = Object.create(null);
+                ResourceService.getEntries(safeCharacterId).forEach((entry) => {
+                    const normalized = this.normalizeEntry(entry);
+                    const key = Utils.normalizeName(normalized.label);
+                    if (!key || !this.refKey(normalized.ref)) return;
+                    if (!templatesByLabel[key]) templatesByLabel[key] = [];
+                    templatesByLabel[key].push(normalized.ref);
+                });
+                resources.forEach((entry) => {
+                    if (this.refKey(entry.ref)) return;
+                    const candidates = templatesByLabel[Utils.normalizeName(entry.label)] || [];
+                    entry.ref = candidates.length ? candidates.shift() : {};
+                });
+            }
+            return { version: 2, characterId: safeCharacterId, resources: resources.filter((entry) => this.refKey(entry.ref)) };
+        },
+
+        writeMetadata(token, metadata) {
+            if (!token || !Utils.isFunction(token.get) || !Utils.isFunction(token.set)) return false;
+            const characterId = String(metadata && metadata.characterId || '').trim();
+            if (!characterId) return false;
+            const resources = (metadata && Array.isArray(metadata.resources) ? metadata.resources : [])
+                .map((entry) => this.normalizeEntry(entry))
+                .filter((entry) => this.refKey(entry.ref));
+            const lines = resources.map((entry) => {
+                const label = String(entry.label || 'Resource').replace(/[\r\n]+/g, ' ').trim() || 'Resource';
+                return label + ' = ' + String(entry.current) + ' / ' + String(entry.max) + ' ' + this.REF_PREFIX + Utils.encodeJsonPayload(entry.ref) + this.REF_SUFFIX;
+            });
+            const block = this.BLOCK_START_PREFIX + characterId + ']\n' + lines.join('\n') + (lines.length ? '\n' : '') + this.BLOCK_END;
+            let notes = this.readNotes(token);
+
+            while (notes.indexOf(this.BLOCK_START_PREFIX) >= 0) {
+                const start = notes.indexOf(this.BLOCK_START_PREFIX);
+                const headerEnd = notes.indexOf(']', start + this.BLOCK_START_PREFIX.length);
+                const end = headerEnd >= 0 ? notes.indexOf(this.BLOCK_END, headerEnd + 1) : -1;
+                if (headerEnd < 0 || end < 0) {
+                    const orphanEnd = headerEnd >= 0 ? headerEnd + 1 : start + this.BLOCK_START_PREFIX.length;
+                    notes = notes.slice(0, start) + notes.slice(orphanEnd);
+                    continue;
+                }
+                notes = notes.slice(0, start) + notes.slice(end + this.BLOCK_END.length);
+            }
+            notes = notes.split(this.BLOCK_END).join('');
+
+            while (notes.indexOf(this.LEGACY_PREFIX) >= 0) {
+                const start = notes.indexOf(this.LEGACY_PREFIX);
+                const end = notes.indexOf(this.LEGACY_SUFFIX, start + this.LEGACY_PREFIX.length);
+                if (end < 0) {
+                    notes = notes.slice(0, start) + notes.slice(start + this.LEGACY_PREFIX.length);
+                    continue;
+                }
+                notes = notes.slice(0, start) + notes.slice(end + this.LEGACY_SUFFIX.length);
+            }
+
+            const separator = notes ? (/\n$/.test(notes) ? '\n' : '\n\n') : '';
+            token.set('gmnotes', notes + separator + block);
+            return true;
+        },
+
+        initialize(token, characterId) {
+            if (!this.isManagedToken(token)) return [];
+            const safeCharacterId = String(characterId || (Utils.isFunction(token.get) ? token.get('represents') : '') || '').trim();
+            if (!safeCharacterId) return [];
+            const entries = ResourceService.getEntries(safeCharacterId).map((entry) => this.normalizeEntry(entry));
+            return this.writeMetadata(token, { version: 2, characterId: safeCharacterId, resources: entries }) ? entries : [];
+        },
+
+        getEntries(token, characterId) {
+            if (!this.isManagedToken(token)) return [];
+            const safeCharacterId = String(characterId || (Utils.isFunction(token.get) ? token.get('represents') : '') || '').trim();
+            if (!safeCharacterId) return [];
+            const metadata = this.readMetadata(token, safeCharacterId);
+            if (metadata) return metadata.resources;
+            const legacy = this.readLegacyMetadata(token);
+            if (legacy && legacy.characterId === safeCharacterId) {
+                this.writeMetadata(token, { version: 2, characterId: safeCharacterId, resources: legacy.resources });
+                return legacy.resources;
+            }
+            return this.initialize(token, safeCharacterId);
+        },
+
+        ensureForTurnEntry(entry) {
+            if (!entry) return false;
+            const token = R20.getTokenById(String(entry.id || '').trim());
+            if (!this.isManagedToken(token)) return false;
+            const character = R20.getCharacterFromToken(token);
+            const characterId = character ? String(character.id || '').trim() : '';
+            if (!characterId) return false;
+            const metadata = this.readMetadata(token, characterId);
+            if (metadata) return true;
+            const legacy = this.readLegacyMetadata(token);
+            if (legacy && legacy.characterId === characterId) return this.writeMetadata(token, { version: 2, characterId, resources: legacy.resources });
+            this.initialize(token, characterId);
+            return !!this.readMetadata(token, characterId);
+        },
+
+        adjust(ctx, token, character, ref, direction, quantity) {
+            const characterId = character ? String(character.id || '').trim() : '';
+            const entries = this.getEntries(token, characterId);
+            const key = this.refKey(ref);
+            const entry = key ? entries.find((candidate) => this.refKey(candidate && candidate.ref) === key) : null;
+            if (!entry) {
+                Render.sendWhisperMessage(ctx.who, 'Resources', 'Invalid or stale NPC resource reference. Re-open !ca resources.', 'warning');
+                return false;
+            }
+            const change = ResourceService.calculateChange(entry.current, entry.max, direction, quantity);
+            if (!change.ok) return ResourceService.sendResourceChangeFailure(ctx, character, entry.label, change);
+            entry.current = change.next;
+            if (!this.writeMetadata(token, { version: 2, characterId, resources: entries })) {
+                Render.sendWhisperMessage(ctx.who, 'Resources', 'The NPC resource block could not be updated in Token GM Notes.', 'failure');
+                return false;
+            }
+            ResourceService.sendResourceUpdate(token, character, entry.label, direction, change.effective, entry.current, entry.max, ctx);
+            return true;
         }
     };
 
@@ -15672,39 +16456,6 @@ const CombatAssistant = (() => {
         getNativeRollRecipients(token, character) {
             const playerRecipients = R20.isPlayerControlledToken(token, character) ? R20.getTokenControllerDisplayNames(token, character) : [];
             return Utils.uniqueNames(['GM'].concat(playerRecipients));
-        },
-
-        resolvePlayerActionSourceOnTargetPage(request, targetToken) {
-            const payload = request && request.payload ? request.payload : {};
-            const characterId = String(payload.casterCharacterId || request.sourceCharacterId || request.characterId || '').trim();
-            const targetPageId = R20.getTokenPageId(targetToken);
-            const explicitSourceId = String(payload.casterTokenId || request.sourceTokenId || '').trim();
-            const explicitSource = R20.getTokenById(explicitSourceId);
-            if (explicitSource && (!targetPageId || R20.getTokenPageId(explicitSource) === targetPageId)) {
-                const explicitCharacter = R20.getCharacterFromToken(explicitSource);
-                const explicitCharacterId = String((explicitCharacter && explicitCharacter.id) || explicitSource.get('represents') || characterId || '').trim();
-                payload.casterTokenId = R20.getTokenId(explicitSource);
-                payload.casterCharacterId = explicitCharacterId;
-                payload.casterPageId = R20.getTokenPageId(explicitSource);
-                payload.sourceImgsrc = String(explicitSource.get('imgsrc') || payload.sourceImgsrc || '');
-                request.sourceTokenId = payload.casterTokenId;
-                request.sourceCharacterId = explicitCharacterId;
-                request.sourcePageId = payload.casterPageId;
-                return explicitSource;
-            }
-            if (explicitSourceId) return null;
-            if (!characterId || !targetPageId) return null;
-            const samePageToken = R20.findTokenByCharacterIdOnPage(characterId, targetPageId);
-            const sourceToken = samePageToken || explicitSource;
-            if (!sourceToken) return null;
-            payload.casterTokenId = R20.getTokenId(sourceToken);
-            payload.casterCharacterId = characterId;
-            payload.casterPageId = R20.getTokenPageId(sourceToken);
-            payload.sourceImgsrc = String(sourceToken.get('imgsrc') || payload.sourceImgsrc || '');
-            request.sourceTokenId = payload.casterTokenId;
-            request.sourceCharacterId = characterId;
-            request.sourcePageId = payload.casterPageId;
-            return sourceToken;
         },
 
         createNativeRollPlan(tokens, macroName, options) {
@@ -15853,7 +16604,7 @@ const CombatAssistant = (() => {
         },
 
         resolveImmediate2014Rolls(plan) {
-            const abilityLabel = CombatService.abilityNameToShortLabel(plan.options.saveAbility || '') ||
+            const abilityLabel = Utils.abilityShortLabel(plan.options.saveAbility || '') ||
                 String(plan.options.label || 'SAVE').toUpperCase();
 
             if (plan.options.rollMode && plan.ca2014InitiativeRolls.length) {
@@ -15894,7 +16645,7 @@ const CombatAssistant = (() => {
         },
 
         send2014NativeRollRequests(plan) {
-            const abilityLabel = CombatService.abilityNameToShortLabel(plan.options.saveAbility || '') ||
+            const abilityLabel = Utils.abilityShortLabel(plan.options.saveAbility || '') ||
                 String(plan.options.label || 'SAVE').toUpperCase();
 
             if (!plan.options.rollMode && plan.ca2014InitiativeRolls.length) {
@@ -16007,6 +16758,26 @@ const CombatAssistant = (() => {
             return this.summarizeNativeRollPlan(plan);
         },
 
+        applyConfigMutationResult(ctx, result) {
+            if (!result.ok) {
+                Render.sendWhisperMessage(ctx.who, result.title || 'Settings', result.message, 'failure');
+                return false;
+            }
+            if (result.key === 'TURN_TRACKER') {
+                if (result.value) TurnTracker.initializeFromCurrentTurnOrder();
+                else TurnTracker.resetState();
+            }
+            if (result.key === 'TURN_MOVEMENT_TRACKER') {
+                if (result.value) TurnTracker.resetMovementForCurrentTurn({ resolveAsync: true });
+                else TurnTracker.clearMovementState();
+            }
+            if (/^TURN_MARKER|^PUBLIC_TURN_MARKER|^TURN_AUTO_FOCUS/.test(result.key || '')) {
+                TurnTracker.refreshCurrentTurnPresentation({ sendCard: false, focus: false });
+            }
+            Render.showConfigMenu(ctx.who);
+            return true;
+        },
+
         async handle(ctx) {
             const args = ctx.args || [];
             const action = String(args[0] || 'menu').trim().toLowerCase();
@@ -16084,35 +16855,11 @@ const CombatAssistant = (() => {
                 return;
             }
             if (action === 'set') {
-                const key = args[1] || '';
-                const value = args.slice(2).join(' ');
-                const result = RuntimeConfig.set(key, value);
-                if (!result.ok) Render.sendWhisperMessage(ctx.who, result.title || 'Settings', result.message, 'failure');
-                else {
-                    if (result.key === 'TURN_TRACKER' && result.value) TurnTracker.initializeFromCurrentTurnOrder();
-                    if (result.key === 'TURN_TRACKER' && !result.value) TurnTracker.resetState();
-                    if (result.key === 'TURN_MOVEMENT_TRACKER') {
-                        if (result.value) TurnTracker.resetMovementForCurrentTurn({ resolveAsync: true });
-                        else TurnTracker.clearMovementState();
-                    }
-                    if (/^TURN_MARKER|^PUBLIC_TURN_MARKER|^TURN_AUTO_FOCUS/.test(result.key || '')) TurnTracker.refreshCurrentTurnPresentation({ sendCard: false, focus: false });
-                    Render.showConfigMenu(ctx.who);
-                }
+                this.applyConfigMutationResult(ctx, RuntimeConfig.set(args[1] || '', args.slice(2).join(' ')));
                 return;
             }
             if (action === 'toggle') {
-                const result = RuntimeConfig.toggle(args[1] || '');
-                if (!result.ok) Render.sendWhisperMessage(ctx.who, 'Settings', result.message, 'failure');
-                else {
-                    if (result.key === 'TURN_TRACKER' && result.value) TurnTracker.initializeFromCurrentTurnOrder();
-                    if (result.key === 'TURN_TRACKER' && !result.value) TurnTracker.resetState();
-                    if (result.key === 'TURN_MOVEMENT_TRACKER') {
-                        if (result.value) TurnTracker.resetMovementForCurrentTurn({ resolveAsync: true });
-                        else TurnTracker.clearMovementState();
-                    }
-                    if (/^TURN_MARKER|^PUBLIC_TURN_MARKER|^TURN_AUTO_FOCUS/.test(result.key || '')) TurnTracker.refreshCurrentTurnPresentation({ sendCard: false, focus: false });
-                    Render.showConfigMenu(ctx.who);
-                }
+                this.applyConfigMutationResult(ctx, RuntimeConfig.toggle(args[1] || ''));
                 return;
             }
             if (action === 'dash' || action === 'disengage' || action === 'dodge') {
@@ -16131,8 +16878,16 @@ const CombatAssistant = (() => {
                 this.handleSheetFocus(ctx, args.slice(1));
                 return;
             }
-            if (action === 'combat') {
-                await ActionService.showCombatForContext(ctx, args.slice(1));
+            if (action === 'combatheal') {
+                await ActionService.rollBeaconCombatHealing(ctx, args.slice(1));
+                return;
+            }
+            if (action === 'legacyspecial') {
+                await ActionService.runLegacySpecialTrait(ctx, args.slice(1));
+                return;
+            }
+            if (action === 'combat' || action === 'combat-special') {
+                await ActionService.showCombatForContext(ctx, args.slice(1), action);
                 return;
             }
             if (action === 'spells') {
@@ -16331,18 +17086,48 @@ const CombatAssistant = (() => {
             const request = State.getPlayerActionRequest(entry.actionId);
             const payload = request && request.payload ? request.payload : {};
             const casterToken = R20.getTokenById(entry.casterTokenId);
-            const buttons = Render.areaRollControlButtons({
-                actionId: entry.actionId,
-                casterTokenId: entry.casterTokenId,
-                isConcentration: true,
-                rollTooltip: 'Roll the active concentration area again'
-            });
             const areaInfo = payload.areaInfo && payload.areaInfo.isArea ? payload.areaInfo : null;
-            const body = Render.iconButtonTableHtml(buttons, {
-                columns: buttons.length,
-                footerHtml: areaInfo
-                    ? Render.playerAreaMarkerFooterHtml(areaInfo, payload)
-                    : 'Active concentration area.',
+            const characterId = String(payload.casterCharacterId || request && (request.sourceCharacterId || request.characterId) || '').trim();
+            const followup = !areaInfo
+                ? ActionService.getBeaconConcentrationFollowup(characterId, payload.nativeActionRowId)
+                : null;
+            const trackingProfile = CombatService.concentrationTrackingProfile(request, entry, followup);
+            entry.trackingMode = trackingProfile.mode;
+            entry.trackingLabel = trackingProfile.label;
+            const trackingDetail = trackingProfile.detail ? (' - ' + trackingProfile.detail) : '';
+            const trackingHtml = Render.smallGrayDescriptorHtml(
+                'Tracking: <strong style="color:rgb(235,215,140);">' + Utils.escapeHtml(trackingProfile.label) + '</strong>' + Utils.escapeHtml(trackingDetail)
+            );
+            if (casterToken) CombatService.syncConcentrationTooltip(entry, casterToken);
+            let buttons = [];
+            if (areaInfo) {
+                buttons = Render.areaRollControlButtons({
+                    actionId: entry.actionId,
+                    casterTokenId: entry.casterTokenId,
+                    isConcentration: true,
+                    rollTooltip: 'Roll the active concentration area again'
+                });
+            } else {
+                if (followup && followup.command) {
+                    buttons.push(Render.iconButtonHtml({
+                        iconHtml: '&#9654;&#65039;',
+                        label: 'Use',
+                        command: followup.command,
+                        backgroundColor: 'rgba(55,105,170,0.95)',
+                        tooltip: 'Use ' + String(followup.actionName || 'the persistent concentration action')
+                    }));
+                }
+                buttons.push(Render.concentrationEndButtonHtml(entry.actionId, entry.casterTokenId, 'End concentration'));
+            }
+            const footerHtml = areaInfo
+                ? Render.playerAreaMarkerFooterHtml(areaInfo, payload)
+                : (followup && followup.command
+                    ? ('Active concentration. <strong style="color:rgb(235,215,140);">' + Utils.escapeHtml(followup.actionName) + '</strong> can be used while concentration lasts.')
+                    : 'Active concentration. No repeatable area or action is available.');
+            const titleName = followup && followup.spellName ? followup.spellName : (entry.spellName || payload.sourceAction || 'Concentration');
+            const body = trackingHtml + Render.iconButtonTableHtml(buttons.filter(Boolean), {
+                columns: Math.max(1, buttons.filter(Boolean).length),
+                footerHtml,
                 footer: ''
             });
             return Html.card({
@@ -16350,7 +17135,7 @@ const CombatAssistant = (() => {
                 body,
                 buildOptions: {
                     titleHtml: Render.attackPromptTitleHtml({
-                        attackName: entry.spellName || payload.sourceAction || 'Concentration',
+                        attackName: titleName,
                         tokenName: casterToken ? CombatService.getTokenName(casterToken) : (payload.sourceName || 'Caster'),
                         tokenImgsrc: casterToken && Utils.isFunction(casterToken.get) ? String(casterToken.get('imgsrc') || payload.sourceImgsrc || '') : String(payload.sourceImgsrc || ''),
                         isSaveAttack: payload.mode === 'save',
@@ -16413,33 +17198,39 @@ const CombatAssistant = (() => {
                     label: token ? CombatService.getTokenName(token) : (entry.spellName || 'Con'),
                     command: '!combatAssistant concopen ' + Utils.attrSafe(entry.casterTokenId),
                     backgroundColor: 'rgba(80,80,120,0.95)',
-                    tooltip: 'Open this concentration area controls'
+                    tooltip: 'Open this concentration controls'
                 });
             });
             R20.whisper(ctx.who, Html.card({
                 title: 'Concentration',
-                body: Render.iconButtonTableHtml(buttons, { columns: Math.min(5, Math.max(1, buttons.length)), footer: 'Choose which active concentration area to open.' })
+                body: Render.iconButtonTableHtml(buttons, { columns: Math.min(5, Math.max(1, buttons.length)), footer: 'Choose which active concentration to open.' })
             }));
         },
 
         handleConcentrationRecall(ctx, args) {
             const entries = this.getAccessibleConcentrationEntries(ctx, args[0] || '');
             if (!entries.length) {
-                Render.sendWhisperMessage(ctx.who, 'Concentration', 'No active concentration area was found for your token.', 'warning');
+                Render.sendWhisperMessage(ctx.who, 'Concentration', 'No active concentration was found for your token.', 'warning');
                 return;
             }
             if (entries.length === 1) {
-                const rerolled = this.rerollConcentrationDamage(entries[0]);
-                if (!rerolled) {
-                    Render.sendWhisperMessage(
-                        ctx.who,
-                        'Concentration Damage',
-                        'Combat Assistant could not roll fresh damage for this concentration spell. The stored damage was not presented as a new roll.',
-                        'warning'
-                    );
-                    return;
+                const entry = entries[0];
+                const request = State.getPlayerActionRequest(entry.actionId);
+                const payload = request && request.payload ? request.payload : {};
+                const isAreaConcentration = !!(payload.areaInfo && payload.areaInfo.isArea);
+                if (isAreaConcentration) {
+                    const rerolled = this.rerollConcentrationDamage(entry);
+                    if (!rerolled) {
+                        Render.sendWhisperMessage(
+                            ctx.who,
+                            'Concentration Damage',
+                            'Combat Assistant could not roll fresh damage for this concentration area. The stored damage was not presented as a new roll.',
+                            'warning'
+                        );
+                        return;
+                    }
                 }
-                const card = this.concentrationButtonCard(entries[0]);
+                const card = this.concentrationButtonCard(entry);
                 R20.whisper(ctx.who, card);
                 if (!ctx.isGM) R20.whisper('GM', card);
                 return;
@@ -16451,12 +17242,12 @@ const CombatAssistant = (() => {
                     label: token ? CombatService.getTokenName(token) : (entry.spellName || 'Con'),
                     command: '!combatAssistant conc ' + Utils.attrSafe(entry.casterTokenId),
                     backgroundColor: 'rgba(80,80,120,0.95)',
-                    tooltip: 'Show this concentration area controls'
+                    tooltip: 'Show this concentration controls'
                 });
             });
             R20.whisper(ctx.who, Html.card({
                 title: 'Concentration',
-                body: Render.iconButtonTableHtml(buttons, { columns: Math.min(5, Math.max(1, buttons.length)), footer: 'Choose which active concentration area to recall.' })
+                body: Render.iconButtonTableHtml(buttons, { columns: Math.min(5, Math.max(1, buttons.length)), footer: 'Choose which active concentration to recall.' })
             }));
         },
 
@@ -16489,7 +17280,7 @@ const CombatAssistant = (() => {
             const sourceTokenId = R20.getTokenId(sourceToken);
             const sourceCharacterId = character ? String(character.id || sourceToken.get('represents') || '').trim() : String(sourceToken.get('represents') || '').trim();
             const sourcePageId = R20.getTokenPageId(sourceToken);
-            const saveAbility = CombatService.normalizeAbilityName(safeData.saveAbility || '');
+            const saveAbility = Utils.normalizeAbilityName(safeData.saveAbility || '');
             const damageRolls = Array.isArray(safeData.damageRolls) && safeData.damageRolls.length
                 ? safeData.damageRolls
                 : [{ total: Math.max(0, Utils.toInt(safeData.damageTotal, 0)), damageType: safeData.damageType || 'normal', formula: safeData.damageFormula || 'Roll20' }];
@@ -16658,7 +17449,7 @@ const CombatAssistant = (() => {
                 Render.sendWhisperMessage(ctx.who, 'Target Required', 'The selected target token could not be found.', 'warning');
                 return;
             }
-            const sourceToken = this.resolvePlayerActionSourceOnTargetPage(request, target);
+            const sourceToken = CombatService.resolvePlayerActionSourceOnTargetPage(request, target);
             const rangeCheck = CombatService.validatePlayerActionRange(request, target);
             if (!rangeCheck.ok) {
                 Render.sendWhisperMessage(ctx.who, 'Out of Range', rangeCheck.message || 'The selected target is not within range for this action.', 'failure');
@@ -16765,12 +17556,14 @@ const CombatAssistant = (() => {
                     : await this.handleDeal(useCtx, [Utils.encodeJsonPayload(payload)]);
                 if (concentrationAreaActive || shouldStartConcentrationArea) {
                     if (shouldStartConcentrationArea) {
-                        const sourceToken = this.resolvePlayerActionSourceOnTargetPage(request, marker) || R20.getAreaMarkerSourceToken(request);
+                        const sourceToken = CombatService.resolvePlayerActionSourceOnTargetPage(request, marker) || R20.getAreaMarkerSourceToken(request);
                         CombatService.startConcentrationForRequest(request, sourceToken);
                     }
                     State.releasePlayerAction(actionId, reservationKey);
                     const spellName = Utils.escapeHtml(String(request.attackName || payload.sourceAction || 'Concentration'));
-                    Render.sendWhisperMessage(ctx.who, 'Concentration', 'You have concentration in <strong style="color:rgb(245,220,80);">' + spellName + '</strong>. Use <code style="color:rgb(52,203,116);font-weight:900;">!ca conc</code> to recall this roll.', 'normal');
+                    const concentrationEntry = State.getConcentrationByTokenId(request.concentrationCasterTokenId || payload.casterTokenId || '');
+                    const trackingLabel = concentrationEntry && concentrationEntry.trackingLabel ? String(concentrationEntry.trackingLabel) : 'Area Marker';
+                    Render.sendWhisperMessage(ctx.who, 'Concentration', 'You have concentration in <strong style="color:rgb(245,220,80);">' + spellName + '</strong>.<br><span style="color:rgb(170,170,170);font-size:10px;">Tracking: ' + Utils.escapeHtml(trackingLabel) + '</span><br>Use <code style="color:rgb(52,203,116);font-weight:900;">!ca conc</code> to recall this roll.', 'normal');
                 } else if (outcome && (outcome.applied > 0 || outcome.queued > 0)) {
                     if (!persistentAreaStarted) {
                         State.commitPlayerAction(actionId, reservationKey);
@@ -16825,12 +17618,12 @@ const CombatAssistant = (() => {
                     nativeSaveRolls: roll.rolls,
                     nativeSaveMode: roll.mode,
                     nativeSaveRollModeReason: String(pending.forcedRollReason || ''),
-                    nativeSaveRollName: (CombatService.abilityNameToShortLabel(roll.ability) || 'SAVE') + ' Save',
+                    nativeSaveRollName: (Utils.abilityShortLabel(roll.ability) || 'SAVE') + ' Save',
                     nativeSaveCharacterName: roll.characterName
                 });
                 if (pending.concentrationCheck || damagePayload.concentrationCheck) {
                     roll.rollModeReason = pending.forcedRollReason || '';
-                    R20.direct(Render.showSavingThrowResults([roll], CombatService.abilityNameToShortLabel(roll.ability) || 'SAVE'));
+                    R20.direct(Render.showSavingThrowResults([roll], Utils.abilityShortLabel(roll.ability) || 'SAVE'));
                     CombatService.resolveConcentrationSave(token, roll, pending);
                     applied += 1;
                     continue;
@@ -16881,11 +17674,11 @@ const CombatAssistant = (() => {
             }
             roll.rollModeReason = pending.forcedRollReason || '';
             if (pending.concentrationCheck || (pending.payload && pending.payload.concentrationCheck)) {
-                R20.direct(Render.showSavingThrowResults([roll], CombatService.abilityNameToShortLabel(roll.ability) || 'SAVE'));
+                R20.direct(Render.showSavingThrowResults([roll], Utils.abilityShortLabel(roll.ability) || 'SAVE'));
                 CombatService.resolveConcentrationSave(token, roll, pending);
                 return;
             }
-            R20.direct(Render.showSavingThrowResults([roll], CombatService.abilityNameToShortLabel(roll.ability) || 'SAVE'));
+            R20.direct(Render.showSavingThrowResults([roll], Utils.abilityShortLabel(roll.ability) || 'SAVE'));
             const damagePayload = Object.assign({}, pending.payload || {}, {
                 nativeSaveTotal: roll.total,
                 nativeSaveNatural: roll.natural,
@@ -16893,7 +17686,7 @@ const CombatAssistant = (() => {
                 nativeSaveRolls: roll.rolls,
                 nativeSaveMode: roll.mode,
                 nativeSaveRollModeReason: String(pending.forcedRollReason || ''),
-                nativeSaveRollName: (CombatService.abilityNameToShortLabel(roll.ability) || 'SAVE') + ' Save',
+                nativeSaveRollName: (Utils.abilityShortLabel(roll.ability) || 'SAVE') + ' Save',
                 nativeSaveCharacterName: roll.characterName
             });
             const result = await CombatService.applyDamageToToken(token, damagePayload);
@@ -16913,7 +17706,7 @@ const CombatAssistant = (() => {
             }
             const mode = CombatService.normalizeRollMode(args[0] || 'normal');
             const payload = Utils.decodeJsonPayload(args[1] || '', {});
-            const ability = CombatService.normalizeAbilityName(payload.ability || '');
+            const ability = Utils.normalizeAbilityName(payload.ability || '');
             const tokenIds = Array.isArray(payload.tokenIds) ? payload.tokenIds.map((id) => String(id || '').trim()).filter(Boolean) : [];
             if (!ability || !tokenIds.length) {
                 Render.sendWhisperMessage(ctx.who, '2014 Saving Throws', 'No 2014 saving throw tokens were found.', 'warning');
@@ -16927,7 +17720,7 @@ const CombatAssistant = (() => {
                 if (result.ok) results.push(result);
                 else failed.push(result.message || 'Saving throw failed.');
             });
-            if (results.length) R20.direct(Render.showSavingThrowResults(results, CombatService.abilityNameToShortLabel(ability) || 'SAVE'));
+            if (results.length) R20.direct(Render.showSavingThrowResults(results, Utils.abilityShortLabel(ability) || 'SAVE'));
             if (failed.length) Render.sendWhisperMessage(ctx.who, '2014 Saving Throws', Utils.escapeHtml(failed.join(' ')), 'warning');
         },
 
@@ -16990,7 +17783,7 @@ const CombatAssistant = (() => {
                 const damage = Math.max(0, Utils.toInt(safeArgs[1], 0));
                 const damageType = CombatService.normalizeDamageType(safeArgs[2] || 'normal');
                 const challenge = Math.max(0, Utils.toInt(safeArgs[3], 0));
-                const saveAbility = CombatService.normalizeAbilityName(safeArgs[4] || '');
+                const saveAbility = Utils.normalizeAbilityName(safeArgs[4] || '');
                 const halfOnSuccess = Utils.toBoolean(safeArgs[5], false);
                 const payload = {
                     type: 'damage',
@@ -17106,7 +17899,7 @@ const CombatAssistant = (() => {
                     nativeSaveRolls: resultRoll.rolls,
                     nativeSaveMode: resultRoll.mode,
                     nativeSaveRollModeReason: String(pending.forcedRollReason || queuedRoll.forcedRollReason || ''),
-                    nativeSaveRollName: (CombatService.abilityNameToShortLabel(resultRoll.ability) || abilityLabel) + ' Save',
+                    nativeSaveRollName: (Utils.abilityShortLabel(resultRoll.ability) || abilityLabel) + ' Save',
                     nativeSaveCharacterName: resultRoll.characterName
                 });
                 const result = await CombatService.applyDamageToToken(token, damagePayload);
@@ -17122,7 +17915,7 @@ const CombatAssistant = (() => {
 
         async send2014SavingDamageRequests(ctx, payload, challenge, rolls) {
             if (!rolls.length) return;
-            const abilityLabel = CombatService.abilityNameToShortLabel(payload.saveAbility || '') || 'SAVE';
+            const abilityLabel = Utils.abilityShortLabel(payload.saveAbility || '') || 'SAVE';
             const forcedRolls = rolls.filter((roll) => !!roll.forcedRollMode);
             const promptedRolls = rolls.filter((roll) => !roll.forcedRollMode);
 
@@ -17149,7 +17942,7 @@ const CombatAssistant = (() => {
 
         sendNativeSavingDamageBatch(ctx, payload, challenge, rolls) {
             if (!rolls.length) return;
-            const abilityLabel = CombatService.abilityNameToShortLabel(payload.saveAbility || '') || 'SAVE';
+            const abilityLabel = Utils.abilityShortLabel(payload.saveAbility || '') || 'SAVE';
             const batch = R20.createNativeRollBatchAbility(
                 rolls.map((roll) => R20.nativeBatchExecutionCommand(roll))
             );
@@ -17249,13 +18042,13 @@ const CombatAssistant = (() => {
         },
 
         async handleSave(ctx, args) {
-            const ability = CombatService.normalizeAbilityName(args[0] || '');
+            const ability = Utils.normalizeAbilityName(args[0] || '');
             if (!ability) {
                 Render.sendWhisperMessage(ctx.who, 'Saving Throw', 'Choose a valid ability: strength, dexterity, constitution, intelligence, wisdom, or charisma.', 'warning');
                 return;
             }
             const macroName = CombatService.getNativeSaveMacroName(ability);
-            const abilityLabel = CombatService.abilityNameToShortLabel(ability) || 'SAVE';
+            const abilityLabel = Utils.abilityShortLabel(ability) || 'SAVE';
             const rollModeArg = String(args[1] || '').trim();
             const rollMode = ['normal', 'advantage', 'disadvantage', 'adv', 'dis'].indexOf(rollModeArg.toLowerCase()) >= 0
                 ? CombatService.normalizeRollMode(rollModeArg)
@@ -17381,7 +18174,7 @@ const CombatAssistant = (() => {
             if (token) return [token];
             const character = getObj('character', safeId);
             if (!character) return [];
-            const representative = ActionService.findRepresentativeToken(safeId, ctx || {});
+            const representative = R20.findTokenByCharacterIdOnPlayerPage(safeId, ctx && ctx.playerId || '');
             return representative ? [representative] : [];
         },
 
@@ -17866,6 +18659,7 @@ const CombatAssistant = (() => {
         TurnTracker,
         CombatService,
         ActionService,
-        ResourceService
+        ResourceService,
+        NPCResourceService
     });
 })();
