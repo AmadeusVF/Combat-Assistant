@@ -1756,28 +1756,50 @@ const CombatAssistant = (() => {
             }).trim();
         },
 
-        prepareCommand(command) {
+        prepareCommand(command, options) {
+            const opts = options || {};
             let text = String(command === undefined || command === null ? '' : command).trim();
-            if (!text) return { text: '', clientRequired: false };
+            if (!text) return { text: '', apiText: '', clientRequired: false };
             text = Utils.decodeRoll20QueryText(text)
                 .replace(/&amp;#(?:0*64|x0*40);|&#(?:0*64|x0*40);|&commat;/gi, '@')
                 .replace(/&amp;#(?:0*37|x0*25);|&#(?:0*37|x0*25);|&percnt;/gi, '%')
                 .replace(/&amp;#(?:0*63|x0*3f);|&#(?:0*63|x0*3f);|&quest;/gi, '?')
                 .replace(/&amp;#(?:0*126|x0*7e);|&#(?:0*126|x0*7e);/gi, '~')
                 .replace(/([@%])\{([^|{}]+)\|([^{}]+)\}/g, (match, sigil, owner, field) => {
-                    const token = R20.getTokenById(String(owner || '').trim());
+                    const safeOwner = String(owner || '').trim();
+                    if (sigil === '%') {
+                        const contextualId = /^selected$/i.test(safeOwner)
+                            ? String(opts.selectedCharacterId || '').trim()
+                            : (/^target$/i.test(safeOwner) ? String(opts.targetCharacterId || '').trim() : '');
+                        if (contextualId) return '%{' + contextualId + '|' + field + '}';
+                    }
+                    const token = R20.getTokenById(safeOwner);
                     const characterId = token && Utils.isFunction(token.get) ? String(token.get('represents') || '').trim() : '';
                     return characterId ? (sigil + '{' + characterId + '|' + field + '}') : match;
                 });
+
+            const namedMacro = text.match(/^#([^\r\n]+)$/);
+            if (namedMacro && typeof findObjs === 'function') {
+                const depth = Math.max(0, Utils.toInt(opts.namedMacroDepth, 0));
+                const matches = findObjs({ _type: 'macro', name: String(namedMacro[1] || '').trim() }) || [];
+                if (depth < 5 && matches.length === 1 && matches[0] && Utils.isFunction(matches[0].get)) {
+                    const action = String(matches[0].get('action') || '').trim();
+                    if (action && action !== text) return this.prepareCommand(action, Object.assign({}, opts, { namedMacroDepth: depth + 1 }));
+                }
+            }
+
+            const nativeButton = text.match(/^~([^|]+)\|(.+)$/);
+            const apiText = nativeButton ? ('%{' + nativeButton[1] + '|' + nativeButton[2] + '}') : text;
             return {
                 text,
-                clientRequired: /^\s*[~#]/.test(text) || /[@%]\{(?:target|selected)\|/i.test(text) || /\?\{/.test(text)
+                apiText,
+                clientRequired: /@\{/.test(text) || /\?\{/.test(text)
             };
         },
 
         sendCommand(command, options) {
             const opts = options || {};
-            const prepared = this.prepareCommand(command);
+            const prepared = this.prepareCommand(command, opts);
             if (!prepared.text) return false;
             if (prepared.clientRequired) {
                 const spellName = String(opts.spellName || 'Spell').trim() || 'Spell';
@@ -1798,7 +1820,7 @@ const CombatAssistant = (() => {
                 return true;
             }
             try {
-                sendChat(CONFIG.CHAT_NAME, prepared.text);
+                sendChat(CONFIG.CHAT_NAME, prepared.apiText);
                 return true;
             } catch (error) {
                 Logger.debug('[spell-macro]', error && error.message ? error.message : String(error));
@@ -1806,10 +1828,11 @@ const CombatAssistant = (() => {
             }
         },
 
-        sendApplyCards(command, options) {
+        sendInteractiveApplyCards(command, options) {
             const opts = options || {};
-            const prepared = this.prepareCommand(command);
+            const prepared = this.prepareCommand(command, opts);
             if (!prepared.text) return false;
+            if (!prepared.clientRequired) return this.sendCommand(command, opts);
             const spellName = String(opts.spellName || 'Spell').trim() || 'Spell';
             const titleHtml = Render.attackPromptTitleHtml({ attackName: spellName, macroPrompt: true });
             const deferredCommand = Render.deferButtonCommand(prepared.text);
@@ -1833,9 +1856,7 @@ const CombatAssistant = (() => {
 
             const playerRecipients = Array.isArray(opts.playerRecipients) ? Utils.uniqueNames(opts.playerRecipients) : [];
             if (playerRecipients.length) {
-                const nativeButton = prepared.text.match(/^~([^|]+)\|(.+)$/);
-                const oneTimeCommand = nativeButton ? ('%{' + nativeButton[1] + '|' + nativeButton[2] + '}') : prepared.text;
-                const oneTime = R20.createNativeRollBatchAbility([oneTimeCommand]);
+                const oneTime = R20.createNativeRollBatchAbility([prepared.text]);
                 if (oneTime && oneTime.ok && oneTime.command) {
                     const playerButton = Render.iconButtonHtml({
                         iconHtml: '&#9654;&#65039;',
@@ -1883,20 +1904,28 @@ const CombatAssistant = (() => {
             const playerId = String(data.playerId || '').trim();
             const player = playerId ? getObj('player', playerId) : null;
             const spellName = String(resolved.metadata && resolved.metadata.name || data.sourceAction || resolved.macro.name || 'Spell').trim();
+            const characterId = String(data.casterCharacterId || (resolved.sourceToken && resolved.sourceToken.get('represents')) || '').trim();
+            const targetCharacterId = String(targetToken && Utils.isFunction(targetToken.get) ? targetToken.get('represents') || '' : '').trim();
+            const executionOptions = {
+                spellName,
+                selectedCharacterId: characterId,
+                targetCharacterId
+            };
             if (opts.phase === 'apply') {
-                const characterId = String(data.casterCharacterId || (resolved.sourceToken && resolved.sourceToken.get('represents')) || '').trim();
+                const prepared = this.prepareCommand(rendered, executionOptions);
+                if (!prepared.clientRequired) return this.sendCommand(rendered, executionOptions);
                 const character = characterId ? getObj('character', characterId) : null;
                 const playerRecipients = R20.getTokenControllers(resolved.sourceToken, character, {
                     expandAll: true,
                     excludeGm: true,
                     fallbackPlayerId: playerId
                 }).names;
-                return this.sendApplyCards(rendered, { spellName, macroTemplate: command, playerRecipients });
+                return this.sendInteractiveApplyCards(rendered, Object.assign({}, executionOptions, { spellName, macroTemplate: command, playerRecipients }));
             }
             const recipient = String(opts.recipient || (player && Utils.isFunction(player.get)
                 ? (player.get('_displayname') || player.get('displayname') || '')
                 : '') || 'GM').trim() || 'GM';
-            return this.sendCommand(rendered, { recipient, spellName });
+            return this.sendCommand(rendered, Object.assign({}, executionOptions, { recipient }));
         },
 
         executeApply(payload, targetToken, options) {
