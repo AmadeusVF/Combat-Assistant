@@ -379,6 +379,7 @@ const CombatAssistant = (() => {
         REVEAL_DAMAGE_SOURCE: true,
         REVEAL_TOKEN_NAMES_IN_LOG: true,
         CHAT_BACKGROUND_IMAGE_URL: DEFAULT_CARD_CONFIG.bodyImageUrl,
+        CONCENTRATION_MARKER: 'stopwatch',
         APPLY_CONDITION_MARKER: false
     }, CONDITION_NAMES.reduce((markers, name) => {
         markers[conditionSettingKey(name)] = 'sheet-' + name.toLowerCase();
@@ -430,6 +431,7 @@ const CombatAssistant = (() => {
             key: conditionSettingKey(name), page: 'markers', label: name, type: 'marker',
             tip: 'Roll20 token marker name/tag for ' + name + '. Must exist in the campaign to render.'
         })),
+        { key: 'CONCENTRATION_MARKER', page: 'markers', label: 'Concentration', type: 'marker', tip: 'Roll20 token marker name/tag used while a token is concentrating. Default: stopwatch.' },
 
         { key: 'TURN_TRACKER', page: 'turn', label: 'Turn Tracker', type: 'boolean', tip: 'Track combat rounds and current turns from the Roll20 Turn Order.' },
         { key: 'EFFECT_TRACKER', page: 'turn', label: 'Effect Tracker', type: 'boolean', tip: 'Track temporary save-based conditions and show due repeat-save controls on the affected token Turn Card.' },
@@ -12340,7 +12342,7 @@ const CombatAssistant = (() => {
                 .indexOf(safeMarker) >= 0;
         },
 
-        resolveConditionMarkerTag(name) {
+        resolveTokenMarkerTag(name) {
             const wanted = String(name || '').trim();
             if (!wanted) return '';
             try {
@@ -12376,7 +12378,7 @@ const CombatAssistant = (() => {
             const targetClaims = allClaims[targetId] = State.isRecord(allClaims[targetId]) ? allClaims[targetId] : {};
             const applied = [];
             consequences.conditions.filter((condition) => CONDITION_NAMES.indexOf(condition) >= 0).forEach((condition) => {
-                const marker = this.resolveConditionMarkerTag(RuntimeConfig.get(conditionSettingKey(condition)));
+                const marker = this.resolveTokenMarkerTag(RuntimeConfig.get(conditionSettingKey(condition)));
                 if (!marker) return;
                 let claim = targetClaims[marker];
                 const exists = this.tokenHasStatusMarker(token, marker);
@@ -12665,7 +12667,13 @@ const CombatAssistant = (() => {
             const endsWhenTargetOutOfRange = !!(concentrationRange.ok && concentrationRange.limited &&
                 this.concentrationEndsWhenTargetOutOfRange(spellMetadata.description || request.payload.description || ''));
             const trackingProfile = this.concentrationTrackingProfile(request, null, null);
-            this.setTokenStatusMarker(casterToken, 'stopwatch', true);
+            const concentrationMarker = this.resolveTokenMarkerTag(RuntimeConfig.get('CONCENTRATION_MARKER'));
+            const concentrationMarkerPreExisting = !!(concentrationMarker && this.tokenHasStatusMarker(casterToken, concentrationMarker));
+            let concentrationMarkerOwned = false;
+            if (concentrationMarker && !concentrationMarkerPreExisting) {
+                this.setTokenStatusMarker(casterToken, concentrationMarker, true);
+                concentrationMarkerOwned = this.tokenHasStatusMarker(casterToken, concentrationMarker);
+            }
             request.payload.casterTokenId = casterTokenId;
             request.concentrationAreaActive = true;
             request.concentrationCasterTokenId = casterTokenId;
@@ -12679,6 +12687,8 @@ const CombatAssistant = (() => {
                 priorTooltip,
                 priorShowTooltip,
                 priorGmOnlyTooltip,
+                concentrationMarker,
+                concentrationMarkerOwned,
                 markerTokenIds: State.getPlayerActionMarkerIds(request),
                 targetTokenIds: [],
                 endsWhenTargetOutOfRange,
@@ -12726,7 +12736,11 @@ const CombatAssistant = (() => {
                         tooltip: String(entry.priorTooltip || '')
                     });
                 } catch (ignored) {}
-                this.setTokenStatusMarker(token, 'stopwatch', false);
+                const concentrationMarker = String(entry.concentrationMarker || 'stopwatch').trim();
+                const concentrationMarkerOwned = entry.concentrationMarkerOwned === undefined
+                    ? true
+                    : Utils.toBoolean(entry.concentrationMarkerOwned, false);
+                if (concentrationMarker && concentrationMarkerOwned) this.setTokenStatusMarker(token, concentrationMarker, false);
             }
             const request = State.getPlayerActionRequest(entry.actionId);
             if (request) {
@@ -12800,7 +12814,6 @@ const CombatAssistant = (() => {
             const entry = State.getConcentrationByTokenId(tokenId);
             const damageTaken = Math.max(0, Utils.toInt(result && result.totalDamage, 0));
             if (!entry || damageTaken <= 0) return false;
-            if (!this.tokenHasStatusMarker(token, 'stopwatch')) return false;
             const dc = this.concentrationDamageDc(damageTaken);
             const damageType = this.concentrationDamageTypeFromResult(result);
             const payload = {
@@ -19679,14 +19692,19 @@ const CombatAssistant = (() => {
                 saveAbility,
                 halfOnSuccess: !!safeData.halfOnSuccess,
                 halfOnSuccessKnown: !!safeData.halfOnSuccessKnown,
+                effectOnly: !!safeData.effectOnly,
+                saveConsequences: safeData.saveConsequences || null,
                 damageRolls,
                 sourceName: CombatService.getTokenName(sourceToken),
                 sourceAction: String(safeData.sourceAction || safeData.attackName || 'NPC Attack'),
                 sourceImgsrc: String(sourceToken.get('imgsrc') || safeData.sourceImgsrc || ''),
+                sourceDescription: String(safeData.sourceDescription || ''),
                 rangeText: String(safeData.rangeText || safeData.range || ''),
                 durationText: String(safeData.durationText || safeData.duration || ''),
                 isSpellAction: !!safeData.isSpellAction,
+                spellLevel: Math.max(0, Utils.toInt(safeData.spellLevel, 0)),
                 isConcentration: !!safeData.isConcentration,
+                nativeActionRowId: String(safeData.nativeActionRowId || '').trim(),
                 lightInfo: safeData.lightInfo && safeData.lightInfo.hasLight ? safeData.lightInfo : { hasLight: false },
                 areaInfo,
                 areaOptions: Array.isArray(safeData.areaOptions) && safeData.areaOptions.length ? safeData.areaOptions : R20.getAreaInfoOptions(areaInfo),
