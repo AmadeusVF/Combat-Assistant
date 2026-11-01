@@ -17474,7 +17474,7 @@ const CombatAssistant = (() => {
         MAX_STORE_BYTES: 9500000,
         SHEET_WORKER_TIMEOUT_MS: 2500,
         SPELL_SLOT_TRACKING_TTL_MS: 120000,
-        AUTO_HIT_SEQUENCE_SETTLE_MS: 2200,
+        AUTO_HIT_SEQUENCE_SETTLE_MS: 1000,
 
         spellSlotTrackingKey(playerId, characterId) {
             const safePlayerId = String(playerId || '').trim();
