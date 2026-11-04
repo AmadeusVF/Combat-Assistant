@@ -1,293 +1,128 @@
-# Combat Assistant
+# T&T - Combat Assistant
 
-**Combat Assistant** is a lightweight Roll20 Mod script for D&D 5e that automates common combat bookkeeping directly from chat while keeping Roll20's normal character sheets, tokens, and Turn Order at the center of play.
+**Author:** [AmadeusVF](https://app.roll20.net/users/15900768/amadeusvf)  
+**Version:** 1.2.16  
+**System:** Dungeons & Dragons 5E — Roll20 D&D 2014 & D&D 2024
 
-It can read attacks, damage, healing, saving throws, initiative, character resources, spell slots, attacks, and spells from compatible D&D 5e sheets; resolve damage against token defenses; manage concentration and area effects; and turn Roll20's Turn Order into an interactive turn-by-turn combat interface.
+Combat Assistant is a Roll20 Mod script designed to automate combat bookkeeping while keeping the GM in control.
+It reads attacks, damage, healing, saving throws, initiative, spells, resources, and other information directly from supported Roll20 D&D character sheets and turns that information into interactive combat tools.
 
-> Combat Assistant was originally extracted from the abandoned **Trinkets & Trackers v1.3.8** codebase. It now continues as a standalone combat-focused script and is designed to work especially well alongside the new **Trinkets & Trackers v2.3.0**.
-
-**Current version:** `1.2.8`  
-**Author:** [AmadeusVF](https://www.patreon.com/cw/AmadeusVF/home)
-
----
-
-## Contents
-
-- [Overview](#overview)
-- [Main Features](#main-features)
-- [Turn Tracker](#turn-tracker)
-- [Resources](#resources)
-- [Combat List](#combat-list)
-- [Spell List](#spell-list)
-- [Damage, Healing & Defenses](#damage-healing--defenses)
-- [Saving Throws & Initiative](#saving-throws--initiative)
-- [Player Combat Controls](#player-combat-controls)
-- [Area Effects](#area-effects)
-- [Concentration](#concentration)
-- [Combat Visual Effects](#combat-visual-effects)
-- [Compatibility](#compatibility)
-- [Installation](#installation)
-- [Quick Start](#quick-start)
-- [Commands](#commands)
-- [Configuration](#configuration)
-- [Token Bar Configuration](#token-bar-configuration)
-- [Animated Tokens](#animated-tokens)
-- [Trinkets & Trackers](#trinkets--trackers)
-- [Notes](#notes)
+Instead of replacing Roll20's normal combat system, Combat Assistant works around it: players can continue rolling from their character sheets while the script handles many of the repetitive tasks that normally follow those rolls.
 
 ---
+## What's New in v1.2.16
 
-# Overview
+- **Settings footer:** Default, Recommended, and the pale-green **Language Template** each occupy an equal third of the available footer width. Language Template opens the [current language template](https://amadeusvf.s.gy/combat-assistant-language-template-latest).
+- **Recommended Settings preset:** a pale-blue **Recommended / Recomendado** button beside Default requests confirmation and applies only 52 requested ON/OFF flags (40 ON, 12 OFF), preserving image URLs, handout language, marker names, numbers, spell templates and macros. The exact provided preset sets the optional resource gate and both movement blockers to OFF.
+- **Healing recipient fix:** a failed resource deduction suppresses the player's Heal/Temp HP target-selection button, including stale sheet balances. A valid cast that spent its final slot can finish its already-paid resolution once. Players cannot run denied action IDs manually. The GM also receives a separate **Single Use Heal / Temp HP** target card, in addition to the normal GM review card; players with the button setting OFF still get their read-only healing roll result.
+- **Spanish localization:** the initiative-request success message is explicitly translated, Settings and help phrasing are more natural for Latin American Spanish, and Spanish GM-related wording consistently uses **DM**.
+- **Three language choices:** English (EN), Spanish (ES) and Custom (CUS) from Settings → Extra → Language. French can be loaded using the supplied JSON in the `CA Language` handout under Custom.
+- **Narrative localization:** Dash, Disengage and Dodge actions, resource depletion (`No uses remain.`), combat misses, conditions and resource usage now use complete translated sentences rather than ambiguous word substitutions.
+- **Attack descriptions:** Melee Attack, Ranged Attack, and Range Attack display in the selected language without changing underlying attack classifications or Roll20 commands.
+- **Optional resource gate:** Settings > Resources > **Block Without Resources** (Spanish: **Bloquear sin recursos**, default OFF) hides depleted-resource Roll/ATK/Heal player controls, including prompts from captured native rolls. GM review/resolution cards remain available; rejected casts do not expose player ATK/Heal buttons; valid once-paid final-slot casts can still be resolved.
+- **Turn Tracker movement locks:** **Turn Movement Blocker** and **Movement Consumed Blocker** (both default OFF) use individual token `lockMovement` for player-controlled initiative tokens outside their turn or after spending their speed. CA applies off-turn locks as soon as it writes native initiative results to Turn Order; manual Turn Order changes use the Roll20 event handler. Dash can restore available movement; CA locks are cleared when tokens leave initiative, settings are disabled or combat ends. Does not pause campaign movement globally.
+- **Compatibility:** Persistent schema **7**, original gameplay logic and existing ON/OFF/+ /X button geometry are unchanged. The French JSON is included as a reference, not a required installation step.
 
-Combat Assistant is intended to reduce the amount of time a GM and players spend opening character sheets, manually changing HP, checking AC, tracking resources, resolving saving throws, counting movement, and moving through the Turn Order.
+### Block Without Resources
 
-It does **not** replace Roll20's normal combat tools.
+In **`!ca settings` → Resources**, enable **Block Without Resources** to replace CA's unavailable player Roll/DMG/ATK/Heal/Cast/Send controls with a short localized “Out of resources” notice. This checks sheet resource balances, appropriate spell slots (including upcasting and Pact Magic), and known item charge costs. The setting defaults **OFF**, operates independently from automatic consumption, and never restricts GM controls. It does not disable buttons native to the Roll20 character sheet or already-rendered chat buttons; refresh CA cards after changing resource totals. A cast that legally spent its final slot retains its resulting target-resolution controls for one authorized use. The GM receives an independent Heal/Temp HP single-use card as well as their general healing review card.
 
-Instead, it builds automation around them:
+## Languages (English, Spanish, and Custom JSON)
 
-- Roll20 chat remains the source of normal attack, damage, healing, and spell rolls.
-- Roll20 tokens remain the physical representation of creatures.
-- Roll20 token bars remain available for HP, AC, and Temporary HP.
-- Roll20's Turn Order remains the initiative tracker.
-- Character sheets remain the source of attacks, spells, resources, saving throws, initiative, and defenses.
+- English is the default and **Spanish is built in**. French and other languages use the **Custom** handout.
+- Open **`!ca settings` → Extra → Language**, and select `English`, `Español`, or `Custom` using the compact `EN`/`ES`/`CUS` control.
+- For French or another language, create a Roll20 Journal handout named **`CA Language`**, place a valid translation JSON in **Notes**, and choose **Custom**. The supplied French JSON can be used directly in the handout. If a campaign previously selected built-in FR, it defaults to EN until a supported language is selected.
+- To reload an edited handout, select **Custom** again; it also reloads on sandbox startup. Invalid JSON leaves the previous language intact.
+- External translations use native English text keys; preserve `{source}`, `{target}`, `{amount}` and other placeholders. Unknown translations fall back to English.
+- User-supplied character, player, attack, spell, item and macro names, as well as Roll20 commands, remain untranslated.
+- Translated buttons, Settings and titles adapt font size to their available space, with wrapping for longer labels. **ON/OFF remain universal and untranslated** (32×15 px); English retains its existing layout.
+- Spell preparation labels (`Level`, `Prepared`, `Unprepared`, `Slots`) and standard D&D damage types are localized in cards, tooltips and selectors; the values passed to Roll20 remain the canonical English identifiers.
+- Spanish terminology was reviewed for D&D usage (`Save` is a saving throw, not an instruction to save a file), with natural spell and combat narratives. Narrow columns display readable abbreviations and full translated tooltips; the supplied French JSON follows the same rules.
+- All Settings menus use flexible label columns and a fixed 36px control cell, avoiding premature text wrapping in translated languages. Marker settings reserve a separate value cell.
+- Main-menu controls also localize **Dmg → Daño**, **Init → Iniciar**, **Sheet → Hoja**, **Turn Card → Tarjeta de Turno** and **Next Turn → Siguiente Turno** (Spanish); `Conc.` stays `Conc.`. Icons and button sizes remain fixed.
+- Expanded CA-owned tooltip translations in built-in Spanish and Custom French, including contextual prompts and dice-roll details. Player/character/spell/attack names remain native.
 
-Combat Assistant connects those systems and adds a layer of automation on top.
 
----
+## Changes Since the Earlier One-Click Release
 
-# Main Features
+This update builds on the previously published **v1.2.8**. All improvements between those versions are included; versions 1.2.9–1.2.14 were not published as separate One-Click entries in the upstream Roll20 repository.
 
-### Combat automation
+- **Compact Sheet:** `!ca sheet` offers a token-bound character overview with HP/AC, attributes, saving throws, skills, initiative, and common turn actions.
+- **Special Actions:** `!ca combat-special` provides a unified menu for Bonus Actions, Reactions, Free Actions, Legendary Actions, and Mythic Actions when available on the supported sheet.
+- **Prepared Spells:** The Spells menu links to a preparation manager with ON/OFF controls, locked Always Prepared / item-granted entries, and prepared counts. Supports native 2014 and 2024 preparation data where available.
+- **Prepared-only filtering:** The 2024 Spells menu honors the supported sheet preference and the stricter **2024 Prepared Spells Only** Combat Assistant setting. The preparation manager still displays unprepared spells so they can be enabled.
+- **Magic-item spells:** Improved 2024 identification of spells supplied by items and supported charge consumption, using verifiable native Roll20 IDs rather than spell names alone.
+- **Spell resource tracking:** Improved attribution of class Spell Slots, item charges, and linked spell uses; ambiguous casts are not charged automatically. Requires **Chat Monitoring** and **Consume Spell Slots** where applicable.
+- **Auto-hit spells:** Improved correlation of native 2024 multi-projectile rolls such as *Magic Missile*, including deduplication and safer cast-level inference. The latest build uses a **1-second inactivity window** after the final detected projectile; this timing should be tested in live campaigns, especially with upcast spells or network delays.
+- **Concentration and actions:** Improved correlation of concentration follow-up damage, native action identifiers, and repeated actions such as *Witch Bolt*.
+- **Menus and controls:** Unified character-title presentation for Combat, Special Actions, Spells and Prepared Spells, with 30×30 token portraits and centered Back/Book controls. Corrected the appearance of locked preparation buttons.
+- **Reliability and maintenance:** Improved ownership checks on imported tokens, legacy/2024 roll handling, Settings validation, and removal of redundant internal code.
 
-- Reads Roll20 attack, damage, healing, and spell rolls.
-- Generates compact combat action cards.
-- Resolves attacks against the target's configured AC bar.
-- Applies damage and healing to selected tokens.
-- Supports Temporary HP.
-- Reads compatible sheet resistances, immunities, and vulnerabilities.
-- Can request or roll saving throws.
-- Supports half damage on successful saves.
-- Supports critical attacks and multi-part damage.
-- Can keep token names private in public combat logs.
-
-### Turn management
-
-- Tracks the active combatant from Roll20's Turn Order.
-- Tracks combat rounds.
-- Generates a Turn Card for the active token.
-- Lets controlled players advance their own turn.
-- Can automatically focus the table on the current combatant.
-- Supports a configurable visual Turn Marker.
-- Can track movement and Dash.
-- Can remove defeated NPCs from the Turn Order.
-- Can process finite concentration durations on turns.
-
-### Character access
-
-- Lists attacks without opening the character sheet.
-- Lists combat spells without opening the character sheet.
-- Displays limited resources and spell slots.
-- Lets resources be spent or recovered from chat.
-- Supports both player-controlled characters and NPC workflows.
-
-### Area combat
-
-- Creates movable Roll20 area markers.
-- Supports circular/radius areas.
-- Supports squares and cubes.
-- Supports cones.
-- Supports lines.
-- Can keep area markers active until all saving throws finish.
-- Can preserve concentration-based area markers.
-- Can perform range checks from the caster.
-
-### Visual feedback
-
-- Optional Roll20 FX for damage.
-- Optional projectile FX.
-- Optional area-hit FX.
-- Healing and Temporary HP FX.
-- Customizable marker images and chat background.
+The **persistent state schema remains version 7**. Updating the script does not require a separate state schema migration, but test a new release in a copy of your campaign before replacing a working version.
 
 ---
+## Installation and First Use
 
-# Turn Tracker
+1. Add **T&T - Combat Assistant** from Roll20's Mod (One-Click) library in a game with Mod API access, or install the matching JavaScript version manually. Use only **one active copy** of Combat Assistant.
+2. Select a token that represents a character using the official Roll20 D&D 2014 or 2024 sheet.
+3. Enter `!ca menu` in chat; use `!ca settings` to review the features you want enabled.
+4. Try `!ca sheet`, `!ca combat`, `!ca spells`, and `!ca resources` with a supported token selected.
+5. For automatic spell-resource tracking, configure **Chat Monitoring** and **Consume Spell Slots**, and verify the applicable sheet's native resource behavior.
 
-The **Turn Tracker** turns Roll20's normal Turn Order into an interactive combat flow.
-
-When combat is active, Combat Assistant identifies the token whose turn is currently at the top of the Turn Order and can generate a dedicated **Turn Card** for that creature.
-
-The Turn Card can provide access to:
-
-**Dash · Disengage · Dodge · Combat · Spells**
-
-Depending on configuration, it can also show limited resources and spell slots.
-
-Players can use **Next** to finish a turn they control. Combat Assistant advances Roll20's Turn Order, updates the active combatant, refreshes the Turn Card, and keeps track of the current round.
-
-The GM retains full control and can manually remove turns or stop the active combat.
-
-## Turn Tracker settings
-
-| Setting | Description |
-| --- | --- |
-| **Turn Tracker** | Enables Combat Assistant's turn management system. Tracks the current combatant and rounds directly from Roll20's Turn Order and generates Turn Cards during combat. |
-| **Turn Auto Focus** | Automatically pings and moves everyone's view to the token whose turn has just started. |
-| **Turn Token Action** | Adds quick action controls to the Turn Card, including **Dash, Disengage, Dodge, Combat, and Spells**. |
-| **Turn Movement Tracker** | Tracks how much movement the active token spends during its turn. Warns the player and GM when the token exceeds its available speed, while Dash increases the movement allowance automatically. |
-| **Conc. Turn Tracker** | Connects finite concentration duration to the Turn Tracker. Remaining turns decrease when the concentrating creature reaches its turn and concentration ends automatically at zero. |
-| **Round Counter** | Tracks combat rounds and shows the GM a Round Counter card containing the tokens currently participating in combat. |
-| **Public Round Counter** | Also displays the Round Counter publicly to the players. Requires **Round Counter**. |
-| **Remove NPC Dead Tokens** | Automatically removes defeated unlinked NPCs from the Turn Order at 0 HP. When disabled, the GM receives a manual **Remove** control. |
-| **Turn Marker** | Places a visual marker around the token whose turn is currently active. |
-| **Turn Marker Token Public** | Controls whether the Turn Marker is visible to everyone or remains on the GM layer. |
-| **Turn Marker Token Image** | Sets the Roll20 image or animated asset used by the Turn Marker. |
-| **Turn Marker Token Size %** | Controls how much larger the marker is than the active token. `20` means 20% larger. |
-| **Turn Marker Follow** | Keeps the marker centered and scaled when the current token moves or is resized. |
+For complete integration with linked D&D 2024 Beacon character data, Roll20's **Experimental API Sandbox** is recommended. If Beacon-specific data is unavailable, supported 2014 and unlinked-token features can still operate in compatibility mode.
 
 ---
+## Main Features
 
-# Resources
+### Attack & Damage Automation
 
-Combat Assistant can read limited-use character resources and spell slots and display them directly in chat.
+Combat Assistant monitors supported Roll20 attack and damage rolls and creates interactive action cards for the GM.
 
-This is especially useful during combat because the GM or player can see relevant resources without repeatedly opening the character sheet.
+It can:
+- Compare attacks against the target's AC.
+- Apply damage directly to selected tokens.
+- Handle multiple damage types.
+- Apply damage from saving throw effects.
+- Support half damage on successful saves.
+- Process critical attacks.
+- Apply manual damage when needed.
+- Display public combat results and damage sources.
+- Optionally hide token names from public combat logs.
 
-Examples include resources such as class features, limited-use abilities, and spell slots when they are exposed by the supported sheet.
+### Damage Resistances, Immunities & Vulnerabilities
 
-Resource controls can also adjust the current amount and report the remaining value.
+Combat Assistant can read damage traits from supported character sheets and automatically modify incoming damage.
 
-## Resource settings
+Supported behavior includes:
+- Resistance.
+- Immunity.
+- Vulnerability.
+- Multiple damage types in the same attack.
+- Temporary HP before normal HP damage.
 
-| Setting | Description |
-| --- | --- |
-| **Show Player Resources** | Shows the active player-controlled token's limited resources and spell slots directly on its Turn Card. |
-| **Show NPC Resources** | Shows limited resources and spell slots for NPCs on the GM's Turn Card only. |
-| **Player Public Usage** | When enabled, player resource use/recovery updates are sent to public chat. When disabled, they remain private. |
-
-Resources can also be opened independently:
-
-```text
-!ca resources
-!ca resources <sheet name>
-```
-
----
-
-# Combat List
-
-Combat Assistant can build an attack list directly from a character sheet.
-
-```text
-!ca combat
-```
-
-With a token selected, the command opens the combat list for that character.
-
-You can also open a specific sheet by name:
-
-```text
-!ca combat <sheet name>
-```
-
-The combat list is designed to give quick access to sheet attacks without requiring the user to keep the full character sheet open during every turn.
-
-When **Turn Token Action** is enabled, the active creature's Turn Card includes a **Combat** button that opens this list directly.
+This allows attacks such as Fire, Cold, Slashing, Necrotic, Radiant, Psychic, Force, and other standard D&D damage types to be resolved automatically.
 
 ---
+## Healing & Temporary HP
 
-# Spell List
+Healing rolls can be captured directly from Roll20 and converted into interactive healing actions.
 
-Combat Assistant can also read and display combat spells from compatible character sheets.
+Combat Assistant supports:
+- Normal HP healing.
+- Temporary HP.
+- Manual healing.
+- Healing multiple selected targets.
+- Player-controlled healing buttons when enabled.
+- Public or private healing results.
 
-```text
-!ca spells
-```
-
-or:
-
-```text
-!ca spells <sheet name>
-```
-
-The spell interface can expose relevant spell information and casting controls while using the underlying Roll20 sheet for the actual character data.
-
-Spell-slot information can be integrated with the Resource system.
-
-When **Turn Token Action** is enabled, the active creature's Turn Card includes a **Spells** button for direct access.
+**Healing privacy:** Combat Logs never reveal a target's previous/current/maximum HP or Temporary HP totals. With **Settings → Privacy → Hide Damage Details** OFF, they show the effective healing amount (e.g. *Healer heals 8 Hit Points to Target using Healing Word*); ON hides the amount. **Reveal Damage Source in Log** controls the healer/ability, and **Hide Combat Log** only changes delivery to a GM whisper. Public logs never include a healing rollbox; private GM rollboxes appear only when details are visible. GM-only manual healing summaries remain private. This does not suppress native Roll20 chat messages generated by the character sheet.
 
 ---
+## Saving Throws
 
-# Damage, Healing & Defenses
-
-Combat Assistant can process damage and healing manually or from compatible Roll20 chat rolls.
-
-## Damage
-
-Damage can be resolved against:
-
-- Armor Class
-- Saving Throw DC
-- Damage type
-- Resistances
-- Immunities
-- Vulnerabilities
-- Temporary HP
-- Current HP
-
-A direct manual example:
-
-```text
-!ca deal manual 10 Fire
-```
-
-Attack-style resolution:
-
-```text
-!ca deal manual 10 Fire 13
-```
-
-Saving throw resolution:
-
-```text
-!ca deal manual 10 Fire 13 Dexterity
-```
-
-Half damage on a successful save:
-
-```text
-!ca deal manual 10 Fire 13 Dexterity yes
-```
-
-## Healing
-
-Normal HP:
-
-```text
-!ca heal manual hp 10
-```
-
-Temporary HP:
-
-```text
-!ca heal manual temp 10
-```
-
-Combat Assistant uses the configured token bars and supported sheet APIs to keep token/sheet health behavior consistent where possible.
-
----
-
-# Saving Throws & Initiative
-
-Combat Assistant provides tools for individual and grouped saving throw / initiative workflows.
-
-```text
-!ca save <ability>
-!ca init
-```
+Combat Assistant can resolve saving throws for individual creatures or entire groups.
 
 Supported abilities:
-
 - Strength
 - Dexterity
 - Constitution
@@ -295,388 +130,474 @@ Supported abilities:
 - Wisdom
 - Charisma
 
-Depending on the sheet and configuration, Combat Assistant can either use Roll20's native sheet buttons or resolve supported rolls itself.
+Depending on the sheet and configuration, Combat Assistant can use Roll20's native rolls or roll the saving throw itself.
 
-Player-controlled tokens can optionally be asked to make their own saving throw or initiative roll.
-
-The script includes separate handling for compatible **2014** and **2024** D&D 5e sheet behavior.
-
----
-
-# Player Combat Controls
-
-Combat Assistant can generate actionable buttons for players when compatible chat rolls are detected.
-
-## Player Attack Button
-
-Captured attacks can be sent to the controlling player. The player can select a target and Combat Assistant can resolve the attack against its AC and apply damage.
-
-## Player Healing Button
-
-Captured healing can be sent to the controlling player so they can choose a target and apply the healing.
-
-## Player Manual Roll
-
-Player-controlled tokens can be asked to make their own saving throws or initiative rolls when Roll20 exposes a usable sheet roll.
-
-## Player Target Range Check
-
-Generated player actions can validate the distance between the acting token and the chosen target.
+It supports:
+- Normal rolls.
+- Advantage.
+- Disadvantage.
+- Group saving throws.
+- Player-controlled saving throws.
+- Saving throw damage.
+- Automatic success/failure comparison against a DC.
 
 ---
+## Initiative
 
-# Area Effects
-
-Combat Assistant can create movable area-marker tokens for compatible area spells and actions.
-
-The player places the marker on the tabletop and presses **Roll**. Combat Assistant then determines which tokens are inside the affected area.
-
-Supported area handling includes:
-
-- Radius / circular areas
-- Spheres
-- Cylinders
-- Squares
-- Cubes
-- Cones
-- Lines
-- Emanation-style areas where detectable
-
-Area markers can use custom Roll20-hosted images and configurable opacity.
-
-## Area options
-
-### Keep Marker Until Rolls Finish
-
-Keeps the marker visible while affected creatures are still resolving saving throws and damage.
-
-### Marker Free Movement
-
-Allows the marker to move freely. When disabled, applicable markers can use grid-oriented positioning behavior.
-
-### Area Range Checking
-
-Combat Assistant can restrict marker placement based on the caster's range.
-
-### Multiple detected areas
-
-When an action exposes multiple possible area interpretations, Combat Assistant can create alternatives and let the user keep the relevant marker.
-
----
-
-# Concentration
-
-Combat Assistant includes concentration tracking for compatible spell workflows.
+Combat Assistant includes group initiative tools for both D&D 2014 and D&D 2024 characters.
 
 It can:
-
-- Record the concentrating caster.
-- Keep compatible concentration area markers active.
-- Request concentration checks when the caster takes damage.
-- Provide controls to inspect or end concentration.
-- Remove linked area markers when concentration ends.
-- Optionally track finite concentration durations through the Turn Tracker.
-
-Useful command:
-
-```text
-!ca conc
-```
-
-When **Conc. Turn Tracker** is enabled, finite durations can count down as the concentrating creature reaches its turns.
+- Roll initiative for selected tokens.
+- Read initiative bonuses from character sheets.
+- Handle multiple tokens at once.
+- Use Roll20 native initiative rolls when appropriate.
+- Roll initiative directly through Combat Assistant when configured.
+- Automatically update the Roll20 Turn Order.
 
 ---
+# Turn Tracker
 
+Combat Assistant includes a complete Turn Tracker built around Roll20's Turn Order.
+
+When combat begins, the script can automatically track:
+- Current turn.
+- Combat rounds.
+- Tokens participating in combat.
+- Player-controlled turns.
+- NPC turns.
+- Concentration duration.
+- Movement.
+- Limited resources.
+- Spell slots.
+
+Players can receive their own Turn cards while the GM retains control of the complete combat.
+
+---
+## Turn Controls
+
+Turn cards can provide quick access to:
+- **Next Turn**
+- **Focus**
+- **Dash**
+- **Disengage**
+- **Dodge**
+- **Compact Sheet**
+- **Combat**
+- **Special Actions**
+- **Spells**
+
+The Combat and Spells buttons open information directly from the current character's sheet without requiring the player or GM to constantly open the character sheet.
+
+---
+## Round Counter
+
+Combat Assistant can automatically count combat rounds.
+
+The Round Counter can:
+- Track when a complete round has finished.
+- Display the current round.
+- Show creatures participating in combat.
+- Whisper the information to the GM.
+- Optionally display the Round Counter publicly.
+
+---
+## Turn Marker
+
+Combat Assistant can spawn a visual marker around the creature whose turn is currently active.
+
+The marker can:
+- Automatically move between turns.
+- Follow the active token.
+- Resize itself based on the token size.
+- Remain GM-only.
+- Optionally be visible to players.
+- Use a custom Roll20-hosted image.
+
+---
+## Turn Auto Focus
+
+When enabled, Combat Assistant can automatically ping and focus the table on the token whose turn has started.
+Players can also use the Focus control during turns they control.
+
+---
+# Movement Tracker
+
+Combat Assistant can track how far the active token moves during its turn.
+
+The Movement Tracker can:
+- Read the creature's movement speed.
+- Track movement spent during the current turn.
+- Detect movement across the map.
+- Warn the player and GM when movement exceeds the available speed.
+- Reset movement when the next turn begins.
+- Increase the available movement when the creature uses **Dash**.
+
+---
+# Combat & Spell Menus
+
+Combat Assistant can read attacks and spells directly from supported character sheets.
+
+### Compact Sheet
+
+```text
+!ca sheet
+```
+
+Shows a token-bound character overview, including HP/AC, abilities, saving throws, skills, initiative and common actions. Players may open it for characters they control.
+
+### Combat
+
+```text
+!ca combat
+```
+
+Displays the attacks available to the selected character.
+
+The Combat menu can show:
+- Attack name.
+- Attack bonus.
+- Attack type.
+- Ability used.
+- Range.
+- Damage formula.
+- Damage type.
+- Saving throw DC when applicable.
+
+Attacks can be rolled directly from the chat card.
+
+### Special Actions
+
+```text
+!ca combat-special
+```
+
+Displays supported Bonus Actions, Reactions, Free Actions, Legendary Actions and Mythic Actions for the selected character. Options depend on the supported sheet's data.
+
+### Spells
+
+```text
+!ca spells
+```
+
+Displays the character's available spells organized by spell level. It can use spell information to determine casting time, range, damage, healing, saving throw, area of effect, concentration, duration and spell slots.
+
+### Prepared Spells
+
+```text
+!ca spells-prepared
+```
+
+Opens the preparation manager. It shows both prepared and unprepared entries so that preparation can be changed. **Always Prepared** or item-granted spells may have locked ON controls because their preparation status is not user-editable.
+
+For D&D 2024, the sheet's prepared-only preference and Combat Assistant's stricter **2024 Prepared Spells Only** setting control the ordinary Spells menu, **not** this management view. Cantrips are handled differently by these two filters: the native sheet preference may include them while CA's strict filter requires the prepared state.
+
+Spell entries backed by magic items use their native item/spell associations when available; ambiguous item origins or charges are not automatically guessed.
+
+---
+# Area of Effect Automation
+
+Combat Assistant can detect supported area effects from spell and attack information and create movable area markers directly on the Roll20 map.
+
+Supported area types include:
+- Radius
+- Sphere
+- Cylinder
+- Emanation
+- Cube
+- Square
+- Cone
+- Line
+
+The player or GM can position the marker and press **Roll**. Combat Assistant then determines which tokens are inside the affected area and resolves the effect against those targets.
+
+---
+## Area Markers
+
+Area markers can:
+- Scale according to the map's configured distance.
+- Detect creatures inside the area.
+- Support rotated areas.
+- Support movable cones and lines.
+- Snap to the Roll20 grid when configured.
+- Move freely when configured.
+- Use custom Roll20-hosted images.
+- Use configurable opacity.
+- Remain on the map until all affected saving throws are resolved.
+
+Self-centered effects can remain attached to the caster when appropriate.
+
+---
+# Concentration Tracker
+
+Combat Assistant can automatically track concentration spells.
+
+When a concentration spell is activated, the script can:
+- Track the concentrating creature.
+- Track the spell or effect.
+- Track remaining duration.
+- Keep persistent area markers active.
+- Request Constitution saving throws when the caster takes damage.
+- End the previous concentration effect when a new concentration spell begins.
+- Remove associated area markers when concentration ends.
+
+When **Concentration Turn Tracker** is enabled, finite concentration durations can also decrease automatically during combat turns and end when their duration reaches zero.
+
+---
+# Resource Manager
+
+Combat Assistant includes a Resource Manager for limited character abilities.
+
+It can read and display supported resources such as:
+- Class resources.
+- Limited-use abilities.
+- Character resources.
+- Spell slots.
+
+Resources can appear directly on the creature's Turn card.
+
+The system supports separate behavior for:
+- Player characters.
+- NPCs.
+- GM-only resource information.
+- Public or private resource usage.
+
+Players can use or recover supported resources directly from Combat Assistant controls. Exact native identifiers are preferred for resource deductions; when a 2024 item's charge cost or spell source cannot be established safely, the script avoids an automatic deduction rather than guessing.
+
+---
+# Player Combat Controls
+
+Combat Assistant can optionally give players more direct control over combat automation.
+
+Depending on GM configuration, players can receive buttons for:
+- Attacks.
+- Healing.
+- Saving throws.
+- Initiative.
+- Area spells.
+- Combat actions.
+- Spell lists.
+- Resources.
+- Turn controls.
+
+The GM decides which automation features are available to players.
+
+---
+## Target Range Checking
+
+Combat Assistant can optionally validate the distance between the acting token and its target.
+When enabled, generated player actions can verify that the selected target is within the action or spell's available range before resolving it.
+
+---
 # Combat Visual Effects
 
-Combat Assistant can optionally use Roll20 FX to provide visual feedback when combat actions are resolved.
+Combat Assistant can use Roll20 FX to provide visual feedback when combat actions occur.
 
-Supported visual categories include:
+Optional effects include:
+- Projectile attacks.
+- Direct hits.
+- Area damage.
+- Healing.
+- Temporary HP.
+- Explosions.
+- Beams.
+- Cone and breath effects.
+- Self-centered area effects.
 
-- Projectile effects
-- Direct-hit effects
-- Area-hit effects
-- Healing effects
-- Temporary HP effects
-- Cone / breath-style effects
-- Line / beam-style effects
-- Self-centered area effects
-
-Built-in effects can use damage-type-aware visual colors, while exact Roll20 Custom FX names can also be configured.
-
-Visual effects are optional and can be disabled without affecting combat resolution.
+Effects can use Roll20 built-in FX or compatible Custom FX. Damage types are used to select appropriate visual colors and effects where possible.
 
 ---
+# NPC Combat Management
 
-# Compatibility
+Combat Assistant also includes tools designed specifically for running groups of NPCs.
 
-Combat Assistant contains dedicated handling for compatible:
-
-- **D&D 5e 2024 Roll20 sheets**
-- **D&D 5e 2014 Roll20 sheets**
-
-The implementation detects sheet behavior and uses the appropriate Roll20 mechanisms where available.
-
-Because the two sheet generations expose data differently, not every automated workflow is necessarily identical between 2014 and 2024.
-
-Combat Assistant also uses Roll20 token bars for configurable combat data:
-
-- HP
-- AC
-- Temporary HP
+The GM can:
+- Resolve attacks against player AC.
+- Roll NPC saving throws.
+- Roll NPC initiative.
+- Access NPC Combat and Spell menus.
+- View NPC limited resources.
+- Track NPC turns.
+- Track NPC movement.
+- Remove defeated NPCs from combat automatically when configured.
 
 ---
+# D&D 2014 & D&D 2024 Support
 
-# Installation
+Combat Assistant supports both official Roll20 D&D sheet generations.
 
-1. Open the Roll20 game where you want to use Combat Assistant.
-2. Open the game's **Mod / API Scripts** area.
-3. Create a new script.
-4. Copy the contents of `combatassistant.js` into the script editor.
-5. Save the script and allow the Roll20 Mod sandbox to restart.
-6. In game chat, run:
+### D&D 2014
+
+Combat Assistant can use traditional Roll20 character attributes and native sheet rolls for attacks, saving throws, initiative, spell preparation, resources, and other combat information.
+
+### D&D 2024
+
+Combat Assistant supports Roll20's newer character sheet and Beacon sheet information.
+For the most complete D&D 2024 integration, particularly operations involving linked character-sheet values, the **Experimental API Sandbox** is recommended.
+
+Combat Assistant can continue operating in compatibility mode when Beacon-specific functionality is unavailable, allowing supported 2014 functionality, unlinked token bars, and other non-Beacon systems to remain active.
+
+---
+# HP, AC & Temporary HP Bars
+
+The GM can configure which Roll20 token bars Combat Assistant uses.
+
+Default configuration:
+- **Bar 1:** HP
+- **Bar 2:** AC
+- **Bar 3:** Temporary HP
+
+These can be changed from the Combat Assistant settings.
+When HP is linked to a supported character sheet, Combat Assistant attempts to safely update the corresponding sheet value. Unlinked NPCs can use token bars directly.
+
+---
+# Basic Commands
+
+## Main Menu
 
 ```text
 !ca menu
 ```
 
-Then open:
+Opens the Combat Assistant main menu.
+
+## Settings
 
 ```text
 !ca settings
+!ca config
 ```
 
-and confirm that the HP, AC, and Temporary HP bars match your token setup.
+Opens Combat Assistant configuration.
 
-Combat Assistant is a standalone script. Trinkets & Trackers is **not required** to run it.
-
----
-
-# Quick Start
-
-The three most useful commands after installation are:
+## Help
 
 ```text
-!ca menu
-!ca settings
 !ca help
 ```
 
-A typical setup is:
+Displays command help and current configuration information.
 
-1. Configure HP, AC, and Temporary HP token bars.
-2. Enable the desired chat/combat automation.
-3. Enable Turn Tracker.
-4. Add creatures to Roll20's Turn Order normally.
-5. Use Combat Assistant's Turn Cards, Combat list, Spell list, Resources, and action buttons during play.
+## Manual Damage
 
----
+```text
+!ca deal manual <damage> <type> <DC> <ability> <half>
+```
 
-# Commands
+Examples:
 
-## Main
+```text
+!ca deal manual 10 Fire
+!ca deal manual 10 Fire 15 Dexterity yes
+```
 
-| Command | Description |
-| --- | --- |
-| `!ca menu` | Opens the main Combat Assistant menu. |
-| `!ca help` | Shows the built-in help card. |
-| `!ca settings` | Opens Combat Assistant settings. |
-| `!ca deal manual <dmg> <type> <DC> <Attr> <half>` | Applies manual damage. Most parameters after damage are optional. |
-| `!ca heal manual <hp/temp> <value>` | Restores HP or grants Temporary HP. |
-| `!ca save <ability>` | Rolls the selected token's saving throw. |
-| `!ca init` | Rolls initiative for the selected token. |
+Applies 10 Fire damage, or requests a DC 15 Dexterity saving throw and applies half damage on success.
 
-## Combat & Spells
+## Manual Healing
 
-| Command | Description |
-| --- | --- |
-| `!ca combat` | Opens the attack list for the selected token. |
-| `!ca combat <sheet name>` | Opens the attack list for a named character sheet. |
-| `!ca spells` | Opens the spell list for the selected token. |
-| `!ca spells <sheet name>` | Opens the spell list for a named character sheet. |
-| `!ca dash` | Declares Dash for the token currently in turn. |
-| `!ca disengage` | Declares Disengage for the token currently in turn. |
-| `!ca dodge` | Declares Dodge for the token currently in turn. |
+```text
+!ca heal manual hp 10
+!ca heal manual temp 10
+```
+
+Restores 10 HP or grants 10 Temporary HP.
+
+## Saving Throw
+
+```text
+!ca save dexterity
+```
+
+Rolls a Dexterity saving throw for the selected token(s).
+
+## Initiative
+
+```text
+!ca init
+!ca player-init
+```
+
+`!ca init` handles GM/group initiative. `!ca player-init` is a controlled-token initiative shortcut for players where enabled.
+
+## Character, Combat and Spells
+
+```text
+!ca sheet
+!ca combat
+!ca combat-special
+!ca spells
+!ca spells-prepared
+!ca resources
+```
+
+The main menus use selected-token context. Where supported, `!ca combat <character name>`, `!ca spells <character name>`, and `!ca resources <character name>` are also available.
 
 ## Turn Tracker
 
-| Command | Description |
-| --- | --- |
-| `!ca turn` | Shows the Turn Card for the token currently in turn. |
-| `!ca turnnext` | Ends the current turn and advances to the next token. |
-| `!ca turnfocus` | Focuses the view on the current token. Players may use it only for a turn they control. |
-| `!ca turnstop yes` | Ends the active combat and stops the Turn Tracker. |
-
-Equivalent subcommands are also available through the `turn` route, such as:
-
 ```text
-!ca turn next
-!ca turn focus
+!ca turn
+!ca turncard
+!ca turnnext
+!ca turnfocus
+!ca turnstop yes
 ```
 
-GM-only turn-management controls include removing turns and stopping combat.
-
-## Resources
-
-| Command | Description |
-| --- | --- |
-| `!ca resources` | Shows resources for the selected token. |
-| `!ca resources <sheet name>` | Shows resources for a named character sheet. |
+These show the active turn, a Turn Card, advance or focus the tracker, and stop the active encounter according to GM/player permissions.
 
 ---
+# Command Aliases
 
+Combat Assistant supports:
+
+```text
+!combatAssistant
+!combat-assistant
+!ca
+```
+
+The shorter `!ca` alias is recommended for normal use.
+
+---
 # Configuration
 
-Combat Assistant's settings are available through:
+Combat Assistant includes configuration sections for:
+- Main combat automation.
+- Players.
+- Area effects.
+- Visual effects.
+- Turn Tracker.
+- Resources.
+- Advanced/debug options.
 
-```text
-!ca settings
-```
-
-The configuration is divided into several areas.
-
-## Main
-
-- Chat Tracking
-- Concentration Tracking
-- 2024 Combat Assistant Rolls Initiative
-- 2014 Combat Assistant Rolls
-- HP Bar
-- AC Bar
-- Temporary HP Bar
-- Damage Round Up
-- Read Sheet Resistances
-- Reveal Damage Source in Log
-- Reveal Token Names in Log
-
-## Players
-
-- Player Manual Roll
-- Player Healing Button
-- Player Attack Button
-- Player Target Range Check
-- Player Token Area Mark
-
-## Effects
-
-- Keep Marker Until Rolls Finish
-- Marker Free Movement
-- Square Marker Roll20 URL
-- Radius Marker Roll20 URL
-- Marker Opacity
-- Combat Visual Effects
-- Projectile Effect Name
-- Direct Hit Effect Name
-- Area Hit Effect Name
-
-## Turn Tracker
-
-- Turn Tracker
-- Turn Auto Focus
-- Turn Token Action
-- Turn Movement Tracker
-- Conc. Turn Tracker
-- Round Counter
-- Public Round Counter
-- Remove NPC Dead Tokens
-- Turn Marker
-- Turn Marker Token Public
-- Turn Marker Token Image
-- Turn Marker Token Size %
-- Turn Marker Follow
-
-## Resources
-
-- Show Player Resources
-- Show NPC Resources
-- Player Public Usage
-
-## Extra
-
-- Chat background image
-- Temporary advanced debugging controls
-
-Debug controls are intentionally session-only and return to their defaults when the Roll20 API sandbox restarts.
+Most features can be individually enabled or disabled, allowing the GM to decide how much automation Combat Assistant should perform. Some options apply only to one character-sheet generation; consult the option description in `!ca settings`.
 
 ---
+# Known Limitations and Upgrade Notes
 
-# Token Bar Configuration
-
-Combat Assistant can be configured to use different token bars.
-
-```text
-!ca set hpbar <1-4>
-!ca set acbar <1-4>
-!ca set tempbar <0-4>
-```
-
-Example:
-
-```text
-!ca set hpbar 1
-!ca set acbar 2
-!ca set tempbar 3
-```
-
-Temporary HP can be disabled by setting its bar to `0`:
-
-```text
-!ca set tempbar 0
-```
+- **Magic Missile timing:** The 1-second inactivity window for native 2024 projectile batches reduces the final wait but can split a cast when Roll20 takes more than one second between darts. Test with 3, 4, and 5 projectiles, particularly when upcast.
+- **Ambiguous casts:** Automatic spell-slot or item-charge deductions are intentionally skipped when cast source, cost, or level cannot be verified. Review the GM warning and adjust resources manually if necessary.
+- **Beacon updates:** Sheet-worker timing and Experimental API Sandbox differences may affect linked 2024 resources. Always test upgrades in a copy of your game.
+- **Permissions:** Player controls are restricted to supported characters and tokens the player controls; GM-only settings and actions remain GM-only.
+- **One-Click upgrades:** Earlier published versions should be preserved in the Roll20 repository. The persistent state schema stays at version 7. Changing script versions is not a campaign-state backup.
 
 ---
-
-# Animated Tokens
-
-Combat Assistant supports Roll20 animated token assets in chat interfaces.
-
-Roll20 animated library assets use formats such as WEBM, which cannot be rendered directly through a normal chat `<img>` element. Combat Assistant uses Roll20's static `sample.png` preview for those assets when displaying token portraits in cards.
-
-This lets an animated tabletop token appear as a clean static portrait in Combat Assistant's chat UI without requiring the character avatar to replace it.
-
----
-
 # Trinkets & Trackers
 
-Combat Assistant was extracted from the original **Trinkets & Trackers v1.3.8** codebase, which is now abandoned.
+Combat Assistant is part of the **Trinkets & Trackers** project.
 
-The new generation of **Trinkets & Trackers** is a separate project focused on inventory, items, shops, automation, and broader campaign systems.
-
-Combat Assistant is designed as a companion to **Trinkets & Trackers v2.3.0**. They can be used independently, but using both provides a more integrated Roll20 experience.
-
-[T&T Roll20 Forum Post](https://app.roll20.net/forum/post/12758022/t-and-t-chat-based-inventory-dynamic-shops-auto-healing-loot-and-item-automation-for-roll20-d-and-d-2024)
+Combat Assistant focuses specifically on combat automation, while Trinkets & Trackers expands the system into inventory management, items, shops, crafting, resources, token management, campaign tools, and other gameplay systems.
 
 ---
+## Links
 
-# Design Goals
+For updates, development information, and other Trinkets & Trackers projects:
 
-Combat Assistant is built around a few simple principles:
+- [Combat Assistant — Roll20 Forum](https://app.roll20.net/forum/post/12797865/script-combat-assistant-animated-combat-automated-attacks-and-spells-aoe-concentration-track-damage-and-healing-d-and-d-2014-slash-2024)
+- [AmadeusVF on Patreon](https://www.patreon.com/cw/AmadeusVF/home)
 
-- **Keep Roll20 recognizable.** Use the Turn Order, tokens, sheets, and chat instead of replacing them.
-- **Reduce bookkeeping.** Automate repetitive combat operations without taking decisions away from the GM.
-- **Keep players involved.** Give players buttons and controls for actions they are allowed to perform.
-- **Support both sheet generations.** Maintain separate handling where 2014 and 2024 behave differently.
-- **Make automation optional.** Major systems can be enabled or disabled individually.
-- **Stay lightweight.** Combat Assistant remains focused on combat instead of rebuilding the full Trinkets & Trackers feature set.
+### Final recommended/recipient update (v1.2.16)
 
----
+The **Recommended** button is on the main Settings page next to Default. Confirm Yes to apply only the boolean values of the provided preset; all non-boolean settings, macros and spell templates are preserved. The supplied preset intentionally disables the optional resource and movement blocking flags.
 
-# Notes
+The player resource gate and GM one-use healing controls are independent. When blocked, a player never receives a Heal/Temp HP targeting button, but a healing roll from a CA-generated action can still show a read-only result. The GM receives a dedicated one-use Heal/Temp HP control alongside the existing GM card. A legitimate final-slot cast remains usable once.
 
-Combat Assistant depends on information exposed by Roll20 and the active character sheet. Some custom sheets, unusual sheet configurations, or data that Roll20 does not expose in a consistent way may require manual handling.
-
-When testing new automation, start with a copy of the campaign or with disposable test tokens until the HP/AC/resource configuration has been verified.
-
-For built-in command documentation at any time, use:
-
-```text
-!ca help
-```
-
----
-
-## Author
-
-Created by **[AmadeusVF](https://www.patreon.com/cw/AmadeusVF/home)**.
-
-Combat Assistant is an independent community project for Roll20 and D&D 5e automation.
+The project includes a new focused regression test, bringing the total to **17 suites**. Validate with actual Roll20 chat and native 2014/2024 sheets before submitting the PR.
