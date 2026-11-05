@@ -3,6 +3,11 @@
   "language": "en",
   "name": "English template",
   "translations": {
+    "Reset CA State": "Reset CA State",
+    "This permanently deletes all CA settings, Spell Templates, Spell Macros, and tracked combat data. Other scripts and Roll20 handouts are not affected. Export CA Settings first if you need a backup.": "This permanently deletes all CA settings, Spell Templates, Spell Macros, and tracked combat data. Other scripts and Roll20 handouts are not affected. Export CA Settings first if you need a backup.",
+    "Combat Assistant data was cleared and default settings restored. Restart the Roll20 Mod sandbox to clear temporary in-memory data.": "Combat Assistant data was cleared and default settings restored. Restart the Roll20 Mod sandbox to clear temporary in-memory data.",
+    "Some CA-managed map locks or markers could not be released; check them manually.": "Some CA-managed map locks or markers could not be released; check them manually.",
+    "GM only: permanently clear CA state after typing CONFIRM. Export CA Settings first.": "GM only: permanently clear CA state after typing CONFIRM. Export CA Settings first.",
     " and ": " and ",
     " and falls unconscious": " and falls unconscious",
     " and rolls healing.": " and rolls healing.",
@@ -397,6 +402,7 @@
     "Language imported": "Language imported",
     "Language JSON is invalid.": "Language JSON is invalid.",
     "Language Settings": "Language Settings",
+    "Language Template": "Language Template",
     "Languages": "Languages",
     "Legendary Action": "Legendary Action",
     "Legendary Actions": "Legendary Actions",
@@ -827,6 +833,15 @@
     "{target} takes {damage}{source}.": "{target} takes {damage}{source}.",
     "{target} takes {damage}{source}{fainted}.": "{target} takes {damage}{source}{fainted}.",
     "{target} {outcome} the {ability} saving throw and takes {damage}{source}{fainted}.": "{target} {outcome} the {ability} saving throw and takes {damage}{source}{fainted}.",
-    "{target} {outcome} the {ability} saving throw.": "{target} {outcome} the {ability} saving throw."
+    "{target} {outcome} the {ability} saving throw.": "{target} {outcome} the {ability} saving throw.",
+    "Enable Spell Templates": "Enable Spell Templates",
+    "Enable Spell Macros": "Enable Spell Macros",
+    "Player Macro Buttons": "Player Macro Buttons",
+    "Use matching spell templates for area markers. When OFF, use the default marker image.": "Use matching spell templates for area markers. When OFF, use the default marker image.",
+    "Run configured Apply and End macros for matching spells. Turning this OFF preserves saved macros.": "Run configured Apply and End macros for matching spells. Turning this OFF preserves saved macros.",
+    "Show interactive spell macro buttons to the GM and players who control the caster. When OFF, show them only to the GM.": "Show interactive spell macro buttons to the GM and players who control the caster. When OFF, show them only to the GM.",
+    "Update Macro": "Update Macro",
+    "Copy the text above to edit it. In the next prompt, replace [keep] to change a field, leave [keep] to preserve it, or erase it to clear that field.": "Copy the text above to edit it. In the next prompt, replace [keep] to change a field, leave [keep] to preserve it, or erase it to clear that field.",
+    "Deleted \"{name}\".": "Deleted \"{name}\"."
   }
 }
