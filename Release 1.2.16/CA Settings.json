@@ -1,0 +1,172 @@
+{
+  "format": "Combat Assistant Settings",
+  "version": "1.2.16",
+  "schemaVersion": 7,
+  "settings": {
+    "CHAT_TRACKING": true,
+    "CONCENTRATION_TRACKING": true,
+    "PLAYER_ATTACK_BUTTON": true,
+    "COMBAT_VISUAL_EFFECTS": true,
+    "PROJECTILE_EFFECT_NAME": "ProjectileFX",
+    "DIRECT_HIT_EFFECT_NAME": "bomb",
+    "AREA_HIT_EFFECT_NAME": "burn",
+    "PLAYER_HEALING_BUTTON": true,
+    "USE_SPELL_TEMPLATES": true,
+    "USE_SPELL_MACROS": true,
+    "PLAYER_SPELL_MACRO_BUTTONS": true,
+    "PLAYER_ACTION_RANGE_CHECK": true,
+    "PLAYER_TOKEN_AREA_MARK": true,
+    "PLAYER_AREA_MARKER_KEEP_UNTIL_ROLLED": true,
+    "AREA_MARKER_FREE_MOVEMENT": false,
+    "PLAYER_MARKER_SQUARE_URL": "https://files.d20.io/images/495780883/qX3WMFpR8BUE_jjRkt9ahA/med.webm?1785389426",
+    "PLAYER_MARKER_RADIUS_URL": "https://files.d20.io/images/496265849/oZABqdFPX7aQ8PPG1HRSwg/med.webm?1785733608",
+    "PLAYER_MARKER_OPACITY": 60,
+    "PLAYER_MANUAL_ROLL": true,
+    "CA_ROLLS_INITIATIVE": true,
+    "SHEET_2014_CA_ROLLS": true,
+    "USE_ROLL20_DAMAGE_ICON": true,
+    "APPLY_ROLL20_ICON_DAMAGE_COLOR": true,
+    "TURN_TRACKER": true,
+    "EFFECT_TRACKER": true,
+    "FORCE_TURN_ORDER_POSITION": true,
+    "TURN_AUTO_FOCUS": true,
+    "TURN_FOCUS_FOR_EVERYONE": false,
+    "TURN_MOVEMENT_TRACKER": true,
+    "TURN_MOVEMENT_BLOCKER": true,
+    "MOVEMENT_CONSUMED_BLOCKER": false,
+    "SHOW_PLAYER_RESOURCES": true,
+    "SHOW_NPC_RESOURCES": true,
+    "NPC_RESOURCE_MANAGEMENT": true,
+    "CONSUME_SPELL_SLOTS": true,
+    "CONSUME_ACTION_RESOURCES": true,
+    "BLOCK_PLAYER_NO_RESOURCES": false,
+    "SHOW_PREPARED_SPELLS_ONLY_2024": true,
+    "PLAYER_PUBLIC_RESOURCE_USAGE": true,
+    "PUBLIC_PRESENTATION_CARD": true,
+    "HANDLE_ACTIONS": true,
+    "CONC_TURN_TRACKER": true,
+    "ROUND_COUNTER": true,
+    "PUBLIC_ROUND_COUNTER": false,
+    "REMOVE_NPC_DEAD_TOKENS": true,
+    "TURN_MARKER": true,
+    "PUBLIC_TURN_MARKER": true,
+    "TURN_MARKER_IMAGE_URL": "https://files.d20.io/images/495303393/qMtHmpwPrel_ZkmRDvVPHA/med.webm?1785019963",
+    "TURN_MARKER_IMG_SIZE": 20,
+    "TURN_MARKER_FOLLOW": true,
+    "TURN_MARKER_ROTATION": false,
+    "TURN_MARKER_ROTATION_STEPS": 1,
+    "TURN_MARKER_ROTATION_SPEED": 100,
+    "HP_BAR": 1,
+    "AC_BAR": 2,
+    "TEMP_HP_BAR": 3,
+    "DAMAGE_ROUND_UP": true,
+    "REQUIRE_AC_FOR_ATTACK": true,
+    "ONLY_DAMAGE_CARD": false,
+    "CONCENTRATION_TOOLTIP_GM_ONLY": false,
+    "USE_SHEET_DAMAGE_TRAITS": true,
+    "SHOW_EFFECTS_LIST": true,
+    "HIDE_COMBAT_LOG": false,
+    "HIDE_RESISTANCE_DETAILS": false,
+    "HIDE_DAMAGE_DETAILS": false,
+    "REVEAL_DAMAGE_SOURCE": true,
+    "REVEAL_TOKEN_NAMES_IN_LOG": true,
+    "CHAT_BACKGROUND_IMAGE_URL": "https://images.rawpixel.com/image_800/cHJpdmF0ZS9sci9pbWFnZXMvd2Vic2l0ZS8yMDIzLTEyL3Jhd3BpeGVsX29mZmljZV80Nl9ibGFja193YWxscGFwZXJfbW9ub2Nocm9tZV9jaGluZXNlX2RyYWdvbl8yNmY3MzllOS1mYzkwLTQ3MDEtYjdmNS01NjFmMTQwMjc1OGRfMS5qcGc.jpg",
+    "LANGUAGE": "en",
+    "CONCENTRATION_MARKER": "stopwatch",
+    "APPLY_CONDITION_MARKER": true,
+    "CONDITION_MARKER_BLINDED": "sheet-blinded",
+    "CONDITION_MARKER_CHARMED": "sheet-charmed",
+    "CONDITION_MARKER_DEAFENED": "sheet-deafened",
+    "CONDITION_MARKER_EXHAUSTION": "sheet-exhaustion",
+    "CONDITION_MARKER_FRIGHTENED": "sheet-frightened",
+    "CONDITION_MARKER_GRAPPLED": "sheet-grappled",
+    "CONDITION_MARKER_INCAPACITATED": "sheet-incapacitated",
+    "CONDITION_MARKER_INVISIBLE": "sheet-invisible",
+    "CONDITION_MARKER_PARALYZED": "sheet-paralyzed",
+    "CONDITION_MARKER_PETRIFIED": "sheet-petrified",
+    "CONDITION_MARKER_POISONED": "sheet-poisoned",
+    "CONDITION_MARKER_PRONE": "sheet-prone",
+    "CONDITION_MARKER_RESTRAINED": "sheet-restrained",
+    "CONDITION_MARKER_STUNNED": "sheet-stunned",
+    "CONDITION_MARKER_UNCONSCIOUS": "sheet-unconscious",
+    "CONDITION_MARKER_SLEEP": "sheet-sleep",
+    "HEALING_EFFECT_NAME": "sparkle",
+    "TEMP_HP_EFFECT_NAME": "sparkle"
+  },
+  "spellTemplates": {
+    "acid splash": {
+      "name": "Acid Splash",
+      "url": "https://files.d20.io/images/506443065/mxLuU1NkyyLZNgXruGBtGw/med.webm?1793860831?1793860843"
+    },
+    "cloud of daggers": {
+      "name": "Cloud of Daggers",
+      "url": "https://files.d20.io/images/506442757/vO10NoDB1BrUjWQ-a1JWhg/med.webm?1793859862?1793859883"
+    },
+    "faerie fire": {
+      "name": "Faerie Fire",
+      "url": "https://files.d20.io/images/506437736/yDd0MKhWQdqO_oLzD5gRcA/med.webm?1793851547?1793851562"
+    },
+    "fireball": {
+      "name": "Fireball",
+      "url": "https://files.d20.io/images/503584299/4rSQQPDrInbe4k4Xcc7fuA/med.webm?1791495905?1791495909"
+    },
+    "flaming sphere": {
+      "name": "Flaming Sphere",
+      "url": "https://files.d20.io/images/503856213/KOC6BiOmRDX_YP5UkBW2Gw/med.webm?1791693805"
+    },
+    "shatter": {
+      "name": "Shatter",
+      "url": "https://files.d20.io/images/506442986/NlRAuO6uaxPXg6IDH8o2kw/med.webm?1793860561?1793860569"
+    },
+    "sleep": {
+      "name": "Sleep",
+      "url": "https://files.d20.io/images/506437568/iLM3SFe1BE0ltltXirlZhg/med.webm?1793851331?1793851358"
+    },
+    "thunderclap": {
+      "name": "Thunderclap",
+      "url": "https://files.d20.io/images/506436791/uI2Vbjv6bFWm81T4tTo_EQ/med.webm?1793850252?1793850260"
+    },
+    "thunderwave": {
+      "name": "Thunderwave",
+      "url": "https://files.d20.io/images/506436791/uI2Vbjv6bFWm81T4tTo_EQ/med.webm?1793850252?1793850260"
+    }
+  },
+  "spellMacros": {
+    "dancing lights": {
+      "name": "Dancing Lights",
+      "command": "!Spawn {{ --name|Dancing Lights --qty|4 --size|0.5,0.5 --placement|burst 1 }}@{}",
+      "endCommand": "",
+      "applyOnFailure": false
+    },
+    "disguise self": {
+      "name": "Disguise Self",
+      "command": "!token-mod --set imgsrc|?^{Roll20 URL|}",
+      "endCommand": "",
+      "applyOnFailure": false
+    },
+    "hold person": {
+      "name": "Hold Person",
+      "command": "!tether target|{source}  target|{target}",
+      "endCommand": "!untether target|{source} target|{target}",
+      "applyOnFailure": false
+    },
+    "light": {
+      "name": "Light",
+      "command": "!token-mod --set emits_bright_light|on emits_low_light|on bright_light_distance|20 low_light_distance|20 --ids @{target|token_id}",
+      "endCommand": "",
+      "applyOnFailure": false
+    },
+    "sleep": {
+      "name": "Sleep",
+      "command": "!tether target|{source}  target|{target}",
+      "endCommand": "!untether target|{source}  target|{target}",
+      "applyOnFailure": false
+    },
+    "witch bolt": {
+      "name": "Witch Bolt",
+      "command": "!tether target|{source}  target|{target}",
+      "endCommand": "!untether target|{source}  target|{target}",
+      "applyOnFailure": true
+    }
+  }
+}
